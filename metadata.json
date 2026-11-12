@@ -1,0 +1,8 @@
+{
+  "name": "GESTÃO SST 1.1",
+  "description": "Sistema completo e profissional de Gestão de Saúde e Segurança do Trabalho (SST) para empresas, contratadas, colaboradores, exames (ASO), treinamentos, EPIs e documentos de conformidade.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,379 @@
+{
+  "entities": {
+    "company": {
+      "title": "Empresa Contratada",
+      "description": "Dados cadastrais e contratuais da empresa contratada ou prestadora de serviço",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "razaoSocial": { "type": "string", "maxLength": 200 },
+        "nomeFantasia": { "type": "string", "maxLength": 200 },
+        "cnpj": { "type": "string", "maxLength": 20 },
+        "responsavelLegal": { "type": "string", "maxLength": 150 },
+        "responsavelSST": { "type": "string", "maxLength": 150 },
+        "telefone": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 100 },
+        "endereco": { "type": "string", "maxLength": 300 },
+        "unidadeAtendimento": { "type": "string", "maxLength": 100 },
+        "atividadeContratada": { "type": "string", "maxLength": 250 },
+        "dataInicioContrato": { "type": "string", "maxLength": 15 },
+        "dataTerminoContrato": { "type": "string", "maxLength": 15 },
+        "situacao": { "type": "string", "enum": ["ativa", "inativa"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["razaoSocial", "cnpj", "situacao"]
+    },
+    "employee": {
+      "title": "Colaborador",
+      "description": "Ficha cadastral completa do colaborador vinculado à empresa",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "nomeCompleto": { "type": "string", "maxLength": 200 },
+        "cpf": { "type": "string", "maxLength": 20 },
+        "rg": { "type": "string", "maxLength": 30 },
+        "dataNascimento": { "type": "string", "maxLength": 15 },
+        "telefone": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 100 },
+        "matricula": { "type": "string", "maxLength": 50 },
+        "cargo": { "type": "string", "maxLength": 100 },
+        "setor": { "type": "string", "maxLength": 100 },
+        "atividadeExecutada": { "type": "string", "maxLength": 250 },
+        "unidadeAlocacao": { "type": "string", "maxLength": 100 },
+        "dataAdmissao": { "type": "string", "maxLength": 15 },
+        "dataIntegracao": { "type": "string", "maxLength": 15 },
+        "responsavelEmpresa": { "type": "string", "maxLength": 150 },
+        "situacaoCadastral": { "type": "string", "enum": ["ativo", "afastado", "ferias", "demitido"] },
+        "fotoUrl": { "type": "string", "maxLength": 500000 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["nomeCompleto", "cpf", "empresaId", "cargo", "situacaoCadastral"]
+    },
+    "document": {
+      "title": "Documento SST",
+      "description": "Documentos legais, licenças, contratos e fichas com nomes livres e fluxo de aprovação",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "nomeDocumento": { "type": "string", "maxLength": 200 },
+        "categoria": { "type": "string", "maxLength": 100 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "colaboradorId": { "type": "string", "maxLength": 128 },
+        "colaboradorNome": { "type": "string", "maxLength": 200 },
+        "numeroDocumento": { "type": "string", "maxLength": 100 },
+        "dataEmissao": { "type": "string", "maxLength": 15 },
+        "dataValidade": { "type": "string", "maxLength": 15 },
+        "semValidade": { "type": "boolean" },
+        "responsavelEnvio": { "type": "string", "maxLength": 150 },
+        "arquivoUrl": { "type": "string", "maxLength": 500000 },
+        "arquivoNome": { "type": "string", "maxLength": 200 },
+        "observacoes": { "type": "string", "maxLength": 1000 },
+        "situacao": { "type": "string", "enum": ["pendente", "aprovado", "reprovado", "vencido"] },
+        "motivoReprovacao": { "type": "string", "maxLength": 1000 },
+        "analisadoPor": { "type": "string", "maxLength": 150 },
+        "dataAnalise": { "type": "string", "maxLength": 30 },
+        "versao": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["nomeDocumento", "categoria", "empresaId", "situacao"]
+    },
+    "training": {
+      "title": "Treinamento e Capacitação",
+      "description": "Registro de capacitações e certificações com nome livre em branco",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "nomeTreinamento": { "type": "string", "maxLength": 200 },
+        "colaboradorId": { "type": "string", "maxLength": 128 },
+        "colaboradorNome": { "type": "string", "maxLength": 200 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "instituicaoResponsavel": { "type": "string", "maxLength": 200 },
+        "instrutor": { "type": "string", "maxLength": 150 },
+        "dataRealizacao": { "type": "string", "maxLength": 15 },
+        "cargaHoraria": { "type": "string", "maxLength": 30 },
+        "dataValidade": { "type": "string", "maxLength": 15 },
+        "semValidade": { "type": "boolean" },
+        "certificadoUrl": { "type": "string", "maxLength": 500000 },
+        "certificadoNome": { "type": "string", "maxLength": 200 },
+        "observacoes": { "type": "string", "maxLength": 1000 },
+        "situacao": { "type": "string", "enum": ["pendente", "aprovado", "reprovado", "vencido"] },
+        "motivoReprovacao": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["nomeTreinamento", "colaboradorId", "empresaId", "dataRealizacao"]
+    },
+    "exam": {
+      "title": "Exame Ocupacional e ASO",
+      "description": "ASO Admissional, Periódico, Demissional e complementares com sigilo médico LGPD",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "tipoExame": { "type": "string", "maxLength": 100 },
+        "colaboradorId": { "type": "string", "maxLength": 128 },
+        "colaboradorNome": { "type": "string", "maxLength": 200 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "dataRealizacao": { "type": "string", "maxLength": 15 },
+        "dataValidade": { "type": "string", "maxLength": 15 },
+        "semValidade": { "type": "boolean" },
+        "medicoResponsavel": { "type": "string", "maxLength": 150 },
+        "crmMedico": { "type": "string", "maxLength": 50 },
+        "conclusao": { "type": "string", "enum": ["apto", "inapto", "apto_com_restricoes"] },
+        "anexoUrl": { "type": "string", "maxLength": 500000 },
+        "anexoNome": { "type": "string", "maxLength": 200 },
+        "observacoes": { "type": "string", "maxLength": 1000 },
+        "situacao": { "type": "string", "enum": ["pendente", "aprovado", "reprovado", "vencido"] },
+        "motivoReprovacao": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["tipoExame", "colaboradorId", "empresaId", "dataRealizacao", "conclusao"]
+    },
+    "epiDelivery": {
+      "title": "Entrega de EPI",
+      "description": "Comprovante de fornecimento e ficha de EPI individual com CA",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "colaboradorId": { "type": "string", "maxLength": 128 },
+        "colaboradorNome": { "type": "string", "maxLength": 200 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "nomeEpi": { "type": "string", "maxLength": 150 },
+        "caNumero": { "type": "string", "maxLength": 50 },
+        "dataEntrega": { "type": "string", "maxLength": 15 },
+        "quantidade": { "type": "number" },
+        "responsavelEntrega": { "type": "string", "maxLength": 150 },
+        "assinaturaUrl": { "type": "string", "maxLength": 500000 },
+        "observacoes": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["colaboradorId", "empresaId", "nomeEpi", "caNumero", "dataEntrega"]
+    },
+    "safetyPermit": {
+      "title": "APR e Permissão de Trabalho (PT)",
+      "description": "Análise Preliminar de Risco e Permissão de Trabalho Seguro",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "tipo": { "type": "string", "enum": ["APR", "PT", "LOTO"] },
+        "titulo": { "type": "string", "maxLength": 200 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "localTrabalho": { "type": "string", "maxLength": 200 },
+        "dataInicio": { "type": "string", "maxLength": 20 },
+        "dataFim": { "type": "string", "maxLength": 20 },
+        "responsavelEmissao": { "type": "string", "maxLength": 150 },
+        "riscosIdentificados": { "type": "string", "maxLength": 2000 },
+        "medidasPreventivas": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["elaboracao", "aprovado", "em_execucao", "encerrado", "cancelado"] },
+        "anexoUrl": { "type": "string", "maxLength": 500000 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["tipo", "titulo", "empresaId", "localTrabalho", "status"]
+    },
+    "inspection": {
+      "title": "Inspeção e Auditoria SST",
+      "description": "Relatórios de inspeções de campo e auditorias de conformidade",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "tipo": { "type": "string", "enum": ["inspecao", "auditoria"] },
+        "titulo": { "type": "string", "maxLength": 200 },
+        "local": { "type": "string", "maxLength": 200 },
+        "data": { "type": "string", "maxLength": 15 },
+        "auditor": { "type": "string", "maxLength": 150 },
+        "empresaAuditadaId": { "type": "string", "maxLength": 128 },
+        "empresaAuditadaNome": { "type": "string", "maxLength": 200 },
+        "conformidades": { "type": "number" },
+        "naoConformidades": { "type": "number" },
+        "observacoes": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["planejada", "concluida", "pendente_acao"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["tipo", "titulo", "data", "status"]
+    },
+    "actionPlan": {
+      "title": "Plano de Ação SST",
+      "description": "Planos de ação 5W2H para desvios, acidentes e não conformidades",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "origem": { "type": "string", "maxLength": 100 },
+        "descricaoAcao": { "type": "string", "maxLength": 500 },
+        "responsavel": { "type": "string", "maxLength": 150 },
+        "prazo": { "type": "string", "maxLength": 15 },
+        "status": { "type": "string", "enum": ["a_iniciar", "em_andamento", "concluido", "atrasado"] },
+        "evidenciaUrl": { "type": "string", "maxLength": 500000 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["descricaoAcao", "responsavel", "prazo", "status"]
+    },
+    "environmentalDoc": {
+      "title": "Gestão Ambiental",
+      "description": "Licenças ambientais, CADRI, MTR e registros de conformidade ambiental",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "nome": { "type": "string", "maxLength": 200 },
+        "orgaoEmissor": { "type": "string", "maxLength": 150 },
+        "numeroLicenca": { "type": "string", "maxLength": 100 },
+        "dataEmissao": { "type": "string", "maxLength": 15 },
+        "dataValidade": { "type": "string", "maxLength": 15 },
+        "situacao": { "type": "string", "enum": ["valido", "em_renovacao", "vencido"] },
+        "anexoUrl": { "type": "string", "maxLength": 500000 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["nome", "orgaoEmissor", "situacao"]
+    },
+    "auditLog": {
+      "title": "Registro de Auditoria",
+      "description": "Log de todas as operações de cadastro, alteração, aprovação e exclusão",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "usuario": { "type": "string", "maxLength": 150 },
+        "usuarioEmail": { "type": "string", "maxLength": 150 },
+        "acao": { "type": "string", "maxLength": 100 },
+        "entidade": { "type": "string", "maxLength": 100 },
+        "entidadeId": { "type": "string", "maxLength": 128 },
+        "detalhes": { "type": "string", "maxLength": 2000 },
+        "dataHora": { "type": "string", "maxLength": 35 }
+      },
+      "required": ["usuario", "acao", "entidade", "dataHora"]
+    },
+    "userProfile": {
+      "title": "Perfil do Usuário",
+      "description": "Perfil de permissão e vínculo com empresa",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "cpf": { "type": "string", "maxLength": 20 },
+        "username": { "type": "string", "maxLength": 50 },
+        "email": { "type": "string", "maxLength": 150 },
+        "nome": { "type": "string", "maxLength": 150 },
+        "role": { "type": "string", "enum": ["admin", "solicitante", "auditor"] },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "passwordHash": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["cpf", "email", "role"]
+    }
+    "notificationConfig": {
+      "title": "Configuração de Notificação",
+      "description": "Regras de disparo automático de e-mails para controle de vencimentos",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "nomeRegra": { "type": "string", "maxLength": 150 },
+        "destinatarios": { "type": "array" },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "colaboradorId": { "type": "string", "maxLength": 128 },
+        "categoria": { "type": "string", "maxLength": 100 },
+        "marcos": { "type": "array" },
+        "ativo": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["nomeRegra", "ativo"]
+    },
+    "notificationLog": {
+      "title": "Histórico de Envios de Notificação",
+      "description": "Log detalhado de disparos de e-mail com controle de duplicidade e marcos de vencimento",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "dataHora": { "type": "string", "maxLength": 35 },
+        "destinatarios": { "type": "array" },
+        "documentoId": { "type": "string", "maxLength": 128 },
+        "documentoTitulo": { "type": "string", "maxLength": 200 },
+        "categoria": { "type": "string", "maxLength": 100 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "colaboradorNome": { "type": "string", "maxLength": 200 },
+        "marco": { "type": "string", "maxLength": 50 },
+        "dataVencimento": { "type": "string", "maxLength": 20 },
+        "status": { "type": "string", "enum": ["sucesso", "falha", "simulado"] },
+        "mensagem": { "type": "string", "maxLength": 1000 },
+        "erro": { "type": "string", "maxLength": 1000 },
+        "idempotencyKey": { "type": "string", "maxLength": 255 },
+        "recalculado": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["dataHora", "documentoId", "marco", "status", "idempotencyKey"]
+    }
+  },
+  "firestore": {
+    "/companies/{companyId}": {
+      "schema": "company",
+      "description": "Coleção de empresas contratadas e prestadoras de serviço"
+    },
+    "/employees/{employeeId}": {
+      "schema": "employee",
+      "description": "Coleção de colaboradores e trabalhadores terceirizados"
+    },
+    "/documents/{documentId}": {
+      "schema": "document",
+      "description": "Coleção de documentos SST com fluxo de aprovação e versionamento"
+    },
+    "/trainings/{trainingId}": {
+      "schema": "training",
+      "description": "Coleção de treinamentos, reciclagens e capacitações com nomes livres"
+    },
+    "/exams/{examId}": {
+      "schema": "exam",
+      "description": "Coleção de exames médicos ocupacionais e ASO com aptidão"
+    },
+    "/epiDeliveries/{epiDeliveryId}": {
+      "schema": "epiDelivery",
+      "description": "Histórico de fornecimento de EPI e fichas assinadas"
+    },
+    "/safetyPermits/{safetyPermitId}": {
+      "schema": "safetyPermit",
+      "description": "Coleção de APRs, Permissões de Trabalho e LOTO"
+    },
+    "/inspections/{inspectionId}": {
+      "schema": "inspection",
+      "description": "Inspeções e auditorias com contagem de não conformidades"
+    },
+    "/actionPlans/{actionPlanId}": {
+      "schema": "actionPlan",
+      "description": "Planos de ação 5W2H para correção de pendências SST"
+    },
+    "/environmentalDocs/{environmentalDocId}": {
+      "schema": "environmentalDoc",
+      "description": "Documentos e licenças de conformidade ambiental"
+    },
+    "/auditLogs/{auditLogId}": {
+      "schema": "auditLog",
+      "description": "Trilha de auditoria das operações do sistema"
+    },
+    "/userProfiles/{userProfileId}": {
+      "schema": "userProfile",
+      "description": "Configurações de perfis e permissões dos usuários do sistema"
+    },
+    "/notificationConfigs/{configId}": {
+      "schema": "notificationConfig",
+      "description": "Regras e destinatários para alertas de vencimento documental"
+    },
+    "/notificationLogs/{logId}": {
+      "schema": "notificationLog",
+      "description": "Histórico de disparos de notificação por e-mail com idempotência"
+    }
+  }
+}

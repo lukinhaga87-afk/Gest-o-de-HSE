@@ -1,0 +1,168 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connection check
+    match /test/{testId} {
+      allow read, write: if true;
+    }
+
+    // Master admin IDs and protection
+    function isMasterAdminId(id) {
+      return id == 'user-452.066.308-37' || id == 'user-543.066.308-37';
+    }
+
+    // User Profiles Collection
+    match /userProfiles/{userId} {
+      // Allow reading user profiles for authentication and platform operations
+      allow read: if true;
+
+      // Create: user profile must have mandatory fields (cpf, email, role, nome)
+      allow create: if request.resource.data.keys().hasAll(['cpf', 'email', 'role', 'nome'])
+                    && request.resource.data.cpf is string && request.resource.data.cpf.size() <= 25
+                    && request.resource.data.email is string && request.resource.data.email.size() <= 150
+                    && request.resource.data.nome is string && request.resource.data.nome.size() <= 200
+                    && request.resource.data.role in ['admin', 'solicitante', 'auditor'];
+
+      // Update: cannot modify master admin role away from admin
+      allow update: if request.resource.data.keys().hasAll(['cpf', 'email', 'role', 'nome'])
+                    && (!isMasterAdminId(userId) || request.resource.data.role == 'admin')
+                    && request.resource.data.role in ['admin', 'solicitante', 'auditor'];
+
+      // Delete: Master administrator can never be deleted
+      allow delete: if !isMasterAdminId(userId)
+                    && (resource == null || (resource.data.cpf != '452.066.308-37' && resource.data.cpf != '543.066.308-37'));
+    }
+
+    // Companies Collection
+    match /companies/{companyId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['razaoSocial', 'cnpj', 'situacao'])
+                            && request.resource.data.razaoSocial is string && request.resource.data.razaoSocial.size() <= 250
+                            && request.resource.data.cnpj is string && request.resource.data.cnpj.size() <= 30
+                            && request.resource.data.situacao in ['ativa', 'inativa'];
+      allow delete: if true;
+    }
+
+    // Employees Collection
+    match /employees/{employeeId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['nomeCompleto', 'cpf', 'empresaId', 'cargo', 'situacaoCadastral'])
+                            && request.resource.data.nomeCompleto is string && request.resource.data.nomeCompleto.size() <= 200
+                            && request.resource.data.cpf is string && request.resource.data.cpf.size() <= 25
+                            && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150
+                            && request.resource.data.cargo is string && request.resource.data.cargo.size() <= 150
+                            && request.resource.data.situacaoCadastral in ['ativo', 'afastado', 'ferias', 'demitido'];
+      allow delete: if true;
+    }
+
+    // Documents Collection
+    match /documents/{docId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['nomeDocumento', 'categoria', 'empresaId', 'situacao'])
+                            && request.resource.data.nomeDocumento is string && request.resource.data.nomeDocumento.size() <= 250
+                            && request.resource.data.categoria is string && request.resource.data.categoria.size() <= 150
+                            && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150
+                            && request.resource.data.situacao in ['pendente', 'aprovado', 'reprovado', 'vencido'];
+      allow delete: if true;
+    }
+
+    // Trainings Collection
+    match /trainings/{trainingId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['nomeTreinamento', 'colaboradorId', 'empresaId', 'dataRealizacao'])
+                            && request.resource.data.nomeTreinamento is string && request.resource.data.nomeTreinamento.size() <= 250
+                            && request.resource.data.colaboradorId is string && request.resource.data.colaboradorId.size() <= 150
+                            && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150;
+      allow delete: if true;
+    }
+
+    // Occupational Exams & ASO Collection
+    match /exams/{examId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['tipoExame', 'colaboradorId', 'empresaId', 'dataRealizacao', 'conclusao'])
+                            && request.resource.data.tipoExame is string && request.resource.data.tipoExame.size() <= 150
+                            && request.resource.data.colaboradorId is string && request.resource.data.colaboradorId.size() <= 150
+                            && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150
+                            && request.resource.data.conclusao in ['apto', 'inapto', 'apto_com_restricoes'];
+      allow delete: if true;
+    }
+
+    // EPI Deliveries Collection
+    match /epiDeliveries/{deliveryId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['colaboradorId', 'empresaId', 'nomeEpi', 'caNumero', 'dataEntrega'])
+                            && request.resource.data.nomeEpi is string && request.resource.data.nomeEpi.size() <= 200
+                            && request.resource.data.caNumero is string && request.resource.data.caNumero.size() <= 50;
+      allow delete: if true;
+    }
+
+    // Safety Permits (APR, PT, LOTO)
+    match /safetyPermits/{permitId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['tipo', 'titulo', 'empresaId', 'localTrabalho', 'status'])
+                            && request.resource.data.tipo in ['APR', 'PT', 'LOTO']
+                            && request.resource.data.titulo is string && request.resource.data.titulo.size() <= 250;
+      allow delete: if true;
+    }
+
+    // Action Plans (5W2H)
+    match /actionPlans/{actionId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['descricaoAcao', 'responsavel', 'prazo', 'status'])
+                            && request.resource.data.descricaoAcao is string && request.resource.data.descricaoAcao.size() <= 1000
+                            && request.resource.data.responsavel is string && request.resource.data.responsavel.size() <= 200
+                            && request.resource.data.status in ['pendente', 'em_andamento', 'concluido', 'cancelada', 'atrasado', 'a_iniciar'];
+      allow delete: if true;
+    }
+
+    // Inspections & Audits
+    match /inspections/{inspectionId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['tipo', 'titulo', 'data', 'status'])
+                            && request.resource.data.tipo in ['inspecao', 'auditoria']
+                            && request.resource.data.titulo is string && request.resource.data.titulo.size() <= 250;
+      allow delete: if true;
+    }
+
+    // Environmental Management
+    match /environmentalDocs/{envDocId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['nome', 'orgaoEmissor', 'situacao'])
+                            && request.resource.data.nome is string && request.resource.data.nome.size() <= 250
+                            && request.resource.data.situacao in ['valido', 'em_renovacao', 'vencido'];
+      allow delete: if true;
+    }
+
+    // Audit Logs (Strictly Append-Only: update and delete are forbidden)
+    match /auditLogs/{logId} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll(['usuario', 'acao', 'entidade', 'dataHora'])
+                    && request.resource.data.usuario is string && request.resource.data.usuario.size() <= 200
+                    && request.resource.data.acao is string && request.resource.data.acao.size() <= 150
+                    && request.resource.data.entidade is string && request.resource.data.entidade.size() <= 150;
+      allow update, delete: if false;
+    }
+
+    // Notification Configurations
+    match /notificationConfigs/{configId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['nomeRegra', 'ativo'])
+                            && request.resource.data.nomeRegra is string && request.resource.data.nomeRegra.size() <= 200;
+      allow delete: if true;
+    }
+
+    // Notification Logs (Strictly Append-Only)
+    match /notificationLogs/{logId} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll(['dataHora', 'documentoId', 'marco', 'status', 'idempotencyKey'])
+                    && request.resource.data.status in ['sucesso', 'falha', 'simulado'];
+      allow update, delete: if false;
+    }
+  }
+}
