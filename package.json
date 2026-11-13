@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@netlify/functions": "^6.1.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/nodemailer": "^8.0.2",
     "@vitejs/plugin-react": "^6.1.1",
@@ -25,6 +26,7 @@
     "nodemailer": "^10.5.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "serverless-http": "^4.0.0",
     "vite": "^8.3.0",
     "xlsx": "^0.18.5"
   },

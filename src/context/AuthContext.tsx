@@ -50,15 +50,65 @@ interface AuthContextType {
   isAdmin: boolean;
   isSolicitante: boolean;
   isAuditor: boolean;
+  apiToken: string | null;
+  getAuthHeaders: () => Record<string, string>;
+  refreshApiSession: () => Promise<string | null>;
+  authorizedFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const LOCAL_STORAGE_SESSION_KEY = 'gestao_sst_user_session';
+const LOCAL_STORAGE_API_TOKEN_KEY = 'gestao_sst_api_token';
+
+function isTokenValid(token: string | null): boolean {
+  if (!token) return false;
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(base64));
+    if (!payload?.exp) return false;
+    return payload.exp * 1000 > Date.now() + 30_000;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchApiSessionToken(payload: {
+  cpfOrIdentifier?: string;
+  password?: string;
+  userId?: string;
+  passwordHash?: string;
+}): Promise<string | null> {
+  try {
+    const resp = await fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data?.success && data?.token) {
+      localStorage.setItem(LOCAL_STORAGE_API_TOKEN_KEY, data.token);
+      return data.token;
+    }
+  } catch (err) {
+    console.warn('Não foi possível obter token de sessão API:', err);
+  }
+  return null;
+}
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [apiToken, setApiToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -74,7 +124,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const savedSession = localStorage.getItem(LOCAL_STORAGE_SESSION_KEY);
         if (savedSession) {
           const parsed = JSON.parse(savedSession) as UserProfile;
-          // If stored session belongs to the removed admin.sst or solicitante, update to Lucas Valdeci Gonçalves
           const parsedCpfClean = (parsed.cpf || parsed.username || '').replace(/\D/g, '');
           if (
             parsed.username === 'admin.sst' ||
@@ -83,6 +132,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             parsedCpfClean === '12345678900'
           ) {
             const master = DEMO_PLATFORM_ACCOUNTS[0];
+            const masterHash = await hashPassword(master.passwordPlainText);
             const masterProfile: UserProfile = {
               id: `user-${master.cpf}`,
               cpf: master.cpf,
@@ -91,18 +141,48 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               nome: master.nome,
               role: master.role,
               cargo: master.cargo,
+              passwordHash: masterHash,
             };
             setProfile(masterProfile);
             setIsAuthenticated(true);
             localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(masterProfile));
+            const refreshed = await fetchApiSessionToken({
+              userId: masterProfile.id,
+              cpfOrIdentifier: masterProfile.cpf,
+              passwordHash: masterHash,
+            });
+            if (refreshed) setApiToken(refreshed);
           } else {
-            setProfile(parsed);
+            // Ensure legacy master profiles saved without passwordHash still obtain an API token
+            let activeProfile = parsed;
+            if (
+              (parsed.id === `user-${DEMO_PLATFORM_ACCOUNTS[0].cpf}` || parsed.id === 'user-543.066.308-37') &&
+              !parsed.passwordHash
+            ) {
+              const masterHash = await hashPassword(DEMO_PLATFORM_ACCOUNTS[0].passwordPlainText);
+              activeProfile = { ...parsed, passwordHash: masterHash };
+              localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(activeProfile));
+            }
+
+            setProfile(activeProfile);
             setIsAuthenticated(true);
+            const savedToken = localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+            if (isTokenValid(savedToken)) {
+              setApiToken(savedToken);
+            } else if (activeProfile.passwordHash) {
+              const refreshed = await fetchApiSessionToken({
+                userId: activeProfile.id,
+                cpfOrIdentifier: activeProfile.cpf || activeProfile.email,
+                passwordHash: activeProfile.passwordHash,
+              });
+              if (refreshed) setApiToken(refreshed);
+            }
           }
         }
       } catch (e) {
         console.warn('Erro ao restaurar sessão local:', e);
         localStorage.removeItem(LOCAL_STORAGE_SESSION_KEY);
+        localStorage.removeItem(LOCAL_STORAGE_API_TOKEN_KEY);
       } finally {
         setLoading(false);
       }
@@ -174,6 +254,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setProfile(userProfile);
       setIsAuthenticated(true);
       localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(userProfile));
+      const token = await fetchApiSessionToken({ cpfOrIdentifier, password });
+      if (token) setApiToken(token);
       return { success: true };
     }
 
@@ -183,7 +265,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const snap = await getDocs(usersCol);
 
       let foundUser: UserProfile | null = null;
-      snap.forEach((docSnap) => {
+      for (const docSnap of snap.docs) {
         const u = docSnap.data() as UserProfile;
         const uCpfDigits = (u.cpf || '').replace(/\D/g, '');
         const matchCpf = cleanDigits.length > 0 && uCpfDigits === cleanDigits;
@@ -204,14 +286,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               id: docSnap.id,
               cpf: u.cpf || (u.username ? formatCPF(u.username) : ''),
             };
+            break;
           }
         }
-      });
+      }
 
       if (foundUser) {
         setProfile(foundUser);
         setIsAuthenticated(true);
         localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(foundUser));
+        const token = await fetchApiSessionToken({
+          userId: foundUser.id,
+          cpfOrIdentifier,
+          password,
+        });
+        if (token) setApiToken(token);
         return { success: true };
       }
     } catch (err) {
@@ -290,6 +379,12 @@ const sanitizeForFirestore = <T extends Record<string, any>>(obj: T): Partial<T>
       setProfile(newProfile);
       setIsAuthenticated(true);
       localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(newProfile));
+      const token = await fetchApiSessionToken({
+        userId,
+        cpfOrIdentifier: formattedCpf,
+        password,
+      });
+      if (token) setApiToken(token);
     }
   };
 
@@ -448,11 +543,13 @@ const sanitizeForFirestore = <T extends Record<string, any>>(obj: T): Partial<T>
     }
     setUser(null);
     setProfile(null);
+    setApiToken(null);
     setIsAuthenticated(false);
     setSimulatedRoleState(null);
     setSimulatedEmpresaId(null);
     setSimulatedEmpresaNome(null);
     localStorage.removeItem(LOCAL_STORAGE_SESSION_KEY);
+    localStorage.removeItem(LOCAL_STORAGE_API_TOKEN_KEY);
   };
 
   const setSimulatedRole = (role: UserRole, empresaId?: string, empresaNome?: string) => {
@@ -482,6 +579,75 @@ const sanitizeForFirestore = <T extends Record<string, any>>(obj: T): Partial<T>
   const isAuditor = activeRole === 'auditor';
   const canEdit = !isAuditor;
 
+  const getAuthHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const activeToken = apiToken || localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+    if (activeToken) {
+      headers.Authorization = `Bearer ${activeToken}`;
+    }
+    return headers;
+  };
+
+  const refreshApiSession = async (): Promise<string | null> => {
+    let activeProf = profile;
+    if (!activeProf) {
+      try {
+        const saved = localStorage.getItem(LOCAL_STORAGE_SESSION_KEY);
+        if (saved) activeProf = JSON.parse(saved) as UserProfile;
+      } catch {
+        activeProf = null;
+      }
+    }
+    if (!activeProf) return null;
+
+    let hashToUse = activeProf.passwordHash;
+    if (
+      !hashToUse &&
+      (activeProf.id === `user-${DEMO_PLATFORM_ACCOUNTS[0].cpf}` || activeProf.id === 'user-543.066.308-37')
+    ) {
+      hashToUse = await hashPassword(DEMO_PLATFORM_ACCOUNTS[0].passwordPlainText);
+    }
+    if (!hashToUse) return null;
+
+    const freshToken = await fetchApiSessionToken({
+      userId: activeProf.id,
+      cpfOrIdentifier: activeProf.cpf || activeProf.email,
+      passwordHash: hashToUse,
+    });
+    if (freshToken) {
+      setApiToken(freshToken);
+    }
+    return freshToken;
+  };
+
+  const authorizedFetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+    let token: string | null = apiToken || localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+    if (!isTokenValid(token)) {
+      token = await refreshApiSession();
+    }
+
+    const buildHeaders = (tok: string | null): HeadersInit => {
+      const base: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (init.headers && !(init.headers instanceof Headers) && !Array.isArray(init.headers)) {
+        Object.assign(base, init.headers);
+      }
+      if (tok) {
+        base.Authorization = `Bearer ${tok}`;
+      }
+      return base;
+    };
+
+    let response = await fetch(input, { ...init, headers: buildHeaders(token) });
+    if (response.status === 401) {
+      localStorage.removeItem(LOCAL_STORAGE_API_TOKEN_KEY);
+      const freshToken = await refreshApiSession();
+      if (freshToken) {
+        response = await fetch(input, { ...init, headers: buildHeaders(freshToken) });
+      }
+    }
+    return response;
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -505,6 +671,10 @@ const sanitizeForFirestore = <T extends Record<string, any>>(obj: T): Partial<T>
         isAdmin,
         isSolicitante,
         isAuditor,
+        apiToken,
+        getAuthHeaders,
+        refreshApiSession,
+        authorizedFetch,
       }}
     >
       {children}

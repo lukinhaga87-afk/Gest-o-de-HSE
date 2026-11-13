@@ -6,7 +6,6 @@ import {
   addDoc,
   query,
   where,
-  limit,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import { sendNotificationEmail, EmailNotificationPayload, isSmtpConfigured } from './emailService';
@@ -52,14 +51,19 @@ export function normalizeDate(dateStr?: string): string | null {
 }
 
 /**
- * Calculates remaining calendar days between today (00:00:00) and expiration date
+ * Calculates remaining calendar days between today in America/Sao_Paulo (00:00:00) and expiration date
  */
 export function calculateDaysRemaining(normalizedDateStr: string): number | null {
   const target = new Date(normalizedDateStr + 'T00:00:00');
   if (isNaN(target.getTime())) return null;
 
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const brTodayStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const today = new Date(brTodayStr + 'T00:00:00');
 
   const diffMs = target.getTime() - today.getTime();
   return Math.ceil(diffMs / (1000 * 60 * 60 * 24));
@@ -77,14 +81,18 @@ export function identifyMilestone(daysRemaining: number): NotificationMilestone 
 }
 
 /**
- * Checks against existing logs to prevent duplicate email dispatches
+ * Checks against existing successful/simulated logs to prevent duplicate email dispatches
+ * Failed attempts ('falha') are NOT considered dispatched so they can be retried once SMTP is fixed.
  */
 export async function isAlreadyDispatched(idempotencyKey: string): Promise<boolean> {
   try {
     const colRef = collection(db, 'notificationLogs');
-    const q = query(colRef, where('idempotencyKey', '==', idempotencyKey), limit(1));
+    const q = query(colRef, where('idempotencyKey', '==', idempotencyKey));
     const snap = await getDocs(q);
-    return !snap.empty;
+    return snap.docs.some((d) => {
+      const status = d.data()?.status;
+      return status === 'sucesso' || status === 'simulado';
+    });
   } catch (err) {
     console.warn(`[Deduplicação] Falha na verificação de chave ${idempotencyKey}:`, err);
     return false;
@@ -282,10 +290,9 @@ export async function executeDailyNotificationMonitoring(): Promise<RunCheckResu
     if (!milestone) continue;
 
     // Build deduplication key (idempotency)
-    // Key format: docId_milestone_targetDate
     const idempotencyKey = `${item.id}_${milestone}_${normalizedDate}`;
 
-    // Verify deduplication
+    // Verify deduplication (only successful/simulated dispatches skip)
     const alreadySent = await isAlreadyDispatched(idempotencyKey);
     if (alreadySent) {
       skippedDuplicates++;
@@ -306,10 +313,8 @@ export async function executeDailyNotificationMonitoring(): Promise<RunCheckResu
       });
     });
 
-    // If no specific rule matched, fallback to system administrator email or skip
-    let recipients = Array.from(recipientsSet);
+    const recipients = Array.from(recipientsSet);
     if (recipients.length === 0) {
-      // Check if there's any fallback config or if all configs are inactive
       unmatched++;
       continue;
     }
@@ -324,15 +329,15 @@ export async function executeDailyNotificationMonitoring(): Promise<RunCheckResu
       expirationDate: normalizedDate,
       daysRemaining: days,
       milestone,
-      appUrl: process.env.APP_URL,
+      appUrl: process.env.APP_URL || process.env.URL || 'https://gestao-sst.netlify.app',
     };
 
-    // Dispatch email (via real SMTP or simulated fallback)
     const result = await sendNotificationEmail(payload);
 
     // Save record to notificationLogs in Firestore
     const logData: Omit<NotificationLog, 'id'> = {
       dataHora: new Date().toISOString(),
+      tipoEnvio: 'automatico',
       destinatarios: recipients,
       documentoId: item.id,
       documentoTitulo: item.titulo,
@@ -353,7 +358,9 @@ export async function executeDailyNotificationMonitoring(): Promise<RunCheckResu
     try {
       const docRef = await addDoc(collection(db, 'notificationLogs'), logData);
       createdLogs.push({ id: docRef.id, ...logData });
-      dispatched++;
+      if (result.success) {
+        dispatched++;
+      }
     } catch (saveErr) {
       console.error('[Log Firestore] Erro ao persistir log de notificação:', saveErr);
     }

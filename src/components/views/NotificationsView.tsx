@@ -27,17 +27,48 @@ import {
   ArrowRight,
   X,
   Paperclip,
+  Bold,
+  Italic,
+  Link2,
+  List,
+  UserPlus,
+  Lock,
+  Eraser,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
 import {
   NotificationConfig,
+  NotificationDispatchType,
   NotificationLog,
   NotificationMilestone,
+  NotificationRecipientDetail,
   UpcomingExpirationAlert,
 } from '../../types/sst';
 import { formatDateBR, getDaysRemaining } from '../../utils/trafficLight';
 import { buildNotificationHtml } from '../../utils/notificationTemplate';
+
+function formatPreviewBodyHtml(raw: string): string {
+  if (!raw) return '';
+  let text = raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  text = text.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" style="color: #38bdf8; text-decoration: underline;">$1</a>'
+  );
+  text = text.replace(
+    /(?<!href=")(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" target="_blank" style="color: #38bdf8; text-decoration: underline;">$1</a>'
+  );
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  text = text.replace(/\n/g, '<br/>');
+  return text;
+}
 
 export const NotificationsView: React.FC = () => {
   const {
@@ -45,6 +76,7 @@ export const NotificationsView: React.FC = () => {
     notificationLogs,
     companies,
     employees,
+    userProfiles,
     documents,
     trainings,
     exams,
@@ -54,16 +86,21 @@ export const NotificationsView: React.FC = () => {
     deleteNotificationConfig,
     triggerNotificationCheck,
     sendTestNotificationEmail,
+    sendCustomNotificationEmail,
   } = useSST();
 
-  const { isAdmin, isAuditor, profile } = useAuth();
+  const { isAdmin, profile, apiToken, authorizedFetch } = useAuth();
 
   // Active Tab: 'config' | 'history' | 'upcoming' | 'smtp'
   const [activeSubTab, setActiveSubTab] = useState<'config' | 'history' | 'upcoming' | 'smtp'>('config');
 
   // Search & Filter in Logs
   const [logSearch, setLogSearch] = useState('');
-  const [logMilestoneFilter, setLogMilestoneFilter] = useState<'todos' | NotificationMilestone | 'teste' | 'recalculo'>('todos');
+  const [logMilestoneFilter, setLogMilestoneFilter] = useState<'todos' | NotificationMilestone | 'teste' | 'recalculo' | 'avulso'>('todos');
+  const [logTypeFilter, setLogTypeFilter] = useState<'todos' | NotificationDispatchType>('todos');
+  const [logCompanyFilter, setLogCompanyFilter] = useState('todas');
+  const [logStartDate, setLogStartDate] = useState('');
+  const [logEndDate, setLogEndDate] = useState('');
   const [logStatusFilter, setLogStatusFilter] = useState<'todos' | 'sucesso' | 'falha' | 'simulado'>('todos');
 
   // Trigger State
@@ -73,6 +110,7 @@ export const NotificationsView: React.FC = () => {
     skippedDuplicates: number;
     totalEvaluated: number;
     message: string;
+    isError?: boolean;
   } | null>(null);
 
   // Modal: Create / Edit Rule
@@ -86,58 +124,156 @@ export const NotificationsView: React.FC = () => {
   const [ruleCategory, setRuleCategory] = useState('todas');
   const [ruleMilestones, setRuleMilestones] = useState<NotificationMilestone[]>(['30_dias', '15_dias', 'hoje']);
   const [ruleActive, setRuleActive] = useState(true);
+  const [ruleFormError, setRuleFormError] = useState<string | null>(null);
+  const [confirmDeleteRuleId, setConfirmDeleteRuleId] = useState<string | null>(null);
 
   // Modal: Test Email
   const [isTestEmailModalOpen, setIsTestEmailModalOpen] = useState(false);
   const [testEmailAddress, setTestEmailAddress] = useState('');
-  const [testEmailNote, setTestEmailNote] = useState('');
+  const [testEmailSubject, setTestEmailSubject] = useState('');
+  const [testEmailMessage, setTestEmailMessage] = useState('');
   const [sendingTest, setSendingTest] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string; status?: string } | null>(null);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message: string;
+    detail?: string;
+    status?: string;
+  } | null>(null);
 
-  // Modal: Disparar E-mail (Manual Custom Dispatch - Administrator Exclusive)
+  // Modal: ENVIAR E-MAIL AVULSO (Manual Custom BCC Dispatch - Administrator Exclusive)
   const [isCustomEmailModalOpen, setIsCustomEmailModalOpen] = useState(false);
   const [customToInput, setCustomToInput] = useState('');
-  const [customToEmails, setCustomToEmails] = useState<string[]>([]);
+  const [selectedRecipients, setSelectedRecipients] = useState<NotificationRecipientDetail[]>([]);
   const [customCompanyId, setCustomCompanyId] = useState('');
   const [customSubject, setCustomSubject] = useState('');
   const [customMessage, setCustomMessage] = useState('');
   const [customAttachment, setCustomAttachment] = useState<{ name: string; dataUrl: string; size: string } | null>(null);
   const [isSubmittingCustomEmail, setIsSubmittingCustomEmail] = useState(false);
-  const [customEmailResult, setCustomEmailResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [customEmailResult, setCustomEmailResult] = useState<{ success: boolean; message: string; detail?: string } | null>(null);
+  const [isRecipientPickerOpen, setIsRecipientPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState('');
+  const [pickerCompanyFilter, setPickerCompanyFilter] = useState('todas');
+  const [isLinkInputOpen, setIsLinkInputOpen] = useState(false);
+  const [linkTextInput, setLinkTextInput] = useState('');
+  const [linkUrlInput, setLinkUrlInput] = useState('https://');
+  const [isCustomPreviewOpen, setIsCustomPreviewOpen] = useState(false);
+  const customMessageRef = React.useRef<HTMLTextAreaElement | null>(null);
 
-  // Tab 4: SMTP Configuration & Diagnostics State
-  const [smtpHost, setSmtpHost] = useState('');
-  const [smtpPort, setSmtpPort] = useState('587');
-  const [smtpUser, setSmtpUser] = useState('');
-  const [smtpPass, setSmtpPass] = useState('');
-  const [smtpFrom, setSmtpFrom] = useState('Gestão SST <notificacoes.sst@gmail.com>');
-  const [smtpSecure, setSmtpSecure] = useState(false);
+  // Tab 4: Netlify Protected SMTP Diagnostics State (no plaintext .env writes)
   const [smtpStatusInfo, setSmtpStatusInfo] = useState<{
     configured: boolean;
-    host: string;
-    port: string;
-    user: string;
-    from: string;
     mode: string;
+    hostConfigured: boolean;
+    hostLabel: string;
+    port: string;
+    secure: boolean;
+    userConfigured: boolean;
+    userMasked: string;
+    passConfigured: boolean;
+    fromConfigured: boolean;
+    missingVars?: string[];
   } | null>(null);
-  const [savingSmtp, setSavingSmtp] = useState(false);
-  const [smtpFeedback, setSmtpFeedback] = useState<{ text: string; success: boolean } | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
   const [connTestResult, setConnTestResult] = useState<{ connected: boolean; message: string } | null>(null);
 
-  // Fetch SMTP Health
+  // Consolidated searchable directory of registered people with valid emails
+  const registeredPeopleDirectory = useMemo<NotificationRecipientDetail[]>(() => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const map = new Map<string, NotificationRecipientDetail>();
+
+    userProfiles.forEach((u) => {
+      const email = (u.email || '').trim().toLowerCase();
+      if (email && emailRegex.test(email)) {
+        map.set(email, {
+          nome: u.nome || email,
+          email,
+          empresa: u.empresaNome || 'SESMT / Plataforma',
+          origem: 'usuario',
+          cargoOuPerfil: u.role === 'admin' ? 'Administrador' : u.role === 'solicitante' ? 'Solicitante' : 'Auditor',
+        });
+      }
+    });
+
+    employees.forEach((emp) => {
+      const email = (emp.email || '').trim().toLowerCase();
+      if (email && emailRegex.test(email) && !map.has(email)) {
+        map.set(email, {
+          nome: emp.nomeCompleto || email,
+          email,
+          empresa: emp.empresaNome || 'Empresa não informada',
+          origem: 'colaborador',
+          cargoOuPerfil: emp.cargo || 'Colaborador',
+        });
+      }
+    });
+
+    companies.forEach((comp) => {
+      const email = (comp.email || '').trim().toLowerCase();
+      if (email && emailRegex.test(email) && !map.has(email)) {
+        map.set(email, {
+          nome: comp.responsavelSST || comp.responsavelLegal || comp.razaoSocial,
+          email,
+          empresa: comp.razaoSocial,
+          origem: 'empresa',
+          cargoOuPerfil: 'Contato Corporativo',
+        });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  }, [userProfiles, employees, companies]);
+
+  const pickerCompanies = useMemo(() => {
+    const set = new Set<string>();
+    registeredPeopleDirectory.forEach((p) => {
+      if (p.empresa) set.add(p.empresa);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [registeredPeopleDirectory]);
+
+  const filteredDirectory = useMemo(() => {
+    const q = pickerSearch.trim().toLowerCase();
+    return registeredPeopleDirectory.filter((person) => {
+      const matchesSearch =
+        !q ||
+        person.nome.toLowerCase().includes(q) ||
+        person.email.toLowerCase().includes(q) ||
+        (person.empresa && person.empresa.toLowerCase().includes(q));
+      const matchesCompany =
+        pickerCompanyFilter === 'todas' || person.empresa === pickerCompanyFilter;
+      return matchesSearch && matchesCompany;
+    });
+  }, [registeredPeopleDirectory, pickerSearch, pickerCompanyFilter]);
+
+  // Fetch SMTP Status (public healthcheck + admin-only safe diagnostics)
   const fetchSmtpHealth = async () => {
     try {
+      if (isAdmin) {
+        const res = await authorizedFetch('/api/notifications/smtp-status');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.smtp) {
+            setSmtpStatusInfo(data.smtp);
+            return;
+          }
+        }
+      }
       const res = await fetch('/api/notifications/health');
       if (res.ok) {
         const data = await res.json();
-        if (data.smtp) {
-          setSmtpStatusInfo(data.smtp);
-          if (data.smtp.host && data.smtp.host !== 'Não configurado') setSmtpHost(data.smtp.host);
-          if (data.smtp.port) setSmtpPort(data.smtp.port);
-          if (data.smtp.user && data.smtp.user !== 'Não configurado') setSmtpUser(data.smtp.user);
-          if (data.smtp.from) setSmtpFrom(data.smtp.from);
-        }
+        setSmtpStatusInfo({
+          configured: Boolean(data.smtpConfigured),
+          mode: data.smtpConfigured ? 'SMTP Real Ativo (Variáveis Netlify)' : 'Aguardando Configuração SMTP no Servidor',
+          hostConfigured: Boolean(data.smtpConfigured),
+          hostLabel: data.smtpConfigured ? 'Protegido no servidor' : 'Não configurado',
+          port: '587 / 465',
+          secure: true,
+          userConfigured: Boolean(data.smtpConfigured),
+          userMasked: data.smtpConfigured ? 'Protegido no servidor' : 'Não configurado',
+          passConfigured: Boolean(data.smtpConfigured),
+          fromConfigured: Boolean(data.smtpConfigured),
+          missingVars: data.smtpConfigured ? [] : ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'],
+        });
       }
     } catch (e) {
       console.warn('Erro ao carregar status SMTP:', e);
@@ -146,33 +282,74 @@ export const NotificationsView: React.FC = () => {
 
   React.useEffect(() => {
     fetchSmtpHealth();
-  }, []);
+  }, [isAdmin, apiToken]);
 
   // Modal: Email Preview
   const [previewLog, setPreviewLog] = useState<NotificationLog | null>(null);
 
+  const uniqueLogCompanies = useMemo(() => {
+    const set = new Set<string>();
+    notificationLogs.forEach((l) => {
+      if (l.empresaNome) set.add(l.empresaNome);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [notificationLogs]);
+
+  // Helper to resolve dispatch type for both new and legacy logs
+  const resolveDispatchType = (log: NotificationLog): NotificationDispatchType => {
+    if (log.tipoEnvio) return log.tipoEnvio;
+    if (log.marco === 'teste') return 'teste';
+    if (log.marco === 'avulso' || log.marco === 'disparo_manual') return 'avulso';
+    return 'automatico';
+  };
+
   // Filtered Logs
   const filteredLogs = useMemo(() => {
     return notificationLogs.filter((log) => {
-      // Search
       const searchLower = logSearch.toLowerCase();
       const matchesSearch =
         !logSearch ||
         log.documentoTitulo.toLowerCase().includes(searchLower) ||
+        (log.assunto && log.assunto.toLowerCase().includes(searchLower)) ||
         log.empresaNome.toLowerCase().includes(searchLower) ||
         (log.colaboradorNome && log.colaboradorNome.toLowerCase().includes(searchLower)) ||
+        (log.usuarioResponsavel && log.usuarioResponsavel.toLowerCase().includes(searchLower)) ||
         log.destinatarios.some((e) => e.toLowerCase().includes(searchLower)) ||
+        (log.destinatariosDetalhados &&
+          log.destinatariosDetalhados.some(
+            (d) => d.nome.toLowerCase().includes(searchLower) || d.email.toLowerCase().includes(searchLower)
+          )) ||
         log.idempotencyKey.toLowerCase().includes(searchLower);
 
-      // Milestone
       const matchesMilestone = logMilestoneFilter === 'todos' || log.marco === logMilestoneFilter;
-
-      // Status
+      const matchesType = logTypeFilter === 'todos' || resolveDispatchType(log) === logTypeFilter;
+      const matchesCompany = logCompanyFilter === 'todas' || log.empresaNome === logCompanyFilter;
       const matchesStatus = logStatusFilter === 'todos' || log.status === logStatusFilter;
 
-      return matchesSearch && matchesMilestone && matchesStatus;
+      const logDate = (log.dataHora || '').split('T')[0];
+      const matchesStart = !logStartDate || (logDate && logDate >= logStartDate);
+      const matchesEnd = !logEndDate || (logDate && logDate <= logEndDate);
+
+      return (
+        matchesSearch &&
+        matchesMilestone &&
+        matchesType &&
+        matchesCompany &&
+        matchesStatus &&
+        matchesStart &&
+        matchesEnd
+      );
     });
-  }, [notificationLogs, logSearch, logMilestoneFilter, logStatusFilter]);
+  }, [
+    notificationLogs,
+    logSearch,
+    logMilestoneFilter,
+    logTypeFilter,
+    logCompanyFilter,
+    logStartDate,
+    logEndDate,
+    logStatusFilter,
+  ]);
 
   // Compute Upcoming Alerts (Forecast of alerts that match 30d, 15d, 0d or upcoming)
   const upcomingAlerts = useMemo<UpcomingExpirationAlert[]>(() => {
@@ -332,6 +509,7 @@ export const NotificationsView: React.FC = () => {
         skippedDuplicates: res.skippedDuplicates,
         totalEvaluated: res.totalEvaluated,
         message: res.message || 'Verificação concluída no backend com sucesso.',
+        isError: false,
       });
     } catch (err: any) {
       setCheckResult({
@@ -339,6 +517,7 @@ export const NotificationsView: React.FC = () => {
         skippedDuplicates: 0,
         totalEvaluated: 0,
         message: `Falha na verificação: ${err.message || String(err)}`,
+        isError: true,
       });
     } finally {
       setRunningCheck(false);
@@ -390,16 +569,17 @@ export const NotificationsView: React.FC = () => {
   // Save Rule
   const handleSaveRule = async (e: React.FormEvent) => {
     e.preventDefault();
+    setRuleFormError(null);
     if (!ruleName.trim()) {
-      alert('Informe o nome da regra de notificação.');
+      setRuleFormError('Informe o nome da regra de notificação.');
       return;
     }
     if (ruleEmails.length === 0) {
-      alert('Cadastre ao menos um e-mail destinatário.');
+      setRuleFormError('Cadastre ao menos um e-mail destinatário.');
       return;
     }
     if (ruleMilestones.length === 0) {
-      alert('Selecione ao menos um marco de vencimento (30d, 15d ou Hoje).');
+      setRuleFormError('Selecione ao menos um marco de vencimento (30d, 15d ou Hoje).');
       return;
     }
 
@@ -427,17 +607,104 @@ export const NotificationsView: React.FC = () => {
     setIsRuleModalOpen(false);
   };
 
-  // Custom Email Handlers
-  const handleAddCustomEmail = () => {
+  // Custom Bulk Email Handlers ("ENVIAR E-MAIL AVULSO")
+  const handleAddManualRecipient = () => {
     const trimmed = customToInput.trim().toLowerCase();
-    if (trimmed && trimmed.includes('@') && !customToEmails.includes(trimmed)) {
-      setCustomToEmails([...customToEmails, trimmed]);
-      setCustomToInput('');
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmed)) {
+      setCustomEmailResult({
+        success: false,
+        message: 'Informe um endereço de e-mail válido antes de adicionar.',
+      });
+      return;
+    }
+    if (!selectedRecipients.some((r) => r.email === trimmed)) {
+      const existingPerson = registeredPeopleDirectory.find((p) => p.email === trimmed);
+      setSelectedRecipients([
+        ...selectedRecipients,
+        existingPerson || {
+          nome: trimmed.split('@')[0],
+          email: trimmed,
+          empresa: 'Destinatário Externo / Manual',
+          origem: 'manual',
+        },
+      ]);
+      setCustomEmailResult(null);
+    }
+    setCustomToInput('');
+  };
+
+  const handleToggleDirectoryPerson = (person: NotificationRecipientDetail) => {
+    const exists = selectedRecipients.some((r) => r.email === person.email);
+    if (exists) {
+      setSelectedRecipients(selectedRecipients.filter((r) => r.email !== person.email));
+    } else {
+      setSelectedRecipients([...selectedRecipients, person]);
     }
   };
 
-  const handleRemoveCustomEmail = (emailToRemove: string) => {
-    setCustomToEmails(customToEmails.filter((e) => e !== emailToRemove));
+  const handleSelectAllFiltered = () => {
+    const currentEmails = new Set(selectedRecipients.map((r) => r.email));
+    const additions = filteredDirectory.filter((p) => !currentEmails.has(p.email));
+    setSelectedRecipients([...selectedRecipients, ...additions]);
+  };
+
+  const handleDeselectAllFiltered = () => {
+    const filteredEmails = new Set(filteredDirectory.map((p) => p.email));
+    setSelectedRecipients(selectedRecipients.filter((r) => !filteredEmails.has(r.email)));
+  };
+
+  const handleRemoveSelectedRecipient = (emailToRemove: string) => {
+    setSelectedRecipients(selectedRecipients.filter((r) => r.email !== emailToRemove));
+  };
+
+  const applyFormatting = (type: 'bold' | 'italic' | 'list') => {
+    const el = customMessageRef.current;
+    const start = el ? el.selectionStart : customMessage.length;
+    const end = el ? el.selectionEnd : customMessage.length;
+    const selected = customMessage.slice(start, end);
+    let replacement = '';
+    if (type === 'bold') {
+      replacement = `**${selected || 'texto em negrito'}**`;
+    } else if (type === 'italic') {
+      replacement = `*${selected || 'texto em itálico'}*`;
+    } else {
+      replacement = selected
+        ? selected
+            .split('\n')
+            .map((line) => (line.startsWith('- ') ? line : `- ${line}`))
+            .join('\n')
+        : '\n- Item 1\n- Item 2';
+    }
+    const next = customMessage.slice(0, start) + replacement + customMessage.slice(end);
+    setCustomMessage(next);
+  };
+
+  const handleInsertLink = () => {
+    const cleanUrl = linkUrlInput.trim();
+    if (!cleanUrl || !/^https?:\/\//i.test(cleanUrl)) {
+      return;
+    }
+    const label = linkTextInput.trim() || cleanUrl;
+    const snippet = `[${label}](${cleanUrl})`;
+    const el = customMessageRef.current;
+    const start = el ? el.selectionStart : customMessage.length;
+    const end = el ? el.selectionEnd : customMessage.length;
+    setCustomMessage(customMessage.slice(0, start) + snippet + customMessage.slice(end));
+    setLinkTextInput('');
+    setLinkUrlInput('https://');
+    setIsLinkInputOpen(false);
+  };
+
+  const handleClearCustomForm = () => {
+    setSelectedRecipients([]);
+    setCustomToInput('');
+    setCustomCompanyId('');
+    setCustomSubject('');
+    setCustomMessage('');
+    setCustomAttachment(null);
+    setCustomEmailResult(null);
+    setIsLinkInputOpen(false);
   };
 
   const handleCustomAttachmentChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -445,7 +712,10 @@ export const NotificationsView: React.FC = () => {
     if (!file) return;
 
     if (file.size > 10 * 1024 * 1024) {
-      alert('O arquivo selecionado excede o limite máximo permitido de 10 MB.');
+      setCustomEmailResult({
+        success: false,
+        message: 'O arquivo selecionado excede o limite máximo permitido de 10 MB.',
+      });
       return;
     }
 
@@ -462,26 +732,46 @@ export const NotificationsView: React.FC = () => {
 
   const handleSendCustomEmail = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isAdmin) return;
 
-    let finalRecipients = [...customToEmails];
-    if (customToInput.trim() && customToInput.includes('@') && !finalRecipients.includes(customToInput.trim().toLowerCase())) {
-      finalRecipients.push(customToInput.trim().toLowerCase());
-      setCustomToEmails(finalRecipients);
+    let finalRecipientsList = [...selectedRecipients];
+    const trimmedManual = customToInput.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (trimmedManual && emailRegex.test(trimmedManual)) {
+      if (!finalRecipientsList.some((r) => r.email === trimmedManual)) {
+        finalRecipientsList.push({
+          nome: trimmedManual.split('@')[0],
+          email: trimmedManual,
+          empresa: 'Destinatário Externo / Manual',
+          origem: 'manual',
+        });
+      }
+      setSelectedRecipients(finalRecipientsList);
       setCustomToInput('');
     }
 
-    if (finalRecipients.length === 0) {
-      alert('Informe pelo menos um e-mail de destinatário válido.');
+    const validRecipients = finalRecipientsList.filter((r) => emailRegex.test(r.email));
+    if (validRecipients.length === 0) {
+      setCustomEmailResult({
+        success: false,
+        message: 'Adicione pelo menos um destinatário com e-mail válido antes de enviar.',
+      });
       return;
     }
 
     if (!customSubject.trim()) {
-      alert('O campo Assunto é obrigatório.');
+      setCustomEmailResult({
+        success: false,
+        message: 'O campo Assunto é obrigatório.',
+      });
       return;
     }
 
     if (!customMessage.trim()) {
-      alert('O campo Mensagem é obrigatório.');
+      setCustomEmailResult({
+        success: false,
+        message: 'O campo Mensagem é obrigatório.',
+      });
       return;
     }
 
@@ -491,98 +781,67 @@ export const NotificationsView: React.FC = () => {
     const selectedCompany = companies.find((c) => c.id === customCompanyId);
 
     try {
-      const res = await fetch('/api/notifications/custom-send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: finalRecipients,
-          companyId: customCompanyId || undefined,
-          companyName: selectedCompany?.razaoSocial || 'Geral / Todas as Empresas',
-          subject: customSubject.trim(),
-          message: customMessage.trim(),
-          attachmentName: customAttachment?.name,
-          attachmentDataUrl: customAttachment?.dataUrl,
-          senderName: profile?.nome || 'Administrador EHS',
-          senderEmail: profile?.email || undefined,
-        }),
+      const data = await sendCustomNotificationEmail({
+        to: validRecipients.map((r) => r.email),
+        recipientsDetails: validRecipients,
+        companyId: customCompanyId || undefined,
+        companyName: selectedCompany?.razaoSocial || 'Geral / Todas as Empresas',
+        subject: customSubject.trim(),
+        message: customMessage.trim(),
+        attachmentName: customAttachment?.name,
+        attachmentDataUrl: customAttachment?.dataUrl,
+        senderName: profile?.nome || 'Administrador EHS',
+        senderEmail: profile?.email || undefined,
       });
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      if (data.success) {
         setCustomEmailResult({
           success: true,
-          message: 'E-mail enviado com sucesso!',
+          message: `E-mail avulso enviado com sucesso em cópia oculta (BCC) para ${validRecipients.length} destinatário(s)!`,
         });
         setTimeout(() => {
-          setCustomToEmails([]);
-          setCustomToInput('');
-          setCustomSubject('');
-          setCustomMessage('');
-          setCustomAttachment(null);
-        }, 1500);
+          handleClearCustomForm();
+        }, 2000);
       } else {
         setCustomEmailResult({
           success: false,
-          message: 'Não foi possível realizar o envio. Verifique as configurações SMTP e tente novamente.',
+          message: data.message || 'Não foi possível enviar o e-mail avulso.',
+          detail: data.error || data.detalhes,
         });
       }
     } catch (err: any) {
       setCustomEmailResult({
         success: false,
         message: 'Não foi possível realizar o envio. Verifique as configurações SMTP e tente novamente.',
+        detail: err.message || String(err),
       });
     } finally {
       setIsSubmittingCustomEmail(false);
     }
   };
 
-  // SMTP Settings Handlers
-  const handleSaveSmtpConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingSmtp(true);
-    setSmtpFeedback(null);
-    setConnTestResult(null);
-
-    try {
-      const res = await fetch('/api/notifications/save-smtp-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          host: smtpHost,
-          port: smtpPort,
-          user: smtpUser,
-          pass: smtpPass,
-          from: smtpFrom,
-          secure: smtpSecure,
-        }),
-      });
-
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setSmtpFeedback({ text: data.message, success: true });
-        if (data.verification) {
-          setConnTestResult(data.verification);
-        }
-        await fetchSmtpHealth();
-      } else {
-        setSmtpFeedback({ text: data.message || 'Erro ao salvar configurações.', success: false });
-      }
-    } catch (err: any) {
-      setSmtpFeedback({ text: `Falha na requisição: ${err.message || String(err)}`, success: false });
-    } finally {
-      setSavingSmtp(false);
-    }
-  };
-
+  // SMTP Connection Test (Admin Only)
   const handleTestConnectionOnly = async () => {
+    if (!isAdmin) return;
     setTestingConnection(true);
     setConnTestResult(null);
     try {
-      const res = await fetch('/api/notifications/verify-smtp', { method: 'POST' });
-      const data = await res.json();
+      const res = await authorizedFetch('/api/notifications/verify-smtp', {
+        method: 'POST',
+      });
+      const rawText = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = {
+          connected: false,
+          message: `Erro HTTP ${res.status} ao verificar SMTP: ${rawText.slice(0, 200) || res.statusText}`,
+        };
+      }
       setConnTestResult({
-        connected: data.connected,
-        message: data.message,
+        connected: Boolean(data?.connected),
+        message: data?.message || 'Verificação concluída.',
       });
     } catch (e: any) {
       setConnTestResult({
@@ -594,27 +853,55 @@ export const NotificationsView: React.FC = () => {
     }
   };
 
-  // Handle Test Email
+  // Handle Immediate Test Email
   const handleSendTestEmail = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!testEmailAddress || !testEmailAddress.includes('@')) {
-      alert('Informe um e-mail válido para o teste.');
+    if (!isAdmin) return;
+
+    const trimmedEmail = testEmailAddress.trim();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!trimmedEmail || !emailRegex.test(trimmedEmail)) {
+      setTestResult({
+        success: false,
+        message: 'Não foi possível enviar o e-mail. Verifique as configurações SMTP e os detalhes do erro.',
+        detail: 'Informe um endereço de e-mail válido (ex: nome@empresa.com).',
+      });
       return;
     }
 
     setSendingTest(true);
     setTestResult(null);
     try {
-      const res = await sendTestNotificationEmail(testEmailAddress, testEmailNote);
-      setTestResult({
-        success: res.success,
-        message: res.detalhes || res.error || 'Disparo de teste concluído.',
-        status: res.status,
-      });
+      const res = await sendTestNotificationEmail(
+        trimmedEmail,
+        testEmailSubject.trim() || undefined,
+        testEmailMessage.trim() || undefined,
+        profile?.nome || 'Administrador EHS'
+      );
+      if (res.success) {
+        setTestResult({
+          success: true,
+          message:
+            res.message ||
+            'E-mail de teste enviado com sucesso. Verifique a caixa de entrada do destinatário.',
+          detail: res.detalhes,
+          status: res.status,
+        });
+      } else {
+        setTestResult({
+          success: false,
+          message:
+            res.message ||
+            'Não foi possível enviar o e-mail. Verifique as configurações SMTP e os detalhes do erro.',
+          detail: res.error || res.detalhes,
+          status: res.status,
+        });
+      }
     } catch (err: any) {
       setTestResult({
         success: false,
-        message: `Falha: ${err.message || String(err)}`,
+        message: 'Não foi possível enviar o e-mail. Verifique as configurações SMTP e os detalhes do erro.',
+        detail: err.message || String(err),
       });
     } finally {
       setSendingTest(false);
@@ -645,71 +932,86 @@ export const NotificationsView: React.FC = () => {
           {/* Quick Actions Bar */}
           <div className="flex items-center gap-2.5 flex-wrap">
             {isAdmin && (
-              <button
-                onClick={() => {
-                  setCustomEmailResult(null);
-                  setCustomToEmails([]);
-                  setCustomToInput('');
-                  setCustomCompanyId('');
-                  setCustomSubject('');
-                  setCustomMessage('');
-                  setCustomAttachment(null);
-                  setIsCustomEmailModalOpen(true);
-                }}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/30 transition-all border border-blue-400/30 cursor-pointer"
-                title="Disparar e-mail avulso com anexos para destinatários e empresas"
-              >
-                <Mail size={15} className="text-white" />
-                <span>DISPARAR E-MAIL</span>
-              </button>
-            )}
+              <>
+                <button
+                  onClick={() => {
+                    handleClearCustomForm();
+                    setIsCustomEmailModalOpen(true);
+                  }}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/30 transition-all border border-blue-400/30 cursor-pointer"
+                  title="Enviar e-mail avulso em cópia oculta (BCC) para pessoas cadastradas"
+                >
+                  <Mail size={15} className="text-white" />
+                  <span>ENVIAR E-MAIL AVULSO</span>
+                </button>
 
-            <button
-              onClick={handleRunCheckNow}
-              disabled={runningCheck}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-lg shadow-blue-600/30 transition-all disabled:opacity-50 cursor-pointer"
-              title="Executa a rotina de monitoramento diário no backend agora"
-            >
-              <RefreshCw size={15} className={runningCheck ? 'animate-spin' : ''} />
-              <span>{runningCheck ? 'Verificando no Backend...' : 'Executar Verificação Agora'}</span>
-            </button>
+                <button
+                  onClick={handleRunCheckNow}
+                  disabled={runningCheck}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-lg shadow-blue-600/30 transition-all disabled:opacity-50 cursor-pointer"
+                  title="Executa a rotina de monitoramento diário no backend agora"
+                >
+                  <RefreshCw size={15} className={runningCheck ? 'animate-spin' : ''} />
+                  <span>{runningCheck ? 'Verificando...' : 'Executar Verificação Agora'}</span>
+                </button>
 
-            <button
-              onClick={() => {
-                setTestResult(null);
-                setTestEmailAddress('destinatario@empresa.com.br');
-                setIsTestEmailModalOpen(true);
-              }}
-              className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
-              title="Testar envio real de e-mail e conexão SMTP"
-            >
-              <Send size={14} className="text-blue-400" />
-              <span>TESTAR ENVIO DE E-MAIL</span>
-            </button>
+                <button
+                  onClick={() => {
+                    setTestResult(null);
+                    setTestEmailAddress(profile?.email || '');
+                    setTestEmailSubject('');
+                    setTestEmailMessage('');
+                    setIsTestEmailModalOpen(true);
+                  }}
+                  className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                  title="Testar envio imediato de e-mail SMTP"
+                >
+                  <Send size={14} className="text-blue-400" />
+                  <span>ENVIAR E-MAIL DE TESTE</span>
+                </button>
 
-            {isAdmin && (
-              <button
-                onClick={handleOpenNewRuleModal}
-                className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/20 transition-colors cursor-pointer"
-              >
-                <Plus size={15} />
-                <span>Nova Regra</span>
-              </button>
+                <button
+                  onClick={() => {
+                    setRuleFormError(null);
+                    handleOpenNewRuleModal();
+                  }}
+                  className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/20 transition-colors cursor-pointer"
+                >
+                  <Plus size={15} />
+                  <span>Nova Regra</span>
+                </button>
+              </>
             )}
           </div>
         </div>
 
         {/* Live Feedback Toast if check ran */}
         {checkResult && (
-          <div className="mt-4 p-3.5 rounded-xl bg-blue-950/60 border border-blue-500/40 text-xs text-blue-200 flex items-center justify-between gap-3 animate-fade-in">
+          <div
+            className={`mt-4 p-3.5 rounded-xl border text-xs flex items-center justify-between gap-3 animate-fade-in ${
+              checkResult.isError
+                ? 'bg-red-950/50 border-red-500/40 text-red-200'
+                : 'bg-blue-950/60 border-blue-500/40 text-blue-200'
+            }`}
+          >
             <div className="flex items-center gap-2.5">
-              <CheckCircle2 size={16} className="text-blue-400 shrink-0" />
+              {checkResult.isError ? (
+                <AlertTriangle size={16} className="text-red-400 shrink-0" />
+              ) : (
+                <CheckCircle2 size={16} className="text-blue-400 shrink-0" />
+              )}
               <div>
-                <span className="font-bold text-white">Resultado do Monitoramento: </span>
-                <span>
-                  {checkResult.dispatched} e-mail(s) disparado(s) • {checkResult.skippedDuplicates} duplicata(s) evitada(s) •{' '}
-                  {checkResult.totalEvaluated} documentos avaliados.
+                <span className="font-bold text-white">
+                  {checkResult.isError ? 'Erro no Monitoramento: ' : 'Resultado do Monitoramento: '}
                 </span>
+                {checkResult.isError ? (
+                  <span>{checkResult.message}</span>
+                ) : (
+                  <span>
+                    {checkResult.dispatched} e-mail(s) disparado(s) • {checkResult.skippedDuplicates} duplicata(s) evitada(s) •{' '}
+                    {checkResult.totalEvaluated} documentos avaliados.
+                  </span>
+                )}
               </div>
             </div>
             <button
@@ -807,17 +1109,19 @@ export const NotificationsView: React.FC = () => {
           <span>Previsão de Próximos Alertas ({upcomingAlerts.length})</span>
         </button>
 
-        <button
-          onClick={() => setActiveSubTab('smtp')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
-            activeSubTab === 'smtp'
-              ? 'bg-blue-600 text-white shadow-sm'
-              : 'text-slate-400 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <Server size={14} />
-          <span>Serviço SMTP & Backend</span>
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setActiveSubTab('smtp')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+              activeSubTab === 'smtp'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            <Server size={14} />
+            <span>Serviço SMTP &amp; Netlify</span>
+          </button>
+        )}
       </div>
 
       {/* TAB 1: Configuração de Regras de Notificação */}
@@ -928,24 +1232,45 @@ export const NotificationsView: React.FC = () => {
                 {/* Footer Controls */}
                 {isAdmin && (
                   <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-end gap-2">
-                    <button
-                      onClick={() => handleOpenEditRuleModal(rule)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-                      title="Editar Regra"
-                    >
-                      <Edit2 size={14} />
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (confirm(`Deseja realmente excluir a regra "${rule.nomeRegra}"?`)) {
-                          deleteNotificationConfig(rule.id);
-                        }
-                      }}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
-                      title="Excluir Regra"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    {confirmDeleteRuleId === rule.id ? (
+                      <div className="flex items-center gap-2 text-[11px]">
+                        <span className="text-red-300 font-medium">Confirmar exclusão?</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            deleteNotificationConfig(rule.id);
+                            setConfirmDeleteRuleId(null);
+                          }}
+                          className="px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white font-semibold"
+                        >
+                          Excluir
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteRuleId(null)}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleOpenEditRuleModal(rule)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          title="Editar Regra"
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteRuleId(rule.id)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
+                          title="Excluir Regra"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -954,46 +1279,121 @@ export const NotificationsView: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 2: Histórico de Envios & Trilha com Controle contra Duplicidade */}
+      {/* TAB 2: Histórico de Envios & Auditoria Completa */}
       {activeSubTab === 'history' && (
         <div className="space-y-4">
           {/* Header & Filter Bar */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900 p-4 rounded-xl border border-slate-800">
-            <div className="relative flex-1 max-w-md">
-              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                value={logSearch}
-                onChange={(e) => setLogSearch(e.target.value)}
-                placeholder="Buscar por documento, empresa, destinatário ou chave..."
-                className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
-              />
+          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 space-y-3">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={logSearch}
+                  onChange={(e) => setLogSearch(e.target.value)}
+                  placeholder="Buscar por assunto, documento, empresa, destinatário ou responsável..."
+                  className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <select
+                  value={logTypeFilter}
+                  onChange={(e) => setLogTypeFilter(e.target.value as any)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="todos">Todos os Tipos</option>
+                  <option value="automatico">⚙️ Automático</option>
+                  <option value="avulso">✉️ Avulso (BCC)</option>
+                  <option value="teste">🧪 Teste</option>
+                </select>
+
+                <select
+                  value={logCompanyFilter}
+                  onChange={(e) => setLogCompanyFilter(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500 max-w-[200px]"
+                >
+                  <option value="todas">Todas as Empresas</option>
+                  {uniqueLogCompanies.map((comp) => (
+                    <option key={comp} value={comp}>
+                      {comp}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={logMilestoneFilter}
+                  onChange={(e) => setLogMilestoneFilter(e.target.value as any)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="todos">Todos os Marcos</option>
+                  <option value="30_dias">⏳ 30 Dias Antes</option>
+                  <option value="15_dias">⚠️ 15 Dias Antes</option>
+                  <option value="hoje">🚨 Data Vencimento (Hoje)</option>
+                  <option value="recalculo">🔄 Recálculo</option>
+                  <option value="avulso">✉️ Avulso</option>
+                  <option value="teste">🧪 Teste</option>
+                </select>
+
+                <select
+                  value={logStatusFilter}
+                  onChange={(e) => setLogStatusFilter(e.target.value as any)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="todos">Todos os Status</option>
+                  <option value="sucesso">🟢 Sucesso (SMTP)</option>
+                  <option value="simulado">🟡 Simulado</option>
+                  <option value="falha">🔴 Falha</option>
+                </select>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 flex-wrap">
-              <select
-                value={logMilestoneFilter}
-                onChange={(e) => setLogMilestoneFilter(e.target.value as any)}
-                className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
-              >
-                <option value="todos">Todos os Marcos</option>
-                <option value="30_dias">⏳ 30 Dias Antes</option>
-                <option value="15_dias">⚠️ 15 Dias Antes</option>
-                <option value="hoje">🚨 Data Vencimento (Hoje)</option>
-                <option value="recalculo">🔄 Recálculo</option>
-                <option value="teste">🧪 Teste</option>
-              </select>
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80 text-xs">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-slate-400 flex items-center gap-1">
+                  <Filter size={12} /> Período:
+                </span>
+                <input
+                  type="date"
+                  value={logStartDate}
+                  onChange={(e) => setLogStartDate(e.target.value)}
+                  className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
+                  aria-label="Data inicial"
+                />
+                <span className="text-slate-500">até</span>
+                <input
+                  type="date"
+                  value={logEndDate}
+                  onChange={(e) => setLogEndDate(e.target.value)}
+                  className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
+                  aria-label="Data final"
+                />
+              </div>
 
-              <select
-                value={logStatusFilter}
-                onChange={(e) => setLogStatusFilter(e.target.value as any)}
-                className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
-              >
-                <option value="todos">Todos os Status</option>
-                <option value="sucesso">🟢 Sucesso (SMTP)</option>
-                <option value="simulado">🟡 Simulado</option>
-                <option value="falha">🔴 Falha</option>
-              </select>
+              {(logSearch ||
+                logTypeFilter !== 'todos' ||
+                logCompanyFilter !== 'todas' ||
+                logMilestoneFilter !== 'todos' ||
+                logStatusFilter !== 'todos' ||
+                logStartDate ||
+                logEndDate) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLogSearch('');
+                    setLogTypeFilter('todos');
+                    setLogCompanyFilter('todas');
+                    setLogMilestoneFilter('todos');
+                    setLogStatusFilter('todos');
+                    setLogStartDate('');
+                    setLogEndDate('');
+                  }}
+                  className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                >
+                  <Eraser size={12} />
+                  Limpar filtros
+                </button>
+              )}
             </div>
           </div>
 
@@ -1004,11 +1404,11 @@ export const NotificationsView: React.FC = () => {
                 <thead>
                   <tr className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                     <th className="py-3 px-4">Data e Horário</th>
-                    <th className="py-3 px-4">Documento Relacionado</th>
-                    <th className="py-3 px-4">Empresa & Colaborador</th>
-                    <th className="py-3 px-4">Marco</th>
+                    <th className="py-3 px-4">Assunto / Documento</th>
+                    <th className="py-3 px-4">Empresa &amp; Responsável</th>
+                    <th className="py-3 px-4">Tipo / Marco</th>
                     <th className="py-3 px-4">Destinatários</th>
-                    <th className="py-3 px-4">Status & Idempotência</th>
+                    <th className="py-3 px-4">Status &amp; Resultado</th>
                     <th className="py-3 px-4 text-right">Ação</th>
                   </tr>
                 </thead>
@@ -1019,123 +1419,158 @@ export const NotificationsView: React.FC = () => {
                         <Clock size={32} className="mx-auto text-slate-400 mb-2" />
                         <p className="font-semibold text-slate-300">Nenhum registro de envio encontrado.</p>
                         <p className="text-[11px] text-slate-400 mt-0.5">
-                          Acione "Executar Verificação Agora" para disparar alertas pendentes.
+                          Ajuste os filtros ou realize um disparo de teste/avulso/monitoramento.
                         </p>
                       </td>
                     </tr>
                   ) : (
-                    filteredLogs.map((log) => (
-                      <tr key={log.id} className="hover:bg-slate-850/60 transition-colors">
-                        <td className="py-3 px-4 whitespace-nowrap">
-                          <span className="font-mono text-slate-300 font-semibold">
-                            {formatDateBR(log.dataHora.split('T')[0])}
-                          </span>
-                          <span className="block text-[10px] text-slate-400 font-mono">
-                            {log.dataHora.split('T')[1]?.substring(0, 8)}
-                          </span>
-                        </td>
+                    filteredLogs.map((log) => {
+                      const dispatchType = resolveDispatchType(log);
+                      const recipientsToShow =
+                        log.destinatariosDetalhados && log.destinatariosDetalhados.length > 0
+                          ? log.destinatariosDetalhados
+                          : log.destinatarios.map((email) => ({ nome: email, email }));
 
-                        <td className="py-3 px-4 max-w-[220px]">
-                          <span className="font-semibold text-white truncate block">{log.documentoTitulo}</span>
-                          <span className="text-[10px] text-slate-400">{log.categoria}</span>
-                          {log.dataVencimento && (
-                            <span className="text-[10px] text-amber-400/90 block font-mono">
-                              Venc: {formatDateBR(log.dataVencimento)}
+                      return (
+                        <tr key={log.id} className="hover:bg-slate-850/60 transition-colors">
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <span className="font-mono text-slate-300 font-semibold">
+                              {formatDateBR(log.dataHora.split('T')[0])}
                             </span>
-                          )}
-                        </td>
+                            <span className="block text-[10px] text-slate-400 font-mono">
+                              {log.dataHora.split('T')[1]?.substring(0, 8)}
+                            </span>
+                          </td>
 
-                        <td className="py-3 px-4 max-w-[200px]">
-                          <span className="text-slate-200 font-medium truncate block">{log.empresaNome}</span>
-                          {log.colaboradorNome && (
-                            <span className="text-[10px] text-slate-400 truncate block">
-                              {log.colaboradorNome}
+                          <td className="py-3 px-4 max-w-[230px]">
+                            <span className="font-semibold text-white truncate block" title={log.assunto || log.documentoTitulo}>
+                              {log.assunto || log.documentoTitulo}
                             </span>
-                          )}
-                        </td>
+                            <span className="text-[10px] text-slate-400">{log.categoria}</span>
+                            {log.dataVencimento && dispatchType === 'automatico' && (
+                              <span className="text-[10px] text-amber-400/90 block font-mono">
+                                Venc: {formatDateBR(log.dataVencimento)}
+                              </span>
+                            )}
+                          </td>
 
-                        <td className="py-3 px-4 whitespace-nowrap">
-                          {log.marco === 'hoje' && (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-red-950/80 text-red-300 border border-red-500">
-                              🚨 Vence Hoje
-                            </span>
-                          )}
-                          {log.marco === '15_dias' && (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-orange-950/80 text-orange-300 border border-orange-500/60">
-                              ⚠️ 15 Dias
-                            </span>
-                          )}
-                          {log.marco === '30_dias' && (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-500/40">
-                              ⏳ 30 Dias
-                            </span>
-                          )}
-                          {log.marco === 'recalculo' && (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-500/50">
-                              🔄 Recálculo
-                            </span>
-                          )}
-                          {log.marco === 'teste' && (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-blue-950/80 text-blue-300 border border-blue-500/50">
-                              🧪 Teste
-                            </span>
-                          )}
-                        </td>
+                          <td className="py-3 px-4 max-w-[200px]">
+                            <span className="text-slate-200 font-medium truncate block">{log.empresaNome}</span>
+                            {(log.usuarioResponsavel || log.colaboradorNome) && (
+                              <span className="text-[10px] text-slate-400 truncate block">
+                                Resp: {log.usuarioResponsavel || log.colaboradorNome}
+                              </span>
+                            )}
+                          </td>
 
-                        <td className="py-3 px-4 max-w-[220px]">
-                          <div className="flex flex-wrap gap-1">
-                            {log.destinatarios.map((dest, i) => (
+                          <td className="py-3 px-4 whitespace-nowrap space-y-1">
+                            <div>
+                              {dispatchType === 'teste' && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-500/40">
+                                  🧪 Teste SMTP
+                                </span>
+                              )}
+                              {dispatchType === 'avulso' && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-500/40">
+                                  ✉️ Avulso (BCC)
+                                </span>
+                              )}
+                              {dispatchType === 'automatico' && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                                  ⚙️ Automático
+                                </span>
+                              )}
+                            </div>
+
+                            {log.marco === 'hoje' && (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-red-950/80 text-red-300 border border-red-500">
+                                🚨 Vence Hoje
+                              </span>
+                            )}
+                            {log.marco === '15_dias' && (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-orange-950/80 text-orange-300 border border-orange-500/60">
+                                ⚠️ 15 Dias
+                              </span>
+                            )}
+                            {log.marco === '30_dias' && (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-500/40">
+                                ⏳ 30 Dias
+                              </span>
+                            )}
+                            {log.marco === 'recalculo' && (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-purple-950/80 text-purple-300 border border-purple-500/50">
+                                🔄 Recálculo
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-4 max-w-[230px]">
+                            <div className="flex flex-wrap gap-1">
+                              {recipientsToShow.slice(0, 3).map((dest, i) => (
+                                <span
+                                  key={i}
+                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 truncate max-w-[190px]"
+                                  title={`${dest.nome} (${dest.email})`}
+                                >
+                                  {dest.nome !== dest.email ? `${dest.nome} <${dest.email}>` : dest.email}
+                                </span>
+                              ))}
+                              {recipientsToShow.length > 3 && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20">
+                                  +{recipientsToShow.length - 3} destinatário(s)
+                                </span>
+                              )}
+                            </div>
+                          </td>
+
+                          <td className="py-3 px-4 max-w-[220px]">
+                            <div className="space-y-1">
+                              {log.status === 'sucesso' && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                                  <CheckCircle2 size={11} /> Enviado (SMTP)
+                                </span>
+                              )}
+                              {log.status === 'simulado' && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                  <Sparkles size={11} /> Simulado (Dev)
+                                </span>
+                              )}
+                              {log.status === 'falha' && (
+                                <div>
+                                  <span
+                                    className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30"
+                                    title={log.erro}
+                                  >
+                                    <XCircle size={11} /> Falha no Envio
+                                  </span>
+                                  {log.erro && (
+                                    <p className="text-[10px] text-red-300/90 mt-1 line-clamp-2" title={log.erro}>
+                                      {log.erro}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
                               <span
-                                key={i}
-                                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 truncate max-w-[190px]"
-                                title={dest}
+                                className="text-[9px] text-slate-400 font-mono block truncate max-w-[160px]"
+                                title={`Chave Idempotência: ${log.idempotencyKey}`}
                               >
-                                {dest}
+                                key: {log.idempotencyKey}
                               </span>
-                            ))}
-                          </div>
-                        </td>
+                            </div>
+                          </td>
 
-                        <td className="py-3 px-4">
-                          <div className="space-y-1">
-                            {log.status === 'sucesso' && (
-                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                                <CheckCircle2 size={11} /> Enviado (SMTP)
-                              </span>
-                            )}
-                            {log.status === 'simulado' && (
-                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                <Sparkles size={11} /> Simulado (Dev)
-                              </span>
-                            )}
-                            {log.status === 'falha' && (
-                              <span
-                                className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30"
-                                title={log.erro}
-                              >
-                                <XCircle size={11} /> Falha no Envio
-                              </span>
-                            )}
-                            <span
-                              className="text-[9px] text-slate-400 font-mono block truncate max-w-[160px]"
-                              title={`Chave Idempotência: ${log.idempotencyKey}`}
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            <button
+                              onClick={() => setPreviewLog(log)}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-slate-800 transition-colors"
+                              title="Visualizar Detalhes e Prévia do E-mail"
                             >
-                              key: {log.idempotencyKey}
-                            </span>
-                          </div>
-                        </td>
-
-                        <td className="py-3 px-4 text-right whitespace-nowrap">
-                          <button
-                            onClick={() => setPreviewLog(log)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-slate-800 transition-colors"
-                            title="Visualizar Prévia do E-mail Enviado"
-                          >
-                            <Eye size={15} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))
+                              <Eye size={15} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1245,8 +1680,8 @@ export const NotificationsView: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 4: Serviço SMTP & Diagnóstico Backend */}
-      {activeSubTab === 'smtp' && (
+      {/* TAB 4: Serviço SMTP & Diagnóstico Protegido (Netlify Functions) */}
+      {activeSubTab === 'smtp' && isAdmin && (
         <div className="space-y-6">
           <div className="rounded-xl bg-slate-900 border border-slate-800 p-6 space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
@@ -1255,9 +1690,11 @@ export const NotificationsView: React.FC = () => {
                   <Server size={24} />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-white">Configuração do Servidor de E-mail (SMTP)</h3>
+                  <h3 className="text-base font-bold text-white">
+                    Serviço SMTP &amp; Agendamento Serverless (Netlify)
+                  </h3>
                   <p className="text-xs text-slate-400">
-                    Comunicação real com o servidor de correio eletrônico via Nodemailer e agendamento backend 24/7.
+                    Credenciais gerenciadas exclusivamente por Variáveis de Ambiente protegidas do Netlify, com execução diária via Netlify Scheduled Function.
                   </p>
                 </div>
               </div>
@@ -1270,12 +1707,13 @@ export const NotificationsView: React.FC = () => {
                       : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                   }`}
                 >
-                  {smtpStatusInfo?.configured ? '🟢 SMTP Configurado' : '🟡 Credenciais Incompletas no .env'}
+                  {smtpStatusInfo?.configured
+                    ? '🟢 SMTP Configurado'
+                    : '🟡 Aguardando Variáveis SMTP no Netlify'}
                 </span>
               </div>
             </div>
 
-            {/* Test connection alert */}
             {connTestResult && (
               <div
                 className={`p-3.5 rounded-xl border text-xs flex items-start gap-2.5 ${
@@ -1300,172 +1738,140 @@ export const NotificationsView: React.FC = () => {
               </div>
             )}
 
-            {smtpFeedback && (
-              <div
-                className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
-                  smtpFeedback.success
-                    ? 'bg-blue-950/40 border-blue-500/40 text-blue-200'
-                    : 'bg-red-950/40 border-red-500/40 text-red-200'
-                }`}
-              >
-                <Info size={15} className="shrink-0" />
-                <span>{smtpFeedback.text}</span>
+            {smtpStatusInfo && !smtpStatusInfo.configured && (
+              <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200 flex items-start gap-2.5">
+                <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold text-amber-100">
+                    Envio real bloqueado: variáveis SMTP pendentes no ambiente do servidor
+                  </p>
+                  <p className="text-[11px] mt-0.5 opacity-90">
+                    Variáveis ausentes:{' '}
+                    <span className="font-mono font-bold text-white">
+                      {(smtpStatusInfo.missingVars && smtpStatusInfo.missingVars.length > 0
+                        ? smtpStatusInfo.missingVars
+                        : ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS']
+                      ).join(', ')}
+                    </span>
+                    . Defina essas variáveis no painel de Environment Variables do Netlify (ou no ambiente do servidor) para habilitar o disparo de e-mails.
+                  </p>
+                </div>
               </div>
             )}
 
-            {/* SMTP Form */}
-            <form onSubmit={handleSaveSmtpConfig} className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">
-                    Servidor SMTP (Host) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={smtpHost}
-                    onChange={(e) => setSmtpHost(e.target.value)}
-                    placeholder="Ex: smtp.gmail.com ou smtp.office365.com"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">Host de envio do seu provedor</p>
-                </div>
+            <div className="p-3.5 rounded-xl bg-blue-950/30 border border-blue-500/30 text-xs text-blue-200 flex items-start gap-2.5">
+              <Lock size={16} className="text-blue-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-white">Proteção de Credenciais em Produção</p>
+                <p className="text-[11px] text-slate-300 mt-0.5">
+                  Nenhuma senha ou credencial SMTP é gravada em arquivo local ou exposta no navegador. Todas as configurações são lidas em tempo de execução a partir das variáveis protegidas no painel do Netlify.
+                </p>
+              </div>
+            </div>
 
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">Porta SMTP *</label>
-                  <input
-                    type="text"
-                    required
-                    value={smtpPort}
-                    onChange={(e) => setSmtpPort(e.target.value)}
-                    placeholder="587 ou 465"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">Geralmente 587 (TLS/STARTTLS) ou 465 (SSL)</p>
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">
-                    Usuário / E-mail de Envio *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={smtpUser}
-                    onChange={(e) => setSmtpUser(e.target.value)}
-                    placeholder="notificacoes.sst@gmail.com"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">E-mail ou nome de usuário da conta SMTP</p>
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">
-                    Senha / Senha de App *
-                  </label>
-                  <input
-                    type="password"
-                    value={smtpPass}
-                    onChange={(e) => setSmtpPass(e.target.value)}
-                    placeholder="••••••••••••••••"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    Para contas Gmail, utilize uma &quot;Senha de App&quot; de 16 caracteres.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">
-                    Remetente Exibido (From) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={smtpFrom}
-                    onChange={(e) => setSmtpFrom(e.target.value)}
-                    placeholder='Gestão SST <notificacoes.sst@gmail.com>'
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">Nome e e-mail que aparecem para o destinatário</p>
-                </div>
-
-                <div className="flex items-center gap-3 pt-6">
-                  <label className="relative flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={smtpSecure}
-                      onChange={(e) => setSmtpSecure(e.target.checked)}
-                      className="rounded border-slate-700 bg-slate-950 text-blue-600 focus:ring-0"
-                    />
-                    <span className="text-slate-300 font-medium">Conexão Segura Direta SSL (Porta 465)</span>
-                  </label>
-                </div>
+            {/* Safe Masked Diagnostics Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+              <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Servidor SMTP (SMTP_HOST)</span>
+                <span className="font-mono font-semibold text-white mt-1 block">
+                  {smtpStatusInfo?.hostLabel || 'Não configurado'}
+                </span>
               </div>
 
-              {/* Action buttons */}
-              <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={handleTestConnectionOnly}
-                  disabled={testingConnection}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+              <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Porta &amp; Segurança (SMTP_PORT / SECURE)</span>
+                <span className="font-mono font-semibold text-white mt-1 block">
+                  {smtpStatusInfo?.port || '587'} • {smtpStatusInfo?.secure ? 'SSL/TLS' : 'STARTTLS'}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Usuário SMTP (SMTP_USER)</span>
+                <span className="font-mono font-semibold text-white mt-1 block">
+                  {smtpStatusInfo?.userMasked || 'Não configurado'}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Senha SMTP (SMTP_PASS)</span>
+                <span
+                  className={`font-semibold mt-1 block ${
+                    smtpStatusInfo?.passConfigured ? 'text-emerald-400' : 'text-amber-400'
+                  }`}
                 >
-                  <RefreshCw size={13} className={testingConnection ? 'animate-spin' : ''} />
-                  <span>{testingConnection ? 'Testando Conexão...' : 'Testar Conexão com Servidor'}</span>
-                </button>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTestResult(null);
-                      setIsTestEmailModalOpen(true);
-                    }}
-                    className="px-4 py-2 rounded-lg bg-blue-950/60 hover:bg-blue-900/60 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-2 cursor-pointer"
-                  >
-                    <Send size={13} />
-                    <span>Disparar E-mail de Teste</span>
-                  </button>
-
-                  <button
-                    type="submit"
-                    disabled={savingSmtp}
-                    className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-600/30 transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
-                  >
-                    {savingSmtp && <RefreshCw size={13} className="animate-spin" />}
-                    <span>{savingSmtp ? 'Salvando...' : 'Salvar e Validar SMTP'}</span>
-                  </button>
-                </div>
+                  {smtpStatusInfo?.passConfigured ? 'Configurada no Servidor' : 'Pendente no Netlify'}
+                </span>
               </div>
-            </form>
+
+              <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Remetente (SMTP_FROM)</span>
+                <span
+                  className={`font-semibold mt-1 block ${
+                    smtpStatusInfo?.fromConfigured ? 'text-emerald-400' : 'text-slate-300'
+                  }`}
+                >
+                  {smtpStatusInfo?.fromConfigured ? 'Definido via Variável' : 'Usa SMTP_USER como padrão'}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Rotina Automática Diária</span>
+                <span className="font-semibold text-blue-300 mt-1 block">
+                  Netlify Scheduled Function (08:00 UTC)
+                </span>
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={handleTestConnectionOnly}
+                disabled={testingConnection}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                <RefreshCw size={13} className={testingConnection ? 'animate-spin' : ''} />
+                <span>{testingConnection ? 'Testando Conexão...' : 'Testar Conexão com Servidor'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setTestResult(null);
+                  setTestEmailAddress(profile?.email || '');
+                  setTestEmailSubject('');
+                  setTestEmailMessage('');
+                  setIsTestEmailModalOpen(true);
+                }}
+                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-600/20 flex items-center gap-2 cursor-pointer"
+              >
+                <Send size={13} />
+                <span>ENVIAR E-MAIL DE TESTE</span>
+              </button>
+            </div>
           </div>
 
-          {/* Quick Guide Card */}
+          {/* Required Netlify Environment Variables Reference */}
           <div className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs space-y-3">
             <h4 className="font-bold text-slate-200 flex items-center gap-2">
               <Info size={15} className="text-blue-400" />
-              Orientações para Provedores de E-mail
+              Variáveis de Ambiente Necessárias no Netlify (Site Settings &gt; Environment Variables)
             </h4>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-slate-400 text-[11px] leading-relaxed">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-slate-400 text-[11px]">
               <div className="p-3 rounded-lg bg-slate-950/70 border border-slate-800">
-                <p className="font-semibold text-slate-200 mb-1">Google Gmail</p>
-                <p>1. Ative a verificação em duas etapas na sua conta Google.</p>
-                <p>2. Acesse Segurança &gt; Senhas de App e crie uma senha para o Gestão SST.</p>
-                <p className="mt-1 font-mono text-blue-300">Host: smtp.gmail.com | Porta: 587</p>
+                <p className="font-mono font-bold text-blue-300">SMTP_HOST</p>
+                <p className="mt-1">Servidor SMTP (ex: smtp.gmail.com, smtp.office365.com)</p>
               </div>
-
               <div className="p-3 rounded-lg bg-slate-950/70 border border-slate-800">
-                <p className="font-semibold text-slate-200 mb-1">Microsoft 365 / Outlook</p>
-                <p>1. Utilize o host oficial do Office365 com autenticação moderna ou SMTP Auth.</p>
-                <p className="mt-1 font-mono text-blue-300">Host: smtp.office365.com | Porta: 587</p>
+                <p className="font-mono font-bold text-blue-300">SMTP_PORT / SMTP_SECURE</p>
+                <p className="mt-1">Porta 587 (false) ou 465 SSL (true)</p>
               </div>
-
               <div className="p-3 rounded-lg bg-slate-950/70 border border-slate-800">
-                <p className="font-semibold text-slate-200 mb-1">Amazon SES / SendGrid</p>
-                <p>1. Crie credenciais dedicadas de API SMTP.</p>
-                <p>2. Verifique o domínio ou e-mail remetente no painel do provedor.</p>
-                <p className="mt-1 font-mono text-blue-300">Porta: 587 (TLS) ou 465 (SSL)</p>
+                <p className="font-mono font-bold text-blue-300">SMTP_USER / SMTP_PASS</p>
+                <p className="mt-1">Conta de envio e Senha / Senha de App</p>
+              </div>
+              <div className="p-3 rounded-lg bg-slate-950/70 border border-slate-800">
+                <p className="font-mono font-bold text-blue-300">API_AUTH_SECRET / APP_URL</p>
+                <p className="mt-1">Chave de assinatura dos tokens e URL pública do Netlify</p>
               </div>
             </div>
           </div>
@@ -1488,6 +1894,13 @@ export const NotificationsView: React.FC = () => {
                 <X size={18} />
               </button>
             </div>
+
+            {ruleFormError && (
+              <div className="p-3 rounded-xl bg-red-950/40 border border-red-500/40 text-xs text-red-200 flex items-center gap-2">
+                <AlertTriangle size={15} className="text-red-400 shrink-0" />
+                <span>{ruleFormError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSaveRule} className="space-y-4 text-xs">
               {/* Rule Name */}
@@ -1707,14 +2120,14 @@ export const NotificationsView: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL: Teste de Disparo de E-mail */}
+      {/* MODAL: Envio Imediato de E-mail de Teste */}
       {isTestEmailModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
-          <div className="relative w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4 my-8">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <Send size={18} className="text-blue-400" />
-                Testar Disparo de E-mail
+                Envio Imediato de E-mail de Teste
               </h3>
               <button
                 onClick={() => setIsTestEmailModalOpen(false)}
@@ -1724,44 +2137,68 @@ export const NotificationsView: React.FC = () => {
               </button>
             </div>
 
-            <form onSubmit={handleSendTestEmail} className="space-y-3 text-xs">
+            <form onSubmit={handleSendTestEmail} className="space-y-3.5 text-xs">
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">Destinatário do Teste *</label>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  E-mail destinatário do teste *
+                </label>
                 <input
                   type="email"
                   required
                   value={testEmailAddress}
                   onChange={(e) => setTestEmailAddress(e.target.value)}
-                  placeholder="seu-email@dominio.com"
+                  placeholder="destinatario@empresa.com.br"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  Assunto do e-mail (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={testEmailSubject}
+                  onChange={(e) => setTestEmailSubject(e.target.value)}
+                  placeholder="Teste de Integração SMTP - Gestão SST"
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
                 />
               </div>
 
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">Nota de Teste (Opcional)</label>
-                <input
-                  type="text"
-                  value={testEmailNote}
-                  onChange={(e) => setTestEmailNote(e.target.value)}
-                  placeholder="Ex: Testando envio de alerta para validação do SESMT"
+                <label className="block text-slate-300 font-semibold mb-1">
+                  Mensagem de teste (Opcional)
+                </label>
+                <textarea
+                  rows={3}
+                  value={testEmailMessage}
+                  onChange={(e) => setTestEmailMessage(e.target.value)}
+                  placeholder="Mensagem opcional para validar a entrega imediata via SMTP..."
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
                 />
               </div>
 
               {testResult && (
                 <div
-                  className={`p-3 rounded-lg text-xs border ${
+                  className={`p-3.5 rounded-xl text-xs border space-y-1 ${
                     testResult.success
                       ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
                       : 'bg-red-950/40 border-red-500/50 text-red-300'
                   }`}
                 >
-                  <p className="font-bold">{testResult.success ? '✅ Disparo realizado com sucesso' : '❌ Falha no disparo'}</p>
-                  <p className="text-[11px] mt-0.5">{testResult.message}</p>
+                  <p className="font-bold flex items-center gap-1.5">
+                    {testResult.success ? <CheckCircle2 size={15} /> : <XCircle size={15} />}
+                    <span>{testResult.message}</span>
+                  </p>
+                  {testResult.detail && (
+                    <p className="text-[11px] opacity-90 font-mono break-words bg-slate-950/50 p-2 rounded border border-slate-800">
+                      Detalhes: {testResult.detail}
+                    </p>
+                  )}
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
                 <button
                   type="button"
                   onClick={() => setIsTestEmailModalOpen(false)}
@@ -1772,10 +2209,10 @@ export const NotificationsView: React.FC = () => {
                 <button
                   type="submit"
                   disabled={sendingTest}
-                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold disabled:opacity-50 flex items-center gap-2"
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold disabled:opacity-50 flex items-center gap-2 cursor-pointer"
                 >
-                  {sendingTest && <RefreshCw size={13} className="animate-spin" />}
-                  <span>{sendingTest ? 'Enviando...' : 'Enviar Agora'}</span>
+                  {sendingTest ? <RefreshCw size={13} className="animate-spin" /> : <Send size={13} />}
+                  <span>{sendingTest ? 'Enviando...' : 'ENVIAR E-MAIL DE TESTE'}</span>
                 </button>
               </div>
             </form>
@@ -1783,15 +2220,21 @@ export const NotificationsView: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL: DISPARAR E-MAIL (Exclusivo Administrador) */}
-      {isCustomEmailModalOpen && (
+      {/* MODAL: ENVIAR E-MAIL AVULSO (Exclusivo Administrador - BCC) */}
+      {isCustomEmailModalOpen && isAdmin && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="relative w-full max-w-xl rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4 my-8">
+          <div className="relative w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4 my-8">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <Mail size={18} className="text-blue-400" />
-                Disparar E-mail (Comunicação SESMT / EHS)
-              </h3>
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Mail size={18} className="text-blue-400" />
+                  ENVIAR E-MAIL AVULSO
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5">
+                  <Lock size={12} className="text-emerald-400" />
+                  Envio protegido em cópia oculta (BCC): os destinatários não visualizam os endereços uns dos outros.
+                </p>
+              </div>
               <button
                 onClick={() => setIsCustomEmailModalOpen(false)}
                 className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
@@ -1799,10 +2242,6 @@ export const NotificationsView: React.FC = () => {
                 <X size={18} />
               </button>
             </div>
-
-            <p className="text-[11px] text-slate-400">
-              Envio real de e-mails para empresas contratadas, colaboradores ou equipes de SST via servidor SMTP.
-            </p>
 
             {customEmailResult && (
               <div
@@ -1817,19 +2256,33 @@ export const NotificationsView: React.FC = () => {
                 ) : (
                   <AlertTriangle size={16} className="text-red-400 shrink-0 mt-0.5" />
                 )}
-                <div>
+                <div className="space-y-1">
                   <p className="font-bold">{customEmailResult.message}</p>
+                  {customEmailResult.detail && (
+                    <p className="text-[11px] font-mono opacity-90">{customEmailResult.detail}</p>
+                  )}
                 </div>
               </div>
             )}
 
-            <form onSubmit={handleSendCustomEmail} className="space-y-3.5 text-xs">
-              {/* Destinatário(s) */}
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Destinatário(s) *
-                </label>
-                <div className="flex items-center gap-2 mb-2">
+            <form onSubmit={handleSendCustomEmail} className="space-y-4 text-xs">
+              {/* Destinatários: Lista pesquisável + manual */}
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="block text-slate-300 font-semibold">
+                    Destinatários ({selectedRecipients.length} selecionado(s)) *
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsRecipientPickerOpen(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold cursor-pointer"
+                  >
+                    <UserPlus size={14} />
+                    <span>Selecionar Pessoas Cadastradas ({registeredPeopleDirectory.length})</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
                   <input
                     type="email"
                     value={customToInput}
@@ -1837,38 +2290,43 @@ export const NotificationsView: React.FC = () => {
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
-                        handleAddCustomEmail();
+                        handleAddManualRecipient();
                       }
                     }}
-                    placeholder="Digite um e-mail e clique em Adicionar"
+                    placeholder="Ou digite um e-mail avulso externo e clique em Adicionar"
                     className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
                   />
                   <button
                     type="button"
-                    onClick={handleAddCustomEmail}
-                    className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold cursor-pointer shrink-0"
+                    onClick={handleAddManualRecipient}
+                    className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold cursor-pointer shrink-0"
                   >
                     Adicionar
                   </button>
                 </div>
 
-                {/* Email Chips */}
-                <div className="flex flex-wrap gap-1.5 p-2 rounded-lg bg-slate-950/60 border border-slate-800 min-h-[42px]">
-                  {customToEmails.length === 0 ? (
+                {/* Selected Recipients Chips (Nome, Empresa, E-mail) */}
+                <div className="flex flex-wrap gap-1.5 p-2.5 rounded-lg bg-slate-950/60 border border-slate-800 max-h-36 overflow-y-auto custom-scrollbar min-h-[48px]">
+                  {selectedRecipients.length === 0 ? (
                     <span className="text-slate-500 text-[11px] py-1">
-                      Nenhum destinatário adicionado. Digite acima e clique em Adicionar.
+                      Nenhum destinatário selecionado. Clique em &quot;Selecionar Pessoas Cadastradas&quot; ou adicione um e-mail acima.
                     </span>
                   ) : (
-                    customToEmails.map((email, idx) => (
+                    selectedRecipients.map((recipient) => (
                       <span
-                        key={idx}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30 text-xs font-mono"
+                        key={recipient.email}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-500/15 text-blue-200 border border-blue-500/30 text-[11px]"
                       >
-                        {email}
+                        <span className="font-semibold text-white">{recipient.nome}</span>
+                        {recipient.empresa && (
+                          <span className="text-slate-400">({recipient.empresa})</span>
+                        )}
+                        <span className="font-mono text-blue-300">&lt;{recipient.email}&gt;</span>
                         <button
                           type="button"
-                          onClick={() => handleRemoveCustomEmail(email)}
-                          className="hover:text-red-400 cursor-pointer"
+                          onClick={() => handleRemoveSelectedRecipient(recipient.email)}
+                          className="hover:text-red-400 ml-0.5 cursor-pointer"
+                          title="Remover destinatário"
                         >
                           <X size={12} />
                         </button>
@@ -1881,7 +2339,7 @@ export const NotificationsView: React.FC = () => {
               {/* Empresa Relacionada */}
               <div>
                 <label className="block text-slate-300 font-semibold mb-1">
-                  Empresa Relacionada
+                  Empresa Relacionada (Opcional)
                 </label>
                 <select
                   value={customCompanyId}
@@ -1899,40 +2357,104 @@ export const NotificationsView: React.FC = () => {
 
               {/* Assunto */}
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Assunto *
-                </label>
+                <label className="block text-slate-300 font-semibold mb-1">Assunto *</label>
                 <input
                   type="text"
                   required
                   value={customSubject}
                   onChange={(e) => setCustomSubject(e.target.value)}
-                  placeholder="Ex: Convocação para Renovação de Treinamento NR-35 / ASO"
+                  placeholder="Ex: Solicitação de Atualização Documental / Comunicado SESMT"
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-medium"
                 />
               </div>
 
-              {/* Mensagem */}
+              {/* Mensagem com Barra de Formatação */}
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Mensagem *
-                </label>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                  <label className="block text-slate-300 font-semibold">Mensagem *</label>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => applyFormatting('bold')}
+                      className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                      title="Negrito (**texto**)"
+                    >
+                      <Bold size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyFormatting('italic')}
+                      className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                      title="Itálico (*texto*)"
+                    >
+                      <Italic size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyFormatting('list')}
+                      className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                      title="Lista com marcadores"
+                    >
+                      <List size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsLinkInputOpen(!isLinkInputOpen)}
+                      className={`p-1.5 rounded border ${
+                        isLinkInputOpen
+                          ? 'bg-blue-600 text-white border-blue-500'
+                          : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                      }`}
+                      title="Inserir link"
+                    >
+                      <Link2 size={13} />
+                    </button>
+                  </div>
+                </div>
+
+                {isLinkInputOpen && (
+                  <div className="mb-2 p-2.5 rounded-lg bg-slate-950 border border-blue-500/40 flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={linkTextInput}
+                      onChange={(e) => setLinkTextInput(e.target.value)}
+                      placeholder="Texto do link (opcional)"
+                      className="flex-1 min-w-[140px] px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                    />
+                    <input
+                      type="url"
+                      value={linkUrlInput}
+                      onChange={(e) => setLinkUrlInput(e.target.value)}
+                      placeholder="https://..."
+                      className="flex-1 min-w-[180px] px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-white text-xs font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleInsertLink}
+                      className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold"
+                    >
+                      Inserir
+                    </button>
+                  </div>
+                )}
+
                 <textarea
+                  ref={customMessageRef}
                   required
                   rows={5}
                   value={customMessage}
                   onChange={(e) => setCustomMessage(e.target.value)}
-                  placeholder="Escreva a mensagem oficial que será enviada aos destinatários..."
+                  placeholder="Escreva o comunicado, orientação ou cobrança de documentos..."
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
 
-              {/* Anexar Documentos */}
+              {/* Anexar Documento */}
               <div>
                 <label className="block text-slate-300 font-semibold mb-1">
-                  Anexar Documento (Opcional - PDF, Imagens, Documentos)
+                  Anexar Documento (Opcional - máx. 10 MB)
                 </label>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                   <label className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer font-medium">
                     <Paperclip size={14} className="text-blue-400" />
                     <span>{customAttachment ? 'Substituir Anexo' : 'Escolher Arquivo'}</span>
@@ -1964,29 +2486,239 @@ export const NotificationsView: React.FC = () => {
               </div>
 
               {/* Modal Buttons */}
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setIsCustomEmailModalOpen(false)}
-                  className="px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                  onClick={handleClearCustomForm}
+                  className="px-3 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-1.5"
                 >
-                  Cancelar
+                  <Eraser size={13} />
+                  <span>Limpar formulário</span>
                 </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingCustomEmail}
-                  className="px-5 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold shadow-lg shadow-indigo-600/30 transition-all disabled:opacity-50 flex items-center gap-2 cursor-pointer"
-                >
-                  {isSubmittingCustomEmail && <RefreshCw size={13} className="animate-spin" />}
-                  <span>{isSubmittingCustomEmail ? 'Enviando...' : 'Disparar E-mail Agora'}</span>
-                </button>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setIsCustomPreviewOpen(true)}
+                    disabled={!customSubject.trim() && !customMessage.trim()}
+                    className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Eye size={13} />
+                    <span>Pré-visualizar</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsCustomEmailModalOpen(false)}
+                    className="px-3.5 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                  >
+                    Cancelar
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={isSubmittingCustomEmail}
+                    className="px-5 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold shadow-lg shadow-indigo-600/30 transition-all disabled:opacity-50 flex items-center gap-2 cursor-pointer"
+                  >
+                    {isSubmittingCustomEmail ? <RefreshCw size={13} className="animate-spin" /> : <Send size={13} />}
+                    <span>{isSubmittingCustomEmail ? 'Enviando...' : 'Enviar e-mail'}</span>
+                  </button>
+                </div>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {/* MODAL: Visualizar Prévia do E-mail */}
+      {/* MODAL: Seletor Pesquisável de Destinatários Cadastrados */}
+      {isRecipientPickerOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4 my-8 max-h-[88vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Users size={18} className="text-indigo-400" />
+                  Selecionar Destinatários Cadastrados
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  Usuários, colaboradores e contatos empresariais com e-mail válido no Gestão SST.
+                </p>
+              </div>
+              <button
+                onClick={() => setIsRecipientPickerOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={pickerSearch}
+                  onChange={(e) => setPickerSearch(e.target.value)}
+                  placeholder="Pesquisar por nome, empresa ou e-mail..."
+                  className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <select
+                value={pickerCompanyFilter}
+                onChange={(e) => setPickerCompanyFilter(e.target.value)}
+                className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="todas">Todas as Empresas ({registeredPeopleDirectory.length})</option>
+                {pickerCompanies.map((comp) => (
+                  <option key={comp} value={comp}>
+                    {comp}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center justify-between text-xs border-b border-slate-800 pb-2">
+              <span className="text-slate-400">
+                Exibindo <strong className="text-white">{filteredDirectory.length}</strong> pessoa(s)
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSelectAllFiltered}
+                  className="px-2.5 py-1 rounded bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 font-semibold"
+                >
+                  Selecionar todos
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeselectAllFiltered}
+                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700"
+                >
+                  Desmarcar filtrados
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar min-h-[220px]">
+              {filteredDirectory.length === 0 ? (
+                <div className="py-10 text-center text-xs text-slate-400">
+                  Nenhuma pessoa com e-mail válido encontrada para este filtro.
+                </div>
+              ) : (
+                filteredDirectory.map((person) => {
+                  const isChecked = selectedRecipients.some((r) => r.email === person.email);
+                  return (
+                    <button
+                      key={person.email}
+                      type="button"
+                      onClick={() => handleToggleDirectoryPerson(person)}
+                      className={`w-full text-left p-2.5 rounded-xl border transition-colors flex items-center justify-between gap-3 ${
+                        isChecked
+                          ? 'bg-blue-950/40 border-blue-500/50 text-white'
+                          : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {isChecked ? (
+                          <CheckSquare size={16} className="text-blue-400 shrink-0" />
+                        ) : (
+                          <Square size={16} className="text-slate-500 shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-white truncate">
+                            {person.nome}{' '}
+                            {person.cargoOuPerfil && (
+                              <span className="text-[10px] font-normal text-slate-400">
+                                • {person.cargoOuPerfil}
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-[11px] text-slate-400 truncate">{person.empresa}</p>
+                        </div>
+                      </div>
+                      <span className="text-[11px] font-mono text-blue-300 shrink-0">{person.email}</span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-slate-800 flex items-center justify-between text-xs">
+              <span className="text-slate-300">
+                <strong className="text-blue-400">{selectedRecipients.length}</strong> destinatário(s) selecionado(s)
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsRecipientPickerOpen(false)}
+                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold"
+              >
+                Concluir Seleção
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Pré-visualização do E-mail Avulso */}
+      {isCustomPreviewOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4 my-8">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Eye size={18} className="text-blue-400" />
+                Pré-visualização do E-mail Avulso (BCC)
+              </h3>
+              <button
+                onClick={() => setIsCustomPreviewOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <p>
+                  <span className="text-slate-400">Remetente:</span>{' '}
+                  <strong className="text-white">{profile?.nome || 'Administrador EHS'}</strong>
+                </p>
+                <p>
+                  <span className="text-slate-400">Destinatários (Cópia Oculta - BCC):</span>{' '}
+                  <strong className="text-emerald-400">{selectedRecipients.length} pessoa(s)</strong>
+                </p>
+                <p>
+                  <span className="text-slate-400">Assunto:</span>{' '}
+                  <strong className="text-white">{customSubject || '(Sem assunto)'}</strong>
+                </p>
+                {customAttachment && (
+                  <p>
+                    <span className="text-slate-400">Anexo:</span>{' '}
+                    <span className="text-blue-300 font-mono">{customAttachment.name}</span>
+                  </p>
+                )}
+              </div>
+
+              <div
+                className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-slate-200 leading-relaxed min-h-[160px] max-h-[320px] overflow-y-auto"
+                dangerouslySetInnerHTML={{ __html: formatPreviewBodyHtml(customMessage) }}
+              />
+            </div>
+
+            <div className="pt-2 border-t border-slate-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsCustomPreviewOpen(false)}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs"
+              >
+                Voltar à Edição
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Visualizar Prévia do E-mail (Histórico) */}
       {previewLog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 overflow-y-auto">
           <div className="relative w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4 my-8 max-h-[90vh] flex flex-col">
@@ -1994,10 +2726,11 @@ export const NotificationsView: React.FC = () => {
               <div>
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <Eye size={18} className="text-blue-400" />
-                  Prévia do E-mail Disparado
+                  Detalhes e Prévia do E-mail
                 </h3>
                 <p className="text-[11px] text-slate-400">
-                  Enviado em {formatDateBR(previewLog.dataHora.split('T')[0])} para {previewLog.destinatarios.join(', ')}
+                  Registrado em {formatDateBR(previewLog.dataHora.split('T')[0])} • Destinatário(s):{' '}
+                  {previewLog.destinatarios.join(', ')}
                 </p>
               </div>
               <button
@@ -2008,23 +2741,60 @@ export const NotificationsView: React.FC = () => {
               </button>
             </div>
 
-            {/* Rendered HTML preview inside iframe or sanitized container */}
-            <div className="flex-1 overflow-y-auto p-2 bg-slate-950 rounded-xl border border-slate-800 custom-scrollbar">
-              <iframe
-                title="Email Preview"
-                srcDoc={buildNotificationHtml({
-                  to: previewLog.destinatarios,
-                  documentTitle: previewLog.documentoTitulo,
-                  category: previewLog.categoria,
-                  companyName: previewLog.empresaNome,
-                  employeeName: previewLog.colaboradorNome,
-                  expirationDate: previewLog.dataVencimento || '',
-                  daysRemaining: previewLog.diasRestantes ?? 15,
-                  milestone: (previewLog.marco === 'hoje' || previewLog.marco === '15_dias' || previewLog.marco === '30_dias') ? previewLog.marco : '15_dias',
-                })}
-                className="w-full h-[450px] border-none rounded-lg"
-              />
-            </div>
+            {resolveDispatchType(previewLog) === 'automatico' && previewLog.marco !== 'recalculo' ? (
+              <div className="flex-1 overflow-y-auto p-2 bg-slate-950 rounded-xl border border-slate-800 custom-scrollbar">
+                <iframe
+                  title="Email Preview"
+                  srcDoc={buildNotificationHtml({
+                    to: previewLog.destinatarios,
+                    documentTitle: previewLog.documentoTitulo,
+                    category: previewLog.categoria,
+                    companyName: previewLog.empresaNome,
+                    employeeName: previewLog.colaboradorNome,
+                    expirationDate: previewLog.dataVencimento || '',
+                    daysRemaining: previewLog.diasRestantes ?? 15,
+                    milestone:
+                      previewLog.marco === 'hoje' ||
+                      previewLog.marco === '15_dias' ||
+                      previewLog.marco === '30_dias'
+                        ? previewLog.marco
+                        : '15_dias',
+                  })}
+                  className="w-full h-[450px] border-none rounded-lg"
+                />
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-3 text-xs">
+                <div className="space-y-1 border-b border-slate-800 pb-3">
+                  <p>
+                    <span className="text-slate-400">Assunto:</span>{' '}
+                    <strong className="text-white">{previewLog.assunto || previewLog.documentoTitulo}</strong>
+                  </p>
+                  <p>
+                    <span className="text-slate-400">Empresa:</span>{' '}
+                    <span className="text-slate-200">{previewLog.empresaNome}</span>
+                  </p>
+                  {previewLog.usuarioResponsavel && (
+                    <p>
+                      <span className="text-slate-400">Responsável:</span>{' '}
+                      <span className="text-slate-200">{previewLog.usuarioResponsavel}</span>
+                    </p>
+                  )}
+                </div>
+                <div
+                  className="text-slate-200 leading-relaxed"
+                  dangerouslySetInnerHTML={{
+                    __html: formatPreviewBodyHtml(previewLog.mensagem || 'Sem conteúdo textual registrado.'),
+                  }}
+                />
+                {previewLog.erro && (
+                  <div className="p-3 rounded-lg bg-red-950/40 border border-red-500/40 text-red-200">
+                    <p className="font-bold">Motivo da Falha:</p>
+                    <p className="font-mono text-[11px] mt-0.5">{previewLog.erro}</p>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
               <span className="font-mono text-[11px]">Chave: {previewLog.idempotencyKey}</span>

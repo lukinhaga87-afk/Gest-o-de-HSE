@@ -107,7 +107,7 @@ interface SSTContextType {
     attachmentDataUrl?: string;
     senderName?: string;
     senderEmail?: string;
-  }) => Promise<{ success: boolean; message: string; error?: string }>;
+  }) => Promise<{ success: boolean; message: string; error?: string; detalhes?: string }>;
   recalculateAlerts: (docId: string, docTitle: string, newExpirationDate: string, entityType: string) => Promise<void>;
 
   seedInitialBenchmarkData: () => Promise<void>;
@@ -116,7 +116,7 @@ interface SSTContextType {
 const SSTContext = createContext<SSTContextType | undefined>(undefined);
 
 export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { profile, activeRole, activeEmpresaId, isAdmin } = useAuth();
+  const { profile, activeRole, activeEmpresaId, isAdmin, authorizedFetch } = useAuth();
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -784,38 +784,87 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await logAudit('Exclusão', 'Regra de Notificação', id, `Excluída regra de notificação: ${current?.nomeRegra || id}`);
   };
 
+  const parseApiResponse = async (resp: Response) => {
+    const rawText = await resp.text();
+    try {
+      return JSON.parse(rawText);
+    } catch {
+      return {
+        success: false,
+        status: 'falha',
+        message: `Erro HTTP ${resp.status} na comunicação com o servidor de e-mail.`,
+        error: rawText ? rawText.slice(0, 300) : `HTTP ${resp.status} ${resp.statusText}`,
+      };
+    }
+  };
+
   const triggerNotificationCheck = async () => {
     try {
-      const resp = await fetch('/api/notifications/run-check', {
+      const resp = await authorizedFetch('/api/notifications/run-check', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
       });
-      return await resp.json();
+      const data = await parseApiResponse(resp);
+      if (!resp.ok || data?.success === false) {
+        throw new Error(data?.message || data?.error || 'Falha ao executar verificação no servidor.');
+      }
+      return data;
     } catch (err: any) {
       console.error('Erro ao acionar verificação no backend:', err);
       throw err;
     }
   };
 
-  const sendTestNotificationEmail = async (recipient: string, note?: string) => {
+  const sendTestNotificationEmail = async (
+    recipient: string,
+    subject?: string,
+    message?: string,
+    senderName?: string
+  ) => {
     try {
-      const resp = await fetch('/api/notifications/test-email', {
+      const resp = await authorizedFetch('/api/notifications/test-email', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ recipient, note }),
+        body: JSON.stringify({
+          recipient,
+          subject,
+          message,
+          senderName: senderName || profile?.nome || 'Administrador',
+        }),
       });
-      return await resp.json();
+      return await parseApiResponse(resp);
     } catch (err: any) {
       console.error('Erro ao enviar e-mail de teste:', err);
       throw err;
     }
   };
 
+  const sendCustomNotificationEmail = async (data: {
+    to: string[];
+    recipientsDetails?: any[];
+    companyId?: string;
+    companyName?: string;
+    subject: string;
+    message: string;
+    attachmentName?: string;
+    attachmentDataUrl?: string;
+    senderName?: string;
+    senderEmail?: string;
+  }) => {
+    try {
+      const resp = await authorizedFetch('/api/notifications/custom-send', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+      return await parseApiResponse(resp);
+    } catch (err: any) {
+      console.error('Erro ao enviar e-mail avulso:', err);
+      throw err;
+    }
+  };
+
   const recalculateAlerts = async (docId: string, docTitle: string, newExpirationDate: string, entityType: string) => {
     try {
-      await fetch('/api/notifications/recalculate', {
+      await authorizedFetch('/api/notifications/recalculate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           documentoId: docId,
           documentoTitulo: docTitle,
@@ -1025,6 +1074,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         actionPlans,
         environmentalDocs,
         auditLogs,
+        userProfiles,
         notificationConfigs,
         notificationLogs,
         loading,
@@ -1064,6 +1114,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteNotificationConfig,
         triggerNotificationCheck,
         sendTestNotificationEmail,
+        sendCustomNotificationEmail,
         recalculateAlerts,
         seedInitialBenchmarkData,
       }}
