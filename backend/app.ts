@@ -10,6 +10,9 @@ import {
   verifySmtpConnection,
   isSmtpConfigured,
   getSafeSmtpDiagnostics,
+  setRuntimeSmtpConfig,
+  clearRuntimeSmtpConfig,
+  SmtpOverrideConfig,
 } from './emailService';
 import {
   authenticateUserCredentials,
@@ -110,20 +113,90 @@ export function createApiApp() {
     });
   });
 
-  // Writing credentials to .env at runtime is disabled for Netlify serverless security
-  app.post('/api/notifications/save-smtp-config', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
-    return res.status(405).json({
-      success: false,
-      readOnlyEnv: true,
-      message:
-        'A gravação de credenciais SMTP em arquivo .env foi desativada por segurança. Configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM e SMTP_SECURE diretamente nas variáveis de ambiente protegidas do Netlify.',
-      smtp: getSafeSmtpDiagnostics(),
-    });
+  const sanitizeSmtpOverride = (raw: any): SmtpOverrideConfig | undefined => {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const host = typeof raw.host === 'string' ? raw.host.trim() : '';
+    const user = typeof raw.user === 'string' ? raw.user.trim() : '';
+    const pass = typeof raw.pass === 'string' ? raw.pass : '';
+    if (!host || !user || !pass) return undefined;
+    return {
+      host,
+      port: raw.port !== undefined ? String(raw.port).trim() : '587',
+      secure: raw.secure,
+      user,
+      pass,
+      from: typeof raw.from === 'string' ? raw.from.trim() : '',
+    };
+  };
+
+  // Ephemeral in-memory SMTP session configuration (never writes to .env or Firestore)
+  app.post('/api/notifications/save-smtp-config', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const { host, port, secure, user, pass, from, clear, verify } = req.body || {};
+
+    if (clear === true) {
+      clearRuntimeSmtpConfig();
+      return res.json({
+        success: true,
+        cleared: true,
+        message: 'Configuração SMTP da sessão removida da memória do servidor.',
+        smtp: getSafeSmtpDiagnostics(),
+      });
+    }
+
+    const candidate: SmtpOverrideConfig = {
+      host: typeof host === 'string' ? host.trim() : '',
+      port: port !== undefined ? String(port).trim() : '587',
+      secure,
+      user: typeof user === 'string' ? user.trim() : '',
+      pass: typeof pass === 'string' ? pass : '',
+      from: typeof from === 'string' ? from.trim() : '',
+    };
+
+    try {
+      if (!candidate.host || !candidate.user || !candidate.pass) {
+        return res.status(400).json({
+          success: false,
+          connected: false,
+          message: 'Informe Servidor SMTP (host), Usuário e Senha para ativar o envio real.',
+          smtp: getSafeSmtpDiagnostics(),
+        });
+      }
+
+      if (verify !== false) {
+        const verification = await verifySmtpConnection(candidate);
+        if (!verification.connected) {
+          return res.status(400).json({
+            success: false,
+            connected: false,
+            message: verification.message,
+            smtp: getSafeSmtpDiagnostics(),
+          });
+        }
+      }
+
+      setRuntimeSmtpConfig(candidate);
+      return res.json({
+        success: true,
+        connected: true,
+        memoryOnly: true,
+        message:
+          'Servidor SMTP validado e ativado na sessão do servidor! Os envios de teste, avulsos e manuais agora serão entregues diretamente aos destinatários.',
+        smtp: getSafeSmtpDiagnostics(),
+      });
+    } catch (err: any) {
+      return res.status(400).json({
+        success: false,
+        connected: false,
+        message: err?.message || 'Erro ao aplicar configuração SMTP.',
+        smtp: getSafeSmtpDiagnostics(),
+      });
+    }
   });
 
-  app.post('/api/notifications/verify-smtp', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
+  app.post('/api/notifications/verify-smtp', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await verifySmtpConnection();
+      const smtpOverride = sanitizeSmtpOverride(req.body?.smtpConfig);
+      const result = await verifySmtpConnection(smtpOverride);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ connected: false, message: err.message || 'Erro ao verificar conexão SMTP.' });
@@ -131,7 +204,7 @@ export function createApiApp() {
   });
 
   app.post('/api/notifications/test-email', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
-    const { recipient, subject, message, senderName } = req.body || {};
+    const { recipient, subject, message, senderName, smtpConfig } = req.body || {};
 
     const trimmedRecipient = (recipient || '').trim();
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -149,13 +222,23 @@ export function createApiApp() {
         (message || '').trim() ||
         'Esta é uma mensagem de validação imediata enviada pelo sistema Gestão SST para confirmar o funcionamento do servidor de e-mail.';
       const responsible = senderName || req.authUser?.nome || 'Administrador';
+      const smtpOverride = sanitizeSmtpOverride(smtpConfig);
 
       const result = await sendTestEmailDirect({
         recipient: trimmedRecipient,
         subject: finalSubject,
         message: finalMessage,
         senderName: responsible,
+        smtpConfig: smtpOverride,
       });
+
+      if (result.success && smtpOverride && !process.env.SMTP_HOST) {
+        try {
+          setRuntimeSmtpConfig(smtpOverride);
+        } catch {
+          // Ignore runtime cache failure
+        }
+      }
 
       const logRecord = {
         dataHora: new Date().toISOString(),
@@ -234,6 +317,7 @@ export function createApiApp() {
       attachmentDataUrl,
       senderName,
       senderEmail,
+      smtpConfig,
     } = req.body || {};
 
     if (!to || !Array.isArray(to) || to.length === 0) {
@@ -271,6 +355,7 @@ export function createApiApp() {
       const finalMessage = message.trim();
       const finalCompany = companyName || 'Todas as Empresas';
       const responsible = senderName || req.authUser?.nome || 'Administrador';
+      const smtpOverride = sanitizeSmtpOverride(smtpConfig);
 
       const result = await sendCustomEmail({
         to: validRecipients,
@@ -282,6 +367,7 @@ export function createApiApp() {
         attachmentDataUrl,
         senderName: responsible,
         senderEmail: senderEmail || req.authUser?.email,
+        smtpConfig: smtpOverride,
       });
 
       try {
@@ -344,9 +430,10 @@ export function createApiApp() {
     }
   });
 
-  app.post('/api/notifications/run-check', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
+  app.post('/api/notifications/run-check', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await executeDailyNotificationMonitoring();
+      const smtpOverride = sanitizeSmtpOverride(req.body?.smtpConfig);
+      const result = await executeDailyNotificationMonitoring(smtpOverride);
       res.json({
         success: true,
         message: 'Verificação de vencimentos executada com sucesso no backend.',

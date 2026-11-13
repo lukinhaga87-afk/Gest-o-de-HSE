@@ -550,6 +550,11 @@ const sanitizeForFirestore = <T extends Record<string, any>>(obj: T): Partial<T>
     setSimulatedEmpresaNome(null);
     localStorage.removeItem(LOCAL_STORAGE_SESSION_KEY);
     localStorage.removeItem(LOCAL_STORAGE_API_TOKEN_KEY);
+    try {
+      sessionStorage.removeItem('gestao_sst_smtp_session');
+    } catch {
+      // Ignore storage errors
+    }
   };
 
   const setSimulatedRole = (role: UserRole, empresaId?: string, empresaNome?: string) => {

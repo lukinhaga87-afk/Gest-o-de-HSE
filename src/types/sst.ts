@@ -358,3 +358,11 @@ export interface UpcomingExpirationAlert {
   ultimaNotificacao?: string;
 }
 
+export interface SmtpSessionConfig {
+  host: string;
+  port: string;
+  secure: boolean;
+  user: string;
+  pass: string;
+  from: string;
+}

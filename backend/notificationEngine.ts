@@ -8,7 +8,12 @@ import {
   where,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { sendNotificationEmail, EmailNotificationPayload, isSmtpConfigured } from './emailService';
+import {
+  sendNotificationEmail,
+  EmailNotificationPayload,
+  isSmtpConfigured,
+  SmtpOverrideConfig,
+} from './emailService';
 import { NotificationConfig, NotificationLog, NotificationMilestone } from '../src/types/sst';
 
 // Initialize Firebase for Backend Node environment
@@ -266,7 +271,9 @@ export interface RunCheckResult {
  * checks deduplication, dispatches emails to configured recipients,
  * and saves logs to Firestore.
  */
-export async function executeDailyNotificationMonitoring(): Promise<RunCheckResult> {
+export async function executeDailyNotificationMonitoring(
+  smtpOverride?: SmtpOverrideConfig | null
+): Promise<RunCheckResult> {
   const timestamp = new Date().toISOString();
   console.log(`[Rotina de Notificação] Iniciando monitoramento diário: ${timestamp}`);
 
@@ -332,7 +339,7 @@ export async function executeDailyNotificationMonitoring(): Promise<RunCheckResu
       appUrl: process.env.APP_URL || process.env.URL || 'https://gestao-sst.netlify.app',
     };
 
-    const result = await sendNotificationEmail(payload);
+    const result = await sendNotificationEmail(payload, smtpOverride);
 
     // Save record to notificationLogs in Firestore
     const logData: Omit<NotificationLog, 'id'> = {
@@ -376,7 +383,7 @@ export async function executeDailyNotificationMonitoring(): Promise<RunCheckResu
     unmatched,
     totalEvaluated: items.length,
     logs: createdLogs,
-    smtpConfigured: isSmtpConfigured(),
+    smtpConfigured: isSmtpConfigured(smtpOverride),
     timestamp: new Date().toISOString(),
   };
 }

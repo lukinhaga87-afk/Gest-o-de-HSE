@@ -20,11 +20,20 @@ export { buildNotificationHtml };
 
 export interface SendResult {
   success: boolean;
-  status: 'sucesso' | 'falha' | 'simulado';
+  status: 'sucesso' | 'falha';
   messageId?: string;
   error?: string;
   destinatarios: string[];
   detalhes?: string;
+}
+
+export interface SmtpOverrideConfig {
+  host?: string;
+  port?: number | string;
+  secure?: boolean | string;
+  user?: string;
+  pass?: string;
+  from?: string;
 }
 
 export interface CustomEmailOptions {
@@ -37,6 +46,45 @@ export interface CustomEmailOptions {
   attachmentDataUrl?: string;
   senderName?: string;
   senderEmail?: string;
+  smtpConfig?: SmtpOverrideConfig;
+}
+
+// Ephemeral in-memory SMTP config set by authenticated admin during live server session.
+// Never written to .env files or persisted in Firestore.
+let runtimeSmtpConfig: SmtpOverrideConfig | null = null;
+
+export function setRuntimeSmtpConfig(config: SmtpOverrideConfig | null) {
+  if (!config) {
+    runtimeSmtpConfig = null;
+    return;
+  }
+  const host = cleanEnv(config.host);
+  const user = cleanEnv(config.user);
+  const nextPass = cleanEnv(config.pass) || cleanEnv(runtimeSmtpConfig?.pass);
+  if (!host || !user || !nextPass) {
+    throw new Error('Servidor SMTP (host), usuário e senha são obrigatórios.');
+  }
+  runtimeSmtpConfig = {
+    host,
+    port: cleanEnv(config.port !== undefined ? String(config.port) : '587') || '587',
+    secure: config.secure,
+    user,
+    pass: nextPass,
+    from: cleanEnv(config.from),
+  };
+}
+
+export function clearRuntimeSmtpConfig() {
+  runtimeSmtpConfig = null;
+}
+
+export function hasRuntimeSmtpConfig(): boolean {
+  return Boolean(
+    runtimeSmtpConfig &&
+      cleanEnv(runtimeSmtpConfig.host) &&
+      cleanEnv(runtimeSmtpConfig.user) &&
+      cleanEnv(runtimeSmtpConfig.pass)
+  );
 }
 
 function cleanEnv(val?: string): string {
@@ -68,33 +116,100 @@ function extractEmailAddress(value?: string): string | null {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate) ? candidate : null;
 }
 
-function getSmtpConfigValues() {
-  const host = cleanEnv(process.env.SMTP_HOST);
-  const portRaw = cleanEnv(process.env.SMTP_PORT) || '587';
-  const parsedPort = parseInt(portRaw, 10);
+function hasValidOverride(cfg?: SmtpOverrideConfig | null): cfg is SmtpOverrideConfig {
+  return Boolean(cfg && cleanEnv(cfg.host) && cleanEnv(cfg.user) && cleanEnv(cfg.pass));
+}
+
+function getEnvSmtpValues() {
+  return {
+    host: cleanEnv(process.env.SMTP_HOST),
+    port: cleanEnv(process.env.SMTP_PORT) || '587',
+    secure: cleanEnv(process.env.SMTP_SECURE),
+    user: cleanEnv(process.env.SMTP_USER),
+    pass: cleanEnv(process.env.SMTP_PASS),
+    from: cleanEnv(process.env.SMTP_FROM),
+  };
+}
+
+function getSmtpConfigValues(override?: SmtpOverrideConfig | null) {
+  const envVals = getEnvSmtpValues();
+  const envConfigured = Boolean(envVals.host && envVals.user && envVals.pass);
+
+  let source: 'request' | 'env' | 'runtime' | 'none' = 'none';
+  let rawHost = '';
+  let rawPort = '587';
+  let rawSecure = '';
+  let rawUser = '';
+  let rawPass = '';
+  let rawFrom = '';
+
+  if (hasValidOverride(override)) {
+    source = 'request';
+    rawHost = cleanEnv(override.host);
+    rawPort = cleanEnv(override.port !== undefined ? String(override.port) : '587') || '587';
+    rawSecure =
+      typeof override.secure === 'boolean'
+        ? String(override.secure)
+        : cleanEnv(override.secure ? String(override.secure) : '');
+    rawUser = cleanEnv(override.user);
+    rawPass = cleanEnv(override.pass);
+    rawFrom = cleanEnv(override.from);
+  } else if (envConfigured) {
+    source = 'env';
+    rawHost = envVals.host;
+    rawPort = envVals.port;
+    rawSecure = envVals.secure;
+    rawUser = envVals.user;
+    rawPass = envVals.pass;
+    rawFrom = envVals.from;
+  } else if (hasValidOverride(runtimeSmtpConfig)) {
+    source = 'runtime';
+    rawHost = cleanEnv(runtimeSmtpConfig.host);
+    rawPort = cleanEnv(
+      runtimeSmtpConfig.port !== undefined ? String(runtimeSmtpConfig.port) : '587'
+    ) || '587';
+    rawSecure =
+      typeof runtimeSmtpConfig.secure === 'boolean'
+        ? String(runtimeSmtpConfig.secure)
+        : cleanEnv(runtimeSmtpConfig.secure ? String(runtimeSmtpConfig.secure) : '');
+    rawUser = cleanEnv(runtimeSmtpConfig.user);
+    rawPass = cleanEnv(runtimeSmtpConfig.pass);
+    rawFrom = cleanEnv(runtimeSmtpConfig.from);
+  }
+
+  const parsedPort = parseInt(rawPort || '587', 10);
   const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 587;
 
-  const user = cleanEnv(process.env.SMTP_USER);
-  let pass = cleanEnv(process.env.SMTP_PASS);
-
   // Google App Passwords are often copied as 4 groups of 4 chars separated by spaces
-  if (host.toLowerCase().includes('gmail.com') && /^[a-zA-Z0-9]{4}(?:\s[a-zA-Z0-9]{4}){3}$/.test(pass)) {
+  let pass = rawPass;
+  if (
+    rawHost.toLowerCase().includes('gmail.com') &&
+    /^[a-zA-Z0-9]{4}(?:\s[a-zA-Z0-9]{4}){3}$/.test(pass)
+  ) {
     pass = pass.replace(/\s+/g, '');
   }
 
   // Port 465 always uses implicit SSL; port 587/25 uses STARTTLS (secure: false)
-  const rawSecure = cleanEnv(process.env.SMTP_SECURE).toLowerCase();
+  const lowerSecure = rawSecure.toLowerCase();
   const secure =
     port === 465
       ? true
       : port === 587 || port === 25
       ? false
-      : rawSecure === 'true' || rawSecure === '1';
+      : lowerSecure === 'true' || lowerSecure === '1';
 
-  const fromEnv = cleanEnv(process.env.SMTP_FROM);
-  const fromAddress = fromEnv || (user.includes('@') ? `Gestão SST <${user}>` : '');
+  const fromAddress = rawFrom || (rawUser.includes('@') ? `Gestão SST <${rawUser}>` : '');
 
-  return { host, port, secure, user, pass, fromAddress };
+  return {
+    host: rawHost,
+    port,
+    secure,
+    user: rawUser,
+    pass,
+    fromAddress,
+    source,
+    envConfigured,
+  };
 }
 
 function formatSmtpError(err: any): string {
@@ -115,10 +230,10 @@ function formatSmtpError(err: any): string {
 }
 
 /**
- * Checks if real SMTP credentials are fully provided in the environment
+ * Checks if real SMTP credentials are available (env, runtime session, or explicit override)
  */
-export function isSmtpConfigured(): boolean {
-  const { host, user, pass } = getSmtpConfigValues();
+export function isSmtpConfigured(override?: SmtpOverrideConfig | null): boolean {
+  const { host, user, pass } = getSmtpConfigValues(override);
   return Boolean(host && user && pass);
 }
 
@@ -126,8 +241,9 @@ export function isSmtpConfigured(): boolean {
  * Returns non-sensitive SMTP diagnostics exclusively for authenticated administrators
  * Never exposes SMTP_PASS, full SMTP_USER, or secret tokens.
  */
-export function getSafeSmtpDiagnostics() {
-  const { host, port, secure, user, pass, fromAddress } = getSmtpConfigValues();
+export function getSafeSmtpDiagnostics(override?: SmtpOverrideConfig | null) {
+  const { host, port, secure, user, pass, fromAddress, source, envConfigured } =
+    getSmtpConfigValues(override);
   const configured = Boolean(host && user && pass);
 
   const missingVars: string[] = [];
@@ -143,9 +259,18 @@ export function getSafeSmtpDiagnostics() {
     return `${visible}***@${domain}`;
   };
 
+  let mode = 'Aguardando Configuração SMTP';
+  if (source === 'env') {
+    mode = 'SMTP Real Ativo (Variáveis de Ambiente Protegidas)';
+  } else if (source === 'runtime' || source === 'request') {
+    mode = 'SMTP Real Ativo (Configuração da Sessão Administrativa)';
+  }
+
   return {
     configured,
-    mode: configured ? 'SMTP Real Ativo (Variáveis de Ambiente Protegidas)' : 'Aguardando Configuração SMTP no Servidor',
+    envConfigured,
+    source,
+    mode,
     hostConfigured: Boolean(host),
     hostLabel: host || 'Não configurado',
     port: String(port),
@@ -161,12 +286,12 @@ export function getSafeSmtpDiagnostics() {
 /**
  * Gets the configured SMTP transport
  */
-export function getMailTransporter() {
-  if (!isSmtpConfigured()) {
+export function getMailTransporter(override?: SmtpOverrideConfig | null) {
+  if (!isSmtpConfigured(override)) {
     return null;
   }
 
-  const { host, port, secure, user, pass } = getSmtpConfigValues();
+  const { host, port, secure, user, pass } = getSmtpConfigValues(override);
 
   return nodemailer.createTransport({
     host,
@@ -189,22 +314,27 @@ export function getMailTransporter() {
 /**
  * Verifies SMTP connection
  */
-export async function verifySmtpConnection(): Promise<{ connected: boolean; message: string }> {
-  const diag = getSafeSmtpDiagnostics();
+export async function verifySmtpConnection(
+  override?: SmtpOverrideConfig | null
+): Promise<{ connected: boolean; message: string }> {
+  const diag = getSafeSmtpDiagnostics(override);
   if (!diag.configured) {
     return {
       connected: false,
-      message: `Variáveis de ambiente SMTP ausentes no servidor: ${diag.missingVars.join(', ')}. Configure-as nas variáveis protegidas do ambiente.`,
+      message: `Servidor SMTP não configurado (${diag.missingVars.join(', ')} ausentes). Informe as credenciais SMTP na sessão ou nas variáveis de ambiente.`,
     };
   }
 
   try {
-    const transporter = getMailTransporter();
+    const transporter = getMailTransporter(override);
     if (!transporter) {
       return { connected: false, message: 'Não foi possível inicializar o transporte SMTP.' };
     }
     await transporter.verify();
-    return { connected: true, message: 'Conexão e autenticação SMTP verificadas com sucesso!' };
+    return {
+      connected: true,
+      message: `Conexão e autenticação SMTP verificadas com sucesso em ${diag.hostLabel}:${diag.port}!`,
+    };
   } catch (err: any) {
     return {
       connected: false,
@@ -216,7 +346,10 @@ export async function verifySmtpConnection(): Promise<{ connected: boolean; mess
 /**
  * Sends notification email via real SMTP if configured
  */
-export async function sendNotificationEmail(payload: EmailNotificationPayload): Promise<SendResult> {
+export async function sendNotificationEmail(
+  payload: EmailNotificationPayload,
+  smtpOverride?: SmtpOverrideConfig | null
+): Promise<SendResult> {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const recipients = Array.from(
     new Set(
@@ -257,19 +390,19 @@ Dias Restantes: ${payload.daysRemaining}
 Acesse a plataforma para regularizar: ${payload.appUrl || 'https://gestao-sst.netlify.app'}
   `.trim();
 
-  if (isSmtpConfigured()) {
-    const { host, fromAddress } = getSmtpConfigValues();
+  if (isSmtpConfigured(smtpOverride)) {
+    const { host, fromAddress } = getSmtpConfigValues(smtpOverride);
     if (!extractEmailAddress(fromAddress)) {
       return {
         success: false,
         status: 'falha',
-        error: 'Variável SMTP_FROM inválida ou ausente. Defina um e-mail remetente válido em SMTP_FROM.',
+        error: 'Remetente SMTP (SMTP_FROM) inválido ou ausente. Defina um e-mail remetente válido.',
         destinatarios: recipients,
       };
     }
 
     try {
-      const transporter = getMailTransporter();
+      const transporter = getMailTransporter(smtpOverride);
       if (!transporter) throw new Error('Falha ao inicializar o transporter nodemailer');
 
       const info = await transporter.sendMail({
@@ -300,15 +433,15 @@ Acesse a plataforma para regularizar: ${payload.appUrl || 'https://gestao-sst.ne
     }
   }
 
-  const diag = getSafeSmtpDiagnostics();
-  console.warn(`[SMTP NÃO CONFIGURADO] Tentativa de envio para ${recipients.join(', ')} bloqueada por ausência de variáveis: ${diag.missingVars.join(', ')}.`);
+  const diag = getSafeSmtpDiagnostics(smtpOverride);
+  console.warn(`[SMTP NÃO CONFIGURADO] Tentativa de envio para ${recipients.join(', ')} bloqueada por ausência de configuração SMTP.`);
 
   return {
     success: false,
     status: 'falha',
-    error: `Servidor SMTP não configurado. Defina as variáveis de ambiente ${diag.missingVars.join(', ')} no servidor / Netlify para habilitar o envio real.`,
+    error: `Servidor SMTP não configurado. Informe as credenciais SMTP na aba "Serviço SMTP & Netlify" ou defina ${diag.missingVars.join(', ')} nas variáveis de ambiente do servidor.`,
     destinatarios: recipients,
-    detalhes: `Variáveis ausentes: ${diag.missingVars.join(', ')}.`,
+    detalhes: `Configuração ausente: ${diag.missingVars.join(', ')}.`,
   };
 }
 
@@ -317,6 +450,7 @@ export interface TestEmailOptions {
   subject?: string;
   message?: string;
   senderName?: string;
+  smtpConfig?: SmtpOverrideConfig;
 }
 
 /**
@@ -358,30 +492,30 @@ export async function sendTestEmailDirect(options: TestEmailOptions): Promise<Se
     };
   }
 
-  const diag = getSafeSmtpDiagnostics();
+  const diag = getSafeSmtpDiagnostics(options.smtpConfig);
   if (!diag.configured) {
     return {
       success: false,
       status: 'falha',
-      error: `Servidor SMTP não configurado. Defina as variáveis de ambiente ${diag.missingVars.join(', ')} no servidor / Netlify para envio real.`,
+      error: `Servidor SMTP não configurado. Informe Host, Usuário e Senha SMTP para envio real (${diag.missingVars.join(', ')} ausentes).`,
       destinatarios: [recipient],
-      detalhes: `Variáveis ausentes no servidor: ${diag.missingVars.join(', ')}.`,
+      detalhes: `Configuração SMTP ausente: ${diag.missingVars.join(', ')}.`,
     };
   }
 
-  const { host, port, fromAddress } = getSmtpConfigValues();
+  const { host, port, fromAddress } = getSmtpConfigValues(options.smtpConfig);
   if (!extractEmailAddress(fromAddress)) {
     return {
       success: false,
       status: 'falha',
-      error: 'Variável SMTP_FROM inválida ou ausente. Informe um e-mail remetente válido em SMTP_FROM.',
+      error: 'Remetente SMTP (SMTP_FROM) inválido ou ausente. Informe um e-mail remetente válido.',
       destinatarios: [recipient],
-      detalhes: 'SMTP_USER não possui formato de e-mail e SMTP_FROM não foi definido.',
+      detalhes: 'Usuário SMTP não possui formato de e-mail e o campo Remetente (From) não foi definido.',
     };
   }
 
   try {
-    const transporter = getMailTransporter();
+    const transporter = getMailTransporter(options.smtpConfig);
     if (!transporter) throw new Error('Não foi possível inicializar o transporte SMTP.');
 
     const subject = options.subject?.trim() || 'Teste de Integração SMTP - Gestão SST';
@@ -520,31 +654,31 @@ export async function sendCustomEmail(options: CustomEmailOptions): Promise<Send
     };
   }
 
-  const diag = getSafeSmtpDiagnostics();
+  const diag = getSafeSmtpDiagnostics(options.smtpConfig);
   if (!diag.configured) {
     return {
       success: false,
       status: 'falha',
-      error: `Servidor SMTP não configurado. Defina as variáveis de ambiente ${diag.missingVars.join(', ')} no servidor / Netlify para envio real.`,
+      error: `Servidor SMTP não configurado. Informe Host, Usuário e Senha SMTP para envio real (${diag.missingVars.join(', ')} ausentes).`,
       destinatarios: recipients,
-      detalhes: `Variáveis ausentes no servidor: ${diag.missingVars.join(', ')}.`,
+      detalhes: `Configuração SMTP ausente: ${diag.missingVars.join(', ')}.`,
     };
   }
 
-  const { host, fromAddress } = getSmtpConfigValues();
+  const { host, fromAddress } = getSmtpConfigValues(options.smtpConfig);
   const validFromEmail = extractEmailAddress(fromAddress);
   if (!validFromEmail) {
     return {
       success: false,
       status: 'falha',
-      error: 'Variável SMTP_FROM inválida ou ausente. Defina um endereço remetente válido em SMTP_FROM.',
+      error: 'Remetente SMTP (SMTP_FROM) inválido ou ausente. Defina um endereço remetente válido.',
       destinatarios: recipients,
-      detalhes: 'SMTP_USER não possui formato de e-mail e SMTP_FROM não foi definido.',
+      detalhes: 'Usuário SMTP não possui formato de e-mail e o campo Remetente (From) não foi definido.',
     };
   }
 
   try {
-    const transporter = getMailTransporter();
+    const transporter = getMailTransporter(options.smtpConfig);
     if (!transporter) throw new Error('Falha ao inicializar o transporter nodemailer.');
 
     const formattedMessageHtml = formatMessageBody(options.message);

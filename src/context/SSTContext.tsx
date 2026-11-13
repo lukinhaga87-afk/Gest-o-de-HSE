@@ -29,6 +29,7 @@ import {
   NotificationConfig,
   NotificationLog,
   UserProfile,
+  SmtpSessionConfig,
 } from '../types/sst';
 import { INITIAL_COMPANIES, INITIAL_EMPLOYEES } from '../utils/initialData';
 
@@ -94,8 +95,8 @@ interface SSTContextType {
   addNotificationConfig: (cfg: Omit<NotificationConfig, 'id'>) => Promise<string>;
   updateNotificationConfig: (id: string, cfg: Partial<NotificationConfig>) => Promise<void>;
   deleteNotificationConfig: (id: string) => Promise<void>;
-  triggerNotificationCheck: () => Promise<{ success: boolean; dispatched: number; skippedDuplicates: number; totalEvaluated: number; message: string }>;
-  sendTestNotificationEmail: (recipient: string, subject?: string, message?: string, senderName?: string) => Promise<{ success: boolean; status: string; message: string; messageId?: string; error?: string; detalhes?: string }>;
+  triggerNotificationCheck: (smtpConfig?: SmtpSessionConfig) => Promise<{ success: boolean; dispatched: number; skippedDuplicates: number; totalEvaluated: number; message: string }>;
+  sendTestNotificationEmail: (recipient: string, subject?: string, message?: string, senderName?: string, smtpConfig?: SmtpSessionConfig) => Promise<{ success: boolean; status: string; message: string; messageId?: string; error?: string; detalhes?: string }>;
   sendCustomNotificationEmail: (data: {
     to: string[];
     recipientsDetails?: any[];
@@ -107,6 +108,7 @@ interface SSTContextType {
     attachmentDataUrl?: string;
     senderName?: string;
     senderEmail?: string;
+    smtpConfig?: SmtpSessionConfig;
   }) => Promise<{ success: boolean; message: string; error?: string; detalhes?: string }>;
   recalculateAlerts: (docId: string, docTitle: string, newExpirationDate: string, entityType: string) => Promise<void>;
 
@@ -798,10 +800,25 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const triggerNotificationCheck = async () => {
+  const getSessionSmtpOverride = (explicit?: SmtpSessionConfig): SmtpSessionConfig | undefined => {
+    if (explicit && explicit.host && explicit.user && explicit.pass) return explicit;
     try {
+      const raw = sessionStorage.getItem('gestao_sst_smtp_session');
+      if (!raw) return undefined;
+      const parsed = JSON.parse(raw) as SmtpSessionConfig;
+      if (parsed && parsed.host && parsed.user && parsed.pass) return parsed;
+    } catch {
+      // Ignore invalid session storage
+    }
+    return undefined;
+  };
+
+  const triggerNotificationCheck = async (smtpConfig?: SmtpSessionConfig) => {
+    try {
+      const resolvedSmtp = getSessionSmtpOverride(smtpConfig);
       const resp = await authorizedFetch('/api/notifications/run-check', {
         method: 'POST',
+        body: resolvedSmtp ? JSON.stringify({ smtpConfig: resolvedSmtp }) : undefined,
       });
       const data = await parseApiResponse(resp);
       if (!resp.ok || data?.success === false) {
@@ -818,9 +835,11 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     recipient: string,
     subject?: string,
     message?: string,
-    senderName?: string
+    senderName?: string,
+    smtpConfig?: SmtpSessionConfig
   ) => {
     try {
+      const resolvedSmtp = getSessionSmtpOverride(smtpConfig);
       const resp = await authorizedFetch('/api/notifications/test-email', {
         method: 'POST',
         body: JSON.stringify({
@@ -828,6 +847,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           subject,
           message,
           senderName: senderName || profile?.nome || 'Administrador',
+          ...(resolvedSmtp ? { smtpConfig: resolvedSmtp } : {}),
         }),
       });
       return await parseApiResponse(resp);
@@ -848,11 +868,16 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     attachmentDataUrl?: string;
     senderName?: string;
     senderEmail?: string;
+    smtpConfig?: SmtpSessionConfig;
   }) => {
     try {
+      const resolvedSmtp = getSessionSmtpOverride(data.smtpConfig);
       const resp = await authorizedFetch('/api/notifications/custom-send', {
         method: 'POST',
-        body: JSON.stringify(data),
+        body: JSON.stringify({
+          ...data,
+          ...(resolvedSmtp ? { smtpConfig: resolvedSmtp } : {}),
+        }),
       });
       return await parseApiResponse(resp);
     } catch (err: any) {

@@ -36,6 +36,7 @@ import {
   Eraser,
   CheckSquare,
   Square,
+  EyeOff,
 } from 'lucide-react';
 import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
@@ -45,6 +46,7 @@ import {
   NotificationLog,
   NotificationMilestone,
   NotificationRecipientDetail,
+  SmtpSessionConfig,
   UpcomingExpirationAlert,
 } from '../../types/sst';
 import { formatDateBR, getDaysRemaining } from '../../utils/trafficLight';
@@ -159,9 +161,11 @@ export const NotificationsView: React.FC = () => {
   const [isCustomPreviewOpen, setIsCustomPreviewOpen] = useState(false);
   const customMessageRef = React.useRef<HTMLTextAreaElement | null>(null);
 
-  // Tab 4: Netlify Protected SMTP Diagnostics State (no plaintext .env writes)
+  // Tab 4 & Session SMTP Configuration State (never written to .env or Firestore)
   const [smtpStatusInfo, setSmtpStatusInfo] = useState<{
     configured: boolean;
+    envConfigured?: boolean;
+    source?: string;
     mode: string;
     hostConfigured: boolean;
     hostLabel: string;
@@ -175,6 +179,65 @@ export const NotificationsView: React.FC = () => {
   } | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
   const [connTestResult, setConnTestResult] = useState<{ connected: boolean; message: string } | null>(null);
+
+  const [smtpForm, setSmtpForm] = useState<SmtpSessionConfig>(() => {
+    try {
+      const raw = sessionStorage.getItem('gestao_sst_smtp_session');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          host: parsed.host || '',
+          port: parsed.port || '587',
+          secure: Boolean(parsed.secure),
+          user: parsed.user || '',
+          pass: parsed.pass || '',
+          from: parsed.from || '',
+        };
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    return {
+      host: '',
+      port: '587',
+      secure: false,
+      user: '',
+      pass: '',
+      from: '',
+    };
+  });
+  const [showSmtpPass, setShowSmtpPass] = useState(false);
+  const [savingSmtp, setSavingSmtp] = useState(false);
+  const [smtpSaveResult, setSmtpSaveResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [showInlineSmtpInTestModal, setShowInlineSmtpInTestModal] = useState(false);
+
+  const hasLocalSmtpConfig = Boolean(smtpForm.host.trim() && smtpForm.user.trim() && smtpForm.pass);
+  const effectiveSmtpConfigured = Boolean(smtpStatusInfo?.configured || hasLocalSmtpConfig);
+
+  const applySmtpPreset = (preset: 'gmail' | 'outlook' | 'brevo' | 'sendgrid') => {
+    setSmtpSaveResult(null);
+    if (preset === 'gmail') {
+      setSmtpForm((prev) => ({ ...prev, host: 'smtp.gmail.com', port: '587', secure: false }));
+    } else if (preset === 'outlook') {
+      setSmtpForm((prev) => ({ ...prev, host: 'smtp.office365.com', port: '587', secure: false }));
+    } else if (preset === 'brevo') {
+      setSmtpForm((prev) => ({ ...prev, host: 'smtp-relay.brevo.com', port: '587', secure: false }));
+    } else if (preset === 'sendgrid') {
+      setSmtpForm((prev) => ({ ...prev, host: 'smtp.sendgrid.net', port: '587', secure: false, user: prev.user || 'apikey' }));
+    }
+  };
+
+  const persistSessionSmtpLocally = (cfg: SmtpSessionConfig | null) => {
+    try {
+      if (!cfg) {
+        sessionStorage.removeItem('gestao_sst_smtp_session');
+      } else {
+        sessionStorage.setItem('gestao_sst_smtp_session', JSON.stringify(cfg));
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  };
 
   // Consolidated searchable directory of registered people with valid emails
   const registeredPeopleDirectory = useMemo<NotificationRecipientDetail[]>(() => {
@@ -820,6 +883,88 @@ export const NotificationsView: React.FC = () => {
     }
   };
 
+  // Save & Verify Session SMTP Config (RAM + tab sessionStorage only; never writes .env or Firestore)
+  const handleSaveAndVerifySessionSmtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!isAdmin) return;
+
+    const cleanConfig: SmtpSessionConfig = {
+      host: smtpForm.host.trim(),
+      port: (smtpForm.port || '587').trim(),
+      secure: smtpForm.port.trim() === '465' ? true : smtpForm.port.trim() === '587' ? false : smtpForm.secure,
+      user: smtpForm.user.trim(),
+      pass: smtpForm.pass,
+      from: smtpForm.from.trim(),
+    };
+
+    if (!cleanConfig.host || !cleanConfig.user || !cleanConfig.pass) {
+      setSmtpSaveResult({
+        success: false,
+        message: 'Preencha Servidor SMTP (host), Usuário e Senha/Senha de App para validar e ativar o envio real.',
+      });
+      return;
+    }
+
+    setSavingSmtp(true);
+    setSmtpSaveResult(null);
+    setConnTestResult(null);
+    try {
+      const res = await authorizedFetch('/api/notifications/save-smtp-config', {
+        method: 'POST',
+        body: JSON.stringify({ ...cleanConfig, verify: true }),
+      });
+      const rawText = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = { success: false, message: `Erro HTTP ${res.status}: ${rawText.slice(0, 200)}` };
+      }
+
+      if (res.ok && data?.success) {
+        setSmtpForm(cleanConfig);
+        persistSessionSmtpLocally(cleanConfig);
+        if (data.smtp) setSmtpStatusInfo(data.smtp);
+        setSmtpSaveResult({
+          success: true,
+          message:
+            data.message ||
+            'Servidor SMTP validado! Os testes de e-mail e envios avulsos agora serão enviados de verdade aos destinatários.',
+        });
+        setConnTestResult({ connected: true, message: data.message });
+      } else {
+        setSmtpSaveResult({
+          success: false,
+          message: data?.message || 'Não foi possível conectar ao servidor SMTP com as credenciais informadas.',
+        });
+      }
+    } catch (err: any) {
+      setSmtpSaveResult({
+        success: false,
+        message: `Erro ao comunicar com o servidor: ${err.message || String(err)}`,
+      });
+    } finally {
+      setSavingSmtp(false);
+    }
+  };
+
+  const handleClearSessionSmtp = async () => {
+    if (!isAdmin) return;
+    persistSessionSmtpLocally(null);
+    setSmtpForm({ host: '', port: '587', secure: false, user: '', pass: '', from: '' });
+    setSmtpSaveResult(null);
+    setConnTestResult(null);
+    try {
+      await authorizedFetch('/api/notifications/save-smtp-config', {
+        method: 'POST',
+        body: JSON.stringify({ clear: true }),
+      });
+      await fetchSmtpHealth();
+    } catch {
+      // Ignore clear failure
+    }
+  };
+
   // SMTP Connection Test (Admin Only)
   const handleTestConnectionOnly = async () => {
     if (!isAdmin) return;
@@ -828,6 +973,7 @@ export const NotificationsView: React.FC = () => {
     try {
       const res = await authorizedFetch('/api/notifications/verify-smtp', {
         method: 'POST',
+        body: hasLocalSmtpConfig ? JSON.stringify({ smtpConfig: smtpForm }) : undefined,
       });
       const rawText = await res.text();
       let data: any = null;
@@ -869,6 +1015,27 @@ export const NotificationsView: React.FC = () => {
       return;
     }
 
+    const activeOverride: SmtpSessionConfig | undefined = hasLocalSmtpConfig
+      ? {
+          host: smtpForm.host.trim(),
+          port: (smtpForm.port || '587').trim(),
+          secure: smtpForm.port.trim() === '465' ? true : smtpForm.port.trim() === '587' ? false : smtpForm.secure,
+          user: smtpForm.user.trim(),
+          pass: smtpForm.pass,
+          from: smtpForm.from.trim(),
+        }
+      : undefined;
+
+    if (!smtpStatusInfo?.configured && !activeOverride) {
+      setShowInlineSmtpInTestModal(true);
+      setTestResult({
+        success: false,
+        message: 'Não foi possível enviar o e-mail. Verifique as configurações SMTP e os detalhes do erro.',
+        detail: 'Preencha abaixo os dados do servidor SMTP (Host, Usuário e Senha/Senha de App) para enviar este e-mail de verdade ao destinatário.',
+      });
+      return;
+    }
+
     setSendingTest(true);
     setTestResult(null);
     try {
@@ -876,15 +1043,20 @@ export const NotificationsView: React.FC = () => {
         trimmedEmail,
         testEmailSubject.trim() || undefined,
         testEmailMessage.trim() || undefined,
-        profile?.nome || 'Administrador EHS'
+        profile?.nome || 'Administrador EHS',
+        activeOverride
       );
       if (res.success) {
+        if (activeOverride) {
+          persistSessionSmtpLocally(activeOverride);
+          await fetchSmtpHealth();
+        }
         setTestResult({
           success: true,
           message:
             res.message ||
             'E-mail de teste enviado com sucesso. Verifique a caixa de entrada do destinatário.',
-          detail: res.detalhes,
+          detail: [res.detalhes, res.messageId ? `ID: ${res.messageId}` : ''].filter(Boolean).join(' • '),
           status: res.status,
         });
       } else {
@@ -961,6 +1133,7 @@ export const NotificationsView: React.FC = () => {
                     setTestEmailAddress(profile?.email || '');
                     setTestEmailSubject('');
                     setTestEmailMessage('');
+                    setShowInlineSmtpInTestModal(!effectiveSmtpConfigured);
                     setIsTestEmailModalOpen(true);
                   }}
                   className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
@@ -1702,14 +1875,16 @@ export const NotificationsView: React.FC = () => {
               <div className="flex items-center gap-2">
                 <span
                   className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                    smtpStatusInfo?.configured
+                    effectiveSmtpConfigured
                       ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                       : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                   }`}
                 >
-                  {smtpStatusInfo?.configured
-                    ? '🟢 SMTP Configurado'
-                    : '🟡 Aguardando Variáveis SMTP no Netlify'}
+                  {smtpStatusInfo?.envConfigured
+                    ? '🟢 SMTP Real Ativo (Servidor)'
+                    : effectiveSmtpConfigured
+                    ? '🟢 SMTP Real Ativo (Sessão)'
+                    : '🟡 Aguardando Configuração SMTP'}
                 </span>
               </div>
             </div>
@@ -1738,33 +1913,208 @@ export const NotificationsView: React.FC = () => {
               </div>
             )}
 
-            {smtpStatusInfo && !smtpStatusInfo.configured && (
+            {smtpStatusInfo && !smtpStatusInfo.configured && !hasLocalSmtpConfig && (
               <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200 flex items-start gap-2.5">
                 <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
                 <div>
                   <p className="font-bold text-amber-100">
-                    Envio real bloqueado: variáveis SMTP pendentes no ambiente do servidor
+                    Envio real aguardando configuração SMTP
                   </p>
                   <p className="text-[11px] mt-0.5 opacity-90">
-                    Variáveis ausentes:{' '}
+                    Variáveis de ambiente ausentes no servidor:{' '}
                     <span className="font-mono font-bold text-white">
                       {(smtpStatusInfo.missingVars && smtpStatusInfo.missingVars.length > 0
                         ? smtpStatusInfo.missingVars
                         : ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS']
                       ).join(', ')}
                     </span>
-                    . Defina essas variáveis no painel de Environment Variables do Netlify (ou no ambiente do servidor) para habilitar o disparo de e-mails.
+                    . Preencha o formulário abaixo para ativar envios reais imediatamente nesta sessão ou defina essas chaves no painel Environment Variables do Netlify.
                   </p>
                 </div>
               </div>
             )}
+
+            {/* Interactive Session SMTP Form (Never writes .env or Firestore) */}
+            <form onSubmit={handleSaveAndVerifySessionSmtp} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-4 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h4 className="font-bold text-white text-sm flex items-center gap-2">
+                    <Mail size={15} className="text-blue-400" />
+                    Configurar Servidor SMTP para Envios Reais Imediatos
+                  </h4>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Credenciais mantidas somente na memória da sessão atual (nunca gravadas em arquivo .env ou no banco Firestore).
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[10px] text-slate-400 mr-1">Atalhos:</span>
+                  <button
+                    type="button"
+                    onClick={() => applySmtpPreset('gmail')}
+                    className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-medium cursor-pointer"
+                  >
+                    Gmail (App Password)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySmtpPreset('outlook')}
+                    className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-medium cursor-pointer"
+                  >
+                    Outlook / M365
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySmtpPreset('brevo')}
+                    className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-medium cursor-pointer"
+                  >
+                    Brevo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applySmtpPreset('sendgrid')}
+                    className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-medium cursor-pointer"
+                  >
+                    SendGrid
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Servidor SMTP (Host) *</label>
+                  <input
+                    type="text"
+                    value={smtpForm.host}
+                    onChange={(e) => setSmtpForm((prev) => ({ ...prev, host: e.target.value }))}
+                    placeholder="smtp.gmail.com"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white placeholder-slate-500 font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Porta &amp; Segurança *</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={smtpForm.port}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSmtpForm((prev) => ({
+                          ...prev,
+                          port: val,
+                          secure: val.trim() === '465' ? true : val.trim() === '587' ? false : prev.secure,
+                        }));
+                      }}
+                      placeholder="587"
+                      className="w-24 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono focus:outline-none focus:border-blue-500"
+                    />
+                    <select
+                      value={smtpForm.secure ? 'ssl' : 'starttls'}
+                      onChange={(e) => {
+                        const isSsl = e.target.value === 'ssl';
+                        setSmtpForm((prev) => ({
+                          ...prev,
+                          secure: isSsl,
+                          port: isSsl ? '465' : '587',
+                        }));
+                      }}
+                      className="flex-1 px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="starttls">STARTTLS (587)</option>
+                      <option value="ssl">SSL/TLS (465)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Remetente (From)</label>
+                  <input
+                    type="text"
+                    value={smtpForm.from}
+                    onChange={(e) => setSmtpForm((prev) => ({ ...prev, from: e.target.value }))}
+                    placeholder="Gestão SST <seu-email@dominio.com>"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Usuário / E-mail SMTP *</label>
+                  <input
+                    type="text"
+                    value={smtpForm.user}
+                    onChange={(e) => setSmtpForm((prev) => ({ ...prev, user: e.target.value }))}
+                    placeholder="seu-email@gmail.com"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white placeholder-slate-500 font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-300 font-semibold mb-1">Senha / Senha de App SMTP *</label>
+                  <div className="relative">
+                    <input
+                      type={showSmtpPass ? 'text' : 'password'}
+                      value={smtpForm.pass}
+                      onChange={(e) => setSmtpForm((prev) => ({ ...prev, pass: e.target.value }))}
+                      placeholder="Para Gmail/M365 com MFA, informe a Senha de App de 16 caracteres"
+                      className="w-full pl-3 pr-10 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white placeholder-slate-500 font-mono focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowSmtpPass((v) => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1"
+                      title={showSmtpPass ? 'Ocultar senha' : 'Mostrar senha'}
+                    >
+                      {showSmtpPass ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {smtpSaveResult && (
+                <div
+                  className={`p-3 rounded-lg border text-xs flex items-start gap-2 ${
+                    smtpSaveResult.success
+                      ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                      : 'bg-red-950/40 border-red-500/40 text-red-200'
+                  }`}
+                >
+                  {smtpSaveResult.success ? (
+                    <CheckCircle2 size={15} className="text-emerald-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <XCircle size={15} className="text-red-400 shrink-0 mt-0.5" />
+                  )}
+                  <span>{smtpSaveResult.message}</span>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleClearSessionSmtp}
+                  disabled={savingSmtp || !hasLocalSmtpConfig}
+                  className="px-3 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-40 text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Eraser size={13} />
+                  <span>Limpar Sessão</span>
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={savingSmtp}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-2 disabled:opacity-50 cursor-pointer shadow-md shadow-emerald-600/20"
+                >
+                  <RefreshCw size={13} className={savingSmtp ? 'animate-spin' : ''} />
+                  <span>{savingSmtp ? 'Validando Conexão...' : 'Validar e Ativar SMTP para Envios Reais'}</span>
+                </button>
+              </div>
+            </form>
 
             <div className="p-3.5 rounded-xl bg-blue-950/30 border border-blue-500/30 text-xs text-blue-200 flex items-start gap-2.5">
               <Lock size={16} className="text-blue-400 shrink-0 mt-0.5" />
               <div>
                 <p className="font-bold text-white">Proteção de Credenciais em Produção</p>
                 <p className="text-[11px] text-slate-300 mt-0.5">
-                  Nenhuma senha ou credencial SMTP é gravada em arquivo local ou exposta no navegador. Todas as configurações são lidas em tempo de execução a partir das variáveis protegidas no painel do Netlify.
+                  Nenhuma senha ou credencial SMTP é gravada em arquivo .env local ou no banco de dados. Para a rotina automática diária (08:00 UTC), defina as variáveis protegidas no painel do Netlify.
                 </p>
               </div>
             </div>
@@ -1774,21 +2124,26 @@ export const NotificationsView: React.FC = () => {
               <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">Servidor SMTP (SMTP_HOST)</span>
                 <span className="font-mono font-semibold text-white mt-1 block">
-                  {smtpStatusInfo?.hostLabel || 'Não configurado'}
+                  {smtpStatusInfo?.hostConfigured
+                    ? smtpStatusInfo.hostLabel
+                    : smtpForm.host.trim() || 'Não configurado'}
                 </span>
               </div>
 
               <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">Porta &amp; Segurança (SMTP_PORT / SECURE)</span>
                 <span className="font-mono font-semibold text-white mt-1 block">
-                  {smtpStatusInfo?.port || '587'} • {smtpStatusInfo?.secure ? 'SSL/TLS' : 'STARTTLS'}
+                  {(smtpStatusInfo?.configured ? smtpStatusInfo.port : smtpForm.port || '587')} •{' '}
+                  {(smtpStatusInfo?.configured ? smtpStatusInfo.secure : smtpForm.secure) ? 'SSL/TLS' : 'STARTTLS'}
                 </span>
               </div>
 
               <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">Usuário SMTP (SMTP_USER)</span>
                 <span className="font-mono font-semibold text-white mt-1 block">
-                  {smtpStatusInfo?.userMasked || 'Não configurado'}
+                  {smtpStatusInfo?.userConfigured
+                    ? smtpStatusInfo.userMasked
+                    : smtpForm.user.trim() || 'Não configurado'}
                 </span>
               </div>
 
@@ -1796,10 +2151,14 @@ export const NotificationsView: React.FC = () => {
                 <span className="text-[11px] text-slate-400 block">Senha SMTP (SMTP_PASS)</span>
                 <span
                   className={`font-semibold mt-1 block ${
-                    smtpStatusInfo?.passConfigured ? 'text-emerald-400' : 'text-amber-400'
+                    smtpStatusInfo?.passConfigured || smtpForm.pass ? 'text-emerald-400' : 'text-amber-400'
                   }`}
                 >
-                  {smtpStatusInfo?.passConfigured ? 'Configurada no Servidor' : 'Pendente no Netlify'}
+                  {smtpStatusInfo?.envConfigured
+                    ? 'Configurada no Servidor'
+                    : smtpStatusInfo?.passConfigured || smtpForm.pass
+                    ? 'Ativa na Sessão'
+                    : 'Pendente'}
                 </span>
               </div>
 
@@ -1807,10 +2166,12 @@ export const NotificationsView: React.FC = () => {
                 <span className="text-[11px] text-slate-400 block">Remetente (SMTP_FROM)</span>
                 <span
                   className={`font-semibold mt-1 block ${
-                    smtpStatusInfo?.fromConfigured ? 'text-emerald-400' : 'text-slate-300'
+                    smtpStatusInfo?.fromConfigured || smtpForm.from.trim() ? 'text-emerald-400' : 'text-slate-300'
                   }`}
                 >
-                  {smtpStatusInfo?.fromConfigured ? 'Definido via Variável' : 'Usa SMTP_USER como padrão'}
+                  {smtpStatusInfo?.fromConfigured || smtpForm.from.trim()
+                    ? 'Definido'
+                    : 'Usa Usuário SMTP como padrão'}
                 </span>
               </div>
 
@@ -1840,6 +2201,7 @@ export const NotificationsView: React.FC = () => {
                   setTestEmailAddress(profile?.email || '');
                   setTestEmailSubject('');
                   setTestEmailMessage('');
+                  setShowInlineSmtpInTestModal(!effectiveSmtpConfigured);
                   setIsTestEmailModalOpen(true);
                 }}
                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-600/20 flex items-center gap-2 cursor-pointer"
@@ -2138,6 +2500,143 @@ export const NotificationsView: React.FC = () => {
             </div>
 
             <form onSubmit={handleSendTestEmail} className="space-y-3.5 text-xs">
+              {/* Live SMTP Delivery Status + Inline Config Toggle */}
+              <div
+                className={`p-3 rounded-xl border flex flex-wrap items-center justify-between gap-2 ${
+                  effectiveSmtpConfigured
+                    ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200'
+                    : 'bg-amber-950/30 border-amber-500/40 text-amber-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {effectiveSmtpConfigured ? (
+                    <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
+                  ) : (
+                    <AlertTriangle size={15} className="text-amber-400 shrink-0" />
+                  )}
+                  <span className="text-[11px] font-medium">
+                    {effectiveSmtpConfigured
+                      ? `Envio real habilitado via ${
+                          smtpForm.host.trim() || smtpStatusInfo?.hostLabel || 'SMTP'
+                        }`
+                      : 'Informe o servidor SMTP abaixo para enviar o e-mail real ao destinatário.'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowInlineSmtpInTestModal((v) => !v)}
+                  className="text-[11px] font-semibold underline text-blue-300 hover:text-blue-200 cursor-pointer"
+                >
+                  {showInlineSmtpInTestModal ? 'Ocultar SMTP' : 'Configurar / Alterar SMTP'}
+                </button>
+              </div>
+
+              {showInlineSmtpInTestModal && (
+                <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-700/80 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-1.5">
+                    <span className="font-bold text-slate-200 text-[11px]">
+                      Credenciais SMTP do Remetente (Envio Real)
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => applySmtpPreset('gmail')}
+                        className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 border border-slate-700 cursor-pointer"
+                      >
+                        Gmail
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applySmtpPreset('outlook')}
+                        className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 border border-slate-700 cursor-pointer"
+                      >
+                        Outlook
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applySmtpPreset('brevo')}
+                        className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 border border-slate-700 cursor-pointer"
+                      >
+                        Brevo
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div className="sm:col-span-2">
+                      <label className="block text-[10px] text-slate-400 mb-0.5">Servidor SMTP (Host)</label>
+                      <input
+                        type="text"
+                        value={smtpForm.host}
+                        onChange={(e) => setSmtpForm((prev) => ({ ...prev, host: e.target.value }))}
+                        placeholder="smtp.gmail.com"
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono text-[11px]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-slate-400 mb-0.5">Porta</label>
+                      <input
+                        type="text"
+                        value={smtpForm.port}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setSmtpForm((prev) => ({
+                            ...prev,
+                            port: val,
+                            secure: val.trim() === '465' ? true : val.trim() === '587' ? false : prev.secure,
+                          }));
+                        }}
+                        placeholder="587"
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono text-[11px]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] text-slate-400 mb-0.5">Usuário / E-mail SMTP</label>
+                      <input
+                        type="text"
+                        value={smtpForm.user}
+                        onChange={(e) => setSmtpForm((prev) => ({ ...prev, user: e.target.value }))}
+                        placeholder="seu-email@gmail.com"
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono text-[11px]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-slate-400 mb-0.5">Senha / Senha de App</label>
+                      <div className="relative">
+                        <input
+                          type={showSmtpPass ? 'text' : 'password'}
+                          value={smtpForm.pass}
+                          onChange={(e) => setSmtpForm((prev) => ({ ...prev, pass: e.target.value }))}
+                          placeholder="Senha de App SMTP"
+                          className="w-full pl-2.5 pr-8 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white font-mono text-[11px]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowSmtpPass((v) => !v)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                        >
+                          {showSmtpPass ? <EyeOff size={12} /> : <Eye size={12} />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-0.5">Remetente (From - Opcional)</label>
+                    <input
+                      type="text"
+                      value={smtpForm.from}
+                      onChange={(e) => setSmtpForm((prev) => ({ ...prev, from: e.target.value }))}
+                      placeholder="Gestão SST <seu-email@dominio.com>"
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white text-[11px]"
+                    />
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-slate-300 font-semibold mb-1">
                   E-mail destinatário do teste *
