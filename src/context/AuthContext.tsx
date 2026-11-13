@@ -14,6 +14,11 @@ interface AuthContextType {
   activeEmpresaNome: string | null;
   isSimulatingRole: boolean;
   loginWithCredentials: (cpfOrIdentifier: string, password: string) => Promise<{ success: boolean; message?: string }>;
+  changePassword: (
+    cpfOrIdentifier: string,
+    currentPassword: string,
+    newPassword: string
+  ) => Promise<{ success: boolean; message: string }>;
   registerUser: (
     nome: string,
     cpf: string,
@@ -204,6 +209,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return {
         success: false,
         message: 'Não foi possível conectar ao servidor de autenticação.',
+      };
+    }
+  };
+
+  // Self-service password change verified by current password on backend
+  const changePassword = async (
+    cpfOrIdentifier: string,
+    currentPassword: string,
+    newPassword: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const cleanIdentifier = cpfOrIdentifier.trim();
+    const cleanCurrent = currentPassword.trim();
+    const cleanNew = newPassword.trim();
+
+    if (!cleanIdentifier || !cleanCurrent || !cleanNew) {
+      return {
+        success: false,
+        message: 'Preencha CPF, senha atual e nova senha.',
+      };
+    }
+
+    try {
+      const resp = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cpfOrIdentifier: cleanIdentifier,
+          currentPassword: cleanCurrent,
+          newPassword: cleanNew,
+        }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          message: data?.message || 'Não foi possível alterar a senha.',
+        };
+      }
+
+      return {
+        success: true,
+        message: data.message || 'Senha alterada com sucesso!',
+      };
+    } catch (err) {
+      console.error('Erro ao alterar senha no servidor:', err);
+      return {
+        success: false,
+        message: 'Não foi possível conectar ao servidor para alterar a senha.',
       };
     }
   };
@@ -443,6 +497,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeEmpresaNome,
         isSimulatingRole: profile?.role === 'admin' && !!simulatedRole,
         loginWithCredentials,
+        changePassword,
         registerUser,
         updateUser,
         updateProfilePhoto,

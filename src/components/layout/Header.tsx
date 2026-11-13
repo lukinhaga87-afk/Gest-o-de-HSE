@@ -11,6 +11,10 @@ import {
   RefreshCw,
   Camera,
   X,
+  KeyRound,
+  Lock,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useSST } from '../../context/SSTContext';
@@ -36,6 +40,7 @@ export const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onOpenAlertsMod
     isSolicitante,
     isAuditor,
     updateProfilePhoto,
+    changePassword,
   } = useAuth();
 
   const { companies, documents, trainings } = useSST();
@@ -44,6 +49,15 @@ export const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onOpenAlertsMod
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [savingPhoto, setSavingPhoto] = useState(false);
+
+  // Change password modal states
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [currPassInput, setCurrPassInput] = useState('');
+  const [newPassInput, setNewPassInput] = useState('');
+  const [confirmPassInput, setConfirmPassInput] = useState('');
+  const [savingPass, setSavingPass] = useState(false);
+  const [passError, setPassError] = useState<string | null>(null);
+  const [passSuccess, setPassSuccess] = useState<string | null>(null);
 
   // Compute pending approvals count
   const pendingDocsCount = documents.filter((d) => d.situacao === 'pendente').length;
@@ -262,6 +276,21 @@ export const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onOpenAlertsMod
                 </p>
               </div>
               <button
+                onClick={() => {
+                  setCurrPassInput('');
+                  setNewPassInput('');
+                  setConfirmPassInput('');
+                  setPassError(null);
+                  setPassSuccess(null);
+                  setIsPasswordModalOpen(true);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-slate-300 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition-colors border border-transparent hover:border-slate-700 cursor-pointer"
+                title="Trocar Minha Senha"
+              >
+                <KeyRound size={15} />
+                <span className="hidden md:inline">Trocar Senha</span>
+              </button>
+              <button
                 onClick={logout}
                 className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded-lg transition-colors border border-transparent hover:border-slate-700 cursor-pointer"
                 title="Sair da Plataforma"
@@ -408,6 +437,148 @@ export const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onOpenAlertsMod
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Trocar Minha Senha */}
+      {isPasswordModalOpen && profile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="relative w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <KeyRound size={18} className="text-blue-400" />
+                Trocar Minha Senha
+              </h3>
+              <button
+                onClick={() => setIsPasswordModalOpen(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-400">
+              Usuário: <strong className="text-white">{profile.nome}</strong>{' '}
+              <span className="font-mono text-blue-400">({formatCPF(profile.cpf || profile.username)})</span>
+            </div>
+
+            {passSuccess && (
+              <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs flex items-start gap-2">
+                <CheckCircle2 size={16} className="shrink-0 mt-0.5 text-emerald-400" />
+                <span>{passSuccess}</span>
+              </div>
+            )}
+
+            {passError && (
+              <div className="p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-start gap-2">
+                <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-400" />
+                <span>{passError}</span>
+              </div>
+            )}
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setPassError(null);
+                setPassSuccess(null);
+
+                if (!currPassInput.trim() || !newPassInput.trim() || !confirmPassInput.trim()) {
+                  setPassError('Preencha todos os campos de senha.');
+                  return;
+                }
+                if (newPassInput.trim().length < 6) {
+                  setPassError('A nova senha deve conter no mínimo 6 caracteres.');
+                  return;
+                }
+                if (newPassInput.trim() !== confirmPassInput.trim()) {
+                  setPassError('A confirmação da nova senha não confere.');
+                  return;
+                }
+
+                setSavingPass(true);
+                try {
+                  const res = await changePassword(
+                    profile.cpf || profile.username || profile.email,
+                    currPassInput,
+                    newPassInput
+                  );
+                  if (!res.success) {
+                    setPassError(res.message);
+                  } else {
+                    setPassSuccess(res.message);
+                    setCurrPassInput('');
+                    setNewPassInput('');
+                    setConfirmPassInput('');
+                  }
+                } finally {
+                  setSavingPass(false);
+                }
+              }}
+              className="space-y-3.5 text-xs"
+            >
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">Senha Atual</label>
+                <div className="relative">
+                  <Lock size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="password"
+                    required
+                    value={currPassInput}
+                    onChange={(e) => setCurrPassInput(e.target.value)}
+                    placeholder="Informe sua senha atual"
+                    className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">Nova Senha</label>
+                <div className="relative">
+                  <KeyRound size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="password"
+                    required
+                    value={newPassInput}
+                    onChange={(e) => setNewPassInput(e.target.value)}
+                    placeholder="Mínimo 6 caracteres"
+                    className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">Confirmar Nova Senha</label>
+                <div className="relative">
+                  <KeyRound size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="password"
+                    required
+                    value={confirmPassInput}
+                    onChange={(e) => setConfirmPassInput(e.target.value)}
+                    placeholder="Repita a nova senha"
+                    className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsPasswordModalOpen(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700"
+                >
+                  Fechar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingPass}
+                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold disabled:opacity-50 cursor-pointer"
+                >
+                  {savingPass ? 'Salvando...' : 'Alterar Senha'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

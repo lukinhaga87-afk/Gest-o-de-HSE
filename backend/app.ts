@@ -139,6 +139,106 @@ export function createApiApp() {
   });
 
   // ---------------------------------------------------------------------------
+  // SELF-SERVICE PASSWORD CHANGE (Requires valid current password via bcrypt)
+  // ---------------------------------------------------------------------------
+  app.post('/api/auth/change-password', async (req: Request, res: Response) => {
+    if (!getValidatedApiAuthSecret()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Serviço de autenticação indisponível: variável API_AUTH_SECRET ausente ou inválida no servidor.',
+      });
+    }
+
+    const { cpfOrIdentifier, currentPassword, newPassword } = req.body || {};
+
+    if (typeof cpfOrIdentifier !== 'string' || !cpfOrIdentifier.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Informe o CPF ou identificador cadastrado.',
+      });
+    }
+
+    if (typeof currentPassword !== 'string' || !currentPassword.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Informe a senha atual.',
+      });
+    }
+
+    if (typeof newPassword !== 'string' || newPassword.trim().length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'A nova senha deve conter no mínimo 6 caracteres.',
+      });
+    }
+
+    if (currentPassword.trim() === newPassword.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'A nova senha deve ser diferente da senha atual.',
+      });
+    }
+
+    try {
+      const authenticated = await authenticateUserCredentials({
+        cpfOrIdentifier,
+        password: currentPassword,
+      });
+
+      if (!authenticated) {
+        return res.status(401).json({
+          success: false,
+          message: 'CPF ou senha atual incorretos.',
+        });
+      }
+
+      const newPasswordHash = await hashPasswordBcrypt(newPassword);
+      const updatedAt = new Date().toISOString();
+
+      await setDoc(
+        doc(db, 'userProfiles', authenticated.id),
+        {
+          passwordHash: newPasswordHash,
+          hashAlgorithm: 'bcrypt',
+          passwordResetRequired: false,
+          updatedAt,
+        },
+        { merge: true }
+      );
+
+      try {
+        await addDoc(collection(db, 'auditLogs'), {
+          usuario: authenticated.nome,
+          usuarioEmail: authenticated.email,
+          acao: 'Alteração de Senha',
+          entidade: 'Usuários',
+          entidadeId: authenticated.id,
+          detalhes: `Usuário ${authenticated.nome} (CPF: ${authenticated.cpf}) alterou sua própria senha de acesso`,
+          dataHora: updatedAt,
+        });
+      } catch (auditErr) {
+        console.warn('[AuditLog] Falha ao registrar alteração de senha:', auditErr);
+      }
+
+      return res.json({
+        success: true,
+        message: 'Senha alterada com sucesso! Utilize a nova senha para acessar a plataforma.',
+      });
+    } catch (err: any) {
+      if (err instanceof AuthConfigError || err instanceof AuthServiceUnavailableError) {
+        return res.status(503).json({
+          success: false,
+          message: err.message,
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: err?.message || 'Não foi possível alterar a senha.',
+      });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // CURRENT SESSION PROFILE (Authoritative Firestore profile & role)
   // ---------------------------------------------------------------------------
   app.get('/api/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {

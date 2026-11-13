@@ -6,23 +6,32 @@ import {
   AlertCircle,
   ShieldAlert,
   CreditCard,
+  KeyRound,
+  CheckCircle2,
+  ArrowLeft,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { maskCPFInput } from '../../utils/trafficLight';
 
 export const LoginPage: React.FC = () => {
-  const { loginWithCredentials } = useAuth();
+  const { loginWithCredentials, changePassword } = useAuth();
 
+  const [mode, setMode] = useState<'login' | 'change_password'>('login');
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Login form states - CPF is the primary identifier
   const [loginCpf, setLoginCpf] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
 
+  // Change password states
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+
   const handleCpfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const rawValue = e.target.value;
-    // If user is typing mostly digits, format as CPF mask automatically
     const digitsOnly = rawValue.replace(/\D/g, '');
     if (digitsOnly.length > 0 && /^[0-9.\-\s]+$/.test(rawValue)) {
       setLoginCpf(maskCPFInput(rawValue));
@@ -41,6 +50,7 @@ export const LoginPage: React.FC = () => {
     try {
       setLoading(true);
       setErrorMessage(null);
+      setSuccessMessage(null);
       const res = await loginWithCredentials(loginCpf, loginPassword);
       if (!res.success) {
         setErrorMessage(res.message || 'Credenciais inválidas. Verifique seu CPF e senha.');
@@ -51,6 +61,62 @@ export const LoginPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    if (!loginCpf.trim() || !currentPassword.trim() || !newPassword.trim() || !confirmNewPassword.trim()) {
+      setErrorMessage('Preencha o CPF, a senha atual e a nova senha nos dois campos.');
+      return;
+    }
+
+    if (newPassword.trim().length < 6) {
+      setErrorMessage('A nova senha deve conter no mínimo 6 caracteres.');
+      return;
+    }
+
+    if (newPassword.trim() !== confirmNewPassword.trim()) {
+      setErrorMessage('A confirmação da nova senha não confere.');
+      return;
+    }
+
+    if (currentPassword.trim() === newPassword.trim()) {
+      setErrorMessage('A nova senha deve ser diferente da senha atual.');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const res = await changePassword(loginCpf, currentPassword, newPassword);
+      if (!res.success) {
+        setErrorMessage(res.message);
+        return;
+      }
+
+      setSuccessMessage(res.message);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setLoginPassword('');
+      setMode('login');
+    } catch (err) {
+      console.error(err);
+      setErrorMessage('Falha ao alterar a senha. Tente novamente.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const switchMode = (nextMode: 'login' | 'change_password') => {
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmNewPassword('');
+    setMode(nextMode);
   };
 
   return (
@@ -81,9 +147,25 @@ export const LoginPage: React.FC = () => {
         <div className="mb-6 p-3 rounded-xl bg-slate-950 border border-slate-800 text-slate-300 text-xs flex items-start gap-2.5">
           <ShieldAlert size={16} className="shrink-0 mt-0.5 text-blue-400" />
           <p className="leading-relaxed text-[11px] text-slate-300">
-            Acesso individual por <strong className="text-white">CPF</strong>. O cadastramento e edição de perfis é gerenciado exclusivamente pelo <strong className="text-white">Administrador de EHS</strong>.
+            {mode === 'login' ? (
+              <>
+                Acesso individual por <strong className="text-white">CPF</strong>. O cadastramento e edição de perfis é gerenciado exclusivamente pelo <strong className="text-white">Administrador de EHS</strong>.
+              </>
+            ) : (
+              <>
+                Para alterar sua senha com segurança, informe seu <strong className="text-white">CPF</strong>, confirme a <strong className="text-white">senha atual</strong> e defina a nova senha individual.
+              </>
+            )}
           </p>
         </div>
+
+        {/* Success message alert */}
+        {successMessage && (
+          <div className="mb-5 p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs flex items-start gap-2.5">
+            <CheckCircle2 size={16} className="shrink-0 mt-0.5 text-emerald-400" />
+            <span>{successMessage}</span>
+          </div>
+        )}
 
         {/* Error message alert */}
         {errorMessage && (
@@ -93,55 +175,164 @@ export const LoginPage: React.FC = () => {
           </div>
         )}
 
-        {/* LOGIN FORM */}
-        <form onSubmit={handleLoginSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5">
-              Número do CPF
-            </label>
-            <div className="relative">
-              <CreditCard size={16} className="absolute left-3 top-2.5 text-slate-400" />
-              <input
-                type="text"
-                required
-                autoComplete="username"
-                value={loginCpf}
-                onChange={handleCpfChange}
-                placeholder="000.000.000-00"
-                maxLength={14}
-                className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors font-mono"
-              />
+        {mode === 'login' ? (
+          /* LOGIN FORM */
+          <form onSubmit={handleLoginSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Número do CPF
+              </label>
+              <div className="relative">
+                <CreditCard size={16} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  required
+                  autoComplete="username"
+                  value={loginCpf}
+                  onChange={handleCpfChange}
+                  placeholder="000.000.000-00"
+                  maxLength={14}
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors font-mono"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Informe os 11 dígitos do seu CPF cadastrado
+              </p>
             </div>
-            <p className="text-[10px] text-slate-500 mt-1">
-              Informe os 11 dígitos do seu CPF cadastrado
-            </p>
-          </div>
 
-          <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5">Senha</label>
-            <div className="relative">
-              <Lock size={16} className="absolute left-3 top-2.5 text-slate-400" />
-              <input
-                type="password"
-                required
-                autoComplete="current-password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 transition-colors"
-              />
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-medium text-slate-300">Senha</label>
+                <button
+                  type="button"
+                  onClick={() => switchMode('change_password')}
+                  className="text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <KeyRound size={12} />
+                  <span>Trocar senha</span>
+                </button>
+              </div>
+              <div className="relative">
+                <Lock size={16} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="password"
+                  required
+                  autoComplete="current-password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 transition-colors"
+                />
+              </div>
             </div>
-          </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full mt-2 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer"
-          >
-            <span>{loading ? 'Validando CPF e credenciais...' : 'Acessar a Plataforma'}</span>
-            <ArrowRight size={15} />
-          </button>
-        </form>
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full mt-2 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer"
+            >
+              <span>{loading ? 'Validando CPF e credenciais...' : 'Acessar a Plataforma'}</span>
+              <ArrowRight size={15} />
+            </button>
+          </form>
+        ) : (
+          /* CHANGE PASSWORD FORM */
+          <form onSubmit={handleChangePasswordSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Número do CPF
+              </label>
+              <div className="relative">
+                <CreditCard size={16} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  required
+                  autoComplete="username"
+                  value={loginCpf}
+                  onChange={handleCpfChange}
+                  placeholder="000.000.000-00"
+                  maxLength={14}
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors font-mono"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Senha Atual
+              </label>
+              <div className="relative">
+                <Lock size={16} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="password"
+                  required
+                  autoComplete="current-password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  placeholder="Informe sua senha atual"
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Nova Senha
+              </label>
+              <div className="relative">
+                <KeyRound size={16} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="password"
+                  required
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Mínimo 6 caracteres"
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Confirmar Nova Senha
+              </label>
+              <div className="relative">
+                <KeyRound size={16} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="password"
+                  required
+                  autoComplete="new-password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  placeholder="Repita a nova senha"
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer"
+              >
+                <KeyRound size={15} />
+                <span>{loading ? 'Atualizando senha...' : 'Salvar Nova Senha'}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => switchMode('login')}
+                className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <ArrowLeft size={14} />
+                <span>Voltar para o login</span>
+              </button>
+            </div>
+          </form>
+        )}
       </div>
 
       <div className="mt-6 text-center text-xs text-slate-400">
