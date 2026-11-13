@@ -1,5 +1,13 @@
 import express, { Request, Response } from 'express';
-import { collection, addDoc } from 'firebase/firestore';
+import {
+  collection,
+  addDoc,
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  deleteDoc,
+} from 'firebase/firestore';
 import {
   executeDailyNotificationMonitoring,
   db,
@@ -17,10 +25,30 @@ import {
 import {
   authenticateUserCredentials,
   signAuthToken,
+  requireAuth,
   requireAdmin,
   requireAuthenticatedEditor,
   AuthenticatedRequest,
+  getValidatedApiAuthSecret,
+  hashPasswordBcrypt,
+  sanitizeUserProfile,
+  isValidRole,
+  AuthConfigError,
+  AuthServiceUnavailableError,
 } from './authMiddleware';
+import { isMasterAdminIdentifier } from '../src/utils/cryptoAuth';
+import { formatCPF } from '../src/utils/trafficLight';
+import type { UserProfile } from '../src/types/sst';
+
+function removeUndefinedFields<T extends Record<string, any>>(obj: T): Partial<T> {
+  const clean: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) {
+      clean[k] = v;
+    }
+  }
+  return clean as Partial<T>;
+}
 
 export function createApiApp() {
   const app = express();
@@ -39,22 +67,38 @@ export function createApiApp() {
   });
 
   // ---------------------------------------------------------------------------
-  // AUTHENTICATION SESSION EXCHANGE (Issues HMAC-signed Bearer token for APIs)
+  // AUTHENTICATION SESSION EXCHANGE (Requires plaintext credentials + bcrypt)
   // ---------------------------------------------------------------------------
   app.post('/api/auth/session', async (req: Request, res: Response) => {
-    const { cpfOrIdentifier, password, userId, passwordHash } = req.body || {};
-
-    if (!cpfOrIdentifier && !userId) {
-      return res.status(400).json({
+    if (!getValidatedApiAuthSecret()) {
+      return res.status(503).json({
         success: false,
-        message: 'Identificador de usuário obrigatório.',
+        message: 'Serviço de autenticação indisponível: variável API_AUTH_SECRET ausente ou inválida no servidor.',
       });
     }
 
-    if (!password && !passwordHash) {
+    const body = req.body || {};
+    const { cpfOrIdentifier, password } = body;
+
+    // Explicitly reject hash-based login attempts
+    if (body.passwordHash !== undefined) {
       return res.status(400).json({
         success: false,
-        message: 'Credenciais obrigatórias para emissão de sessão.',
+        message: 'Autenticação via hash não é permitida. Informe CPF e senha.',
+      });
+    }
+
+    if (typeof cpfOrIdentifier !== 'string' || !cpfOrIdentifier.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Identificador de usuário (CPF ou e-mail) obrigatório.',
+      });
+    }
+
+    if (typeof password !== 'string' || !password.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Senha obrigatória para emissão de sessão.',
       });
     }
 
@@ -62,14 +106,12 @@ export function createApiApp() {
       const authenticated = await authenticateUserCredentials({
         cpfOrIdentifier,
         password,
-        userId,
-        passwordHash,
       });
 
       if (!authenticated) {
         return res.status(401).json({
           success: false,
-          message: 'Credenciais inválidas.',
+          message: 'CPF ou senha incorretos. Verifique suas credenciais de acesso.',
         });
       }
 
@@ -79,12 +121,317 @@ export function createApiApp() {
         token,
         expiresAt,
         role: authenticated.role,
+        user: authenticated,
       });
     } catch (err: any) {
+      if (err instanceof AuthConfigError || err instanceof AuthServiceUnavailableError) {
+        return res.status(503).json({
+          success: false,
+          message: err.message,
+        });
+      }
       console.error('[API auth/session Error]:', err);
       return res.status(500).json({
         success: false,
         message: 'Erro ao validar sessão no servidor.',
+      });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // CURRENT SESSION PROFILE (Authoritative Firestore profile & role)
+  // ---------------------------------------------------------------------------
+  app.get('/api/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    if (req.tokenRoleDiverged || !req.officialProfile) {
+      return res.status(401).json({
+        success: false,
+        message: 'Perfil de acesso divergente ou atualizado no cadastro oficial. Faça login novamente.',
+      });
+    }
+    return res.json({
+      success: true,
+      user: req.officialProfile,
+    });
+  });
+
+  app.put('/api/auth/me/photo', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    if (req.tokenRoleDiverged || !req.authUser || !req.officialProfile) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida. Faça login novamente.',
+      });
+    }
+
+    const fotoPerfilUrl =
+      typeof req.body?.fotoPerfilUrl === 'string' ? req.body.fotoPerfilUrl : '';
+    const updatedAt = new Date().toISOString();
+
+    try {
+      await setDoc(
+        doc(db, 'userProfiles', req.authUser.sub),
+        { fotoPerfilUrl, updatedAt },
+        { merge: true }
+      );
+      return res.json({
+        success: true,
+        user: { ...req.officialProfile, fotoPerfilUrl, updatedAt },
+      });
+    } catch (err: any) {
+      console.error('[API auth/me/photo Error]:', err);
+      return res.status(503).json({
+        success: false,
+        message: 'Não foi possível salvar a foto no banco de dados.',
+      });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // ADMIN-ONLY USER MANAGEMENT (bcrypt password hashing + Firestore persistence)
+  // ---------------------------------------------------------------------------
+  app.post('/api/auth/users', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const { nome, cpf, email, password, role, empresaId, empresaNome, fotoPerfilUrl } = req.body || {};
+
+    const cleanCpfDigits = typeof cpf === 'string' ? cpf.replace(/\D/g, '') : '';
+    if (
+      typeof nome !== 'string' ||
+      !nome.trim() ||
+      cleanCpfDigits.length !== 11 ||
+      typeof email !== 'string' ||
+      !email.trim() ||
+      typeof password !== 'string' ||
+      password.trim().length < 6
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Dados inválidos. Informe nome, CPF (11 dígitos), e-mail e senha com no mínimo 6 caracteres.',
+      });
+    }
+
+    if (!isValidRole(role)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Perfil de acesso inválido.',
+      });
+    }
+
+    try {
+      const passwordHash = await hashPasswordBcrypt(password);
+      const formattedCpf = formatCPF(cpf);
+      const normalizedEmail = email.trim().toLowerCase();
+
+      const existingSnap = await getDocs(collection(db, 'userProfiles'));
+      for (const existingDoc of existingSnap.docs) {
+        const u = existingDoc.data() as UserProfile;
+        const uDigits = (u.cpf || u.username || '').replace(/\D/g, '');
+        if (uDigits === cleanCpfDigits) {
+          return res.status(409).json({
+            success: false,
+            message: 'Já existe um usuário cadastrado com este CPF.',
+          });
+        }
+        if ((u.email || '').trim().toLowerCase() === normalizedEmail) {
+          return res.status(409).json({
+            success: false,
+            message: 'Já existe um usuário cadastrado com este e-mail.',
+          });
+        }
+      }
+
+      const userId = `usr_${Date.now()}`;
+      const nowIso = new Date().toISOString();
+      const newProfile: UserProfile = {
+        id: userId,
+        cpf: formattedCpf,
+        username: formattedCpf,
+        email: normalizedEmail,
+        nome: nome.trim(),
+        role,
+        passwordHash,
+        hashAlgorithm: 'bcrypt',
+        passwordResetRequired: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      if (typeof empresaId === 'string' && empresaId.trim()) {
+        newProfile.empresaId = empresaId.trim();
+      }
+      if (typeof empresaNome === 'string' && empresaNome.trim()) {
+        newProfile.empresaNome = empresaNome.trim();
+      }
+      if (typeof fotoPerfilUrl === 'string' && fotoPerfilUrl.trim()) {
+        newProfile.fotoPerfilUrl = fotoPerfilUrl;
+      }
+
+      await setDoc(doc(db, 'userProfiles', userId), removeUndefinedFields(newProfile));
+
+      try {
+        await addDoc(collection(db, 'auditLogs'), {
+          usuario: req.authUser?.nome || 'Administrador EHS',
+          usuarioEmail: req.authUser?.email || '',
+          acao: 'Cadastro de Perfil',
+          entidade: 'Usuários',
+          entidadeId: userId,
+          detalhes: `Novo usuário cadastrado com CPF ${newProfile.cpf} (${newProfile.nome}) - perfil ${newProfile.role.toUpperCase()}`,
+          dataHora: nowIso,
+        });
+      } catch (auditErr) {
+        console.warn('[AuditLog] Falha ao registrar cadastro de usuário:', auditErr);
+      }
+
+      return res.status(201).json({
+        success: true,
+        user: sanitizeUserProfile(userId, newProfile),
+      });
+    } catch (err: any) {
+      return res.status(400).json({
+        success: false,
+        message: err?.message || 'Erro ao cadastrar perfil de usuário.',
+      });
+    }
+  });
+
+  app.put('/api/auth/users/:id', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const targetId = req.params.id;
+    const { nome, cpf, email, role, empresaId, empresaNome, cargo, newPassword, fotoPerfilUrl } =
+      req.body || {};
+
+    const cleanCpfDigits = typeof cpf === 'string' ? cpf.replace(/\D/g, '') : '';
+    if (
+      typeof nome !== 'string' ||
+      !nome.trim() ||
+      cleanCpfDigits.length !== 11 ||
+      typeof email !== 'string' ||
+      !email.trim() ||
+      !isValidRole(role)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Preencha nome, CPF (11 dígitos), e-mail e perfil válido.',
+      });
+    }
+
+    if (isMasterAdminIdentifier(targetId) && role !== 'admin') {
+      return res.status(400).json({
+        success: false,
+        message: 'O Administrador Mestre EHS não pode ter seu perfil rebaixado.',
+      });
+    }
+
+    try {
+      const userRef = doc(db, 'userProfiles', targetId);
+      const existingSnap = await getDoc(userRef);
+      if (!existingSnap.exists()) {
+        return res.status(404).json({
+          success: false,
+          message: 'Usuário não encontrado.',
+        });
+      }
+
+      const formattedCpf = formatCPF(cpf);
+      const nowIso = new Date().toISOString();
+      const updatePayload: Partial<UserProfile> = {
+        cpf: formattedCpf,
+        username: formattedCpf,
+        email: email.trim().toLowerCase(),
+        nome: nome.trim(),
+        role,
+        updatedAt: nowIso,
+      };
+
+      if (typeof empresaId === 'string') updatePayload.empresaId = empresaId.trim() || '';
+      if (typeof empresaNome === 'string') updatePayload.empresaNome = empresaNome.trim() || '';
+      if (typeof cargo === 'string' && cargo.trim()) updatePayload.cargo = cargo.trim();
+      if (typeof fotoPerfilUrl === 'string') updatePayload.fotoPerfilUrl = fotoPerfilUrl;
+
+      if (typeof newPassword === 'string' && newPassword.trim().length > 0) {
+        updatePayload.passwordHash = await hashPasswordBcrypt(newPassword);
+        updatePayload.hashAlgorithm = 'bcrypt';
+        updatePayload.passwordResetRequired = false;
+      }
+
+      await setDoc(userRef, removeUndefinedFields(updatePayload), { merge: true });
+
+      const updatedSnap = await getDoc(userRef);
+      const updatedData = (updatedSnap.data() || updatePayload) as UserProfile;
+
+      try {
+        await addDoc(collection(db, 'auditLogs'), {
+          usuario: req.authUser?.nome || 'Administrador EHS',
+          usuarioEmail: req.authUser?.email || '',
+          acao: 'Edição de Perfil de Usuário',
+          entidade: 'Usuários',
+          entidadeId: targetId,
+          detalhes: `Usuário ${nome.trim()} (CPF: ${formattedCpf}) atualizado pelo Administrador`,
+          dataHora: nowIso,
+        });
+      } catch (auditErr) {
+        console.warn('[AuditLog] Falha ao registrar edição de usuário:', auditErr);
+      }
+
+      return res.json({
+        success: true,
+        user: sanitizeUserProfile(targetId, updatedData),
+      });
+    } catch (err: any) {
+      return res.status(400).json({
+        success: false,
+        message: err?.message || 'Erro ao atualizar dados do usuário.',
+      });
+    }
+  });
+
+  app.delete('/api/auth/users/:id', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const targetId = req.params.id;
+    if (req.authUser?.sub === targetId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Você não pode excluir sua própria conta atualmente ativa.',
+      });
+    }
+
+    try {
+      const userRef = doc(db, 'userProfiles', targetId);
+      const existingSnap = await getDoc(userRef);
+      if (!existingSnap.exists()) {
+        return res.status(404).json({
+          success: false,
+          message: 'Usuário não encontrado.',
+        });
+      }
+
+      const existingData = existingSnap.data() as UserProfile;
+      if (isMasterAdminIdentifier(targetId) || isMasterAdminIdentifier(existingData.cpf)) {
+        return res.status(403).json({
+          success: false,
+          message: 'O perfil do Administrador Mestre não pode ser excluído.',
+        });
+      }
+
+      await deleteDoc(userRef);
+
+      try {
+        await addDoc(collection(db, 'auditLogs'), {
+          usuario: req.authUser?.nome || 'Administrador EHS',
+          usuarioEmail: req.authUser?.email || '',
+          acao: 'Exclusão de Perfil',
+          entidade: 'Usuários',
+          entidadeId: targetId,
+          detalhes: `Perfil de usuário excluído (CPF: ${existingData.cpf || targetId}) pelo Administrador`,
+          dataHora: new Date().toISOString(),
+        });
+      } catch (auditErr) {
+        console.warn('[AuditLog] Falha ao registrar exclusão de usuário:', auditErr);
+      }
+
+      return res.json({
+        success: true,
+        message: 'Perfil excluído com sucesso.',
+      });
+    } catch (err: any) {
+      return res.status(503).json({
+        success: false,
+        message: err?.message || 'Falha ao excluir perfil no banco de dados.',
       });
     }
   });

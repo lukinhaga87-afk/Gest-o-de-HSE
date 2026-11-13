@@ -1,32 +1,21 @@
 /**
- * Utility for hashing and verifying passwords using Web Crypto API (SHA-256)
+ * Identificadores públicos do Administrador Mestre EHS (sem credenciais ou senhas fixas).
+ * Toda verificação e geração de hash de senha (bcrypt) ocorre exclusivamente no backend.
  */
-export async function hashPassword(password: string): Promise<string> {
-  const msgUint8 = new TextEncoder().encode(password.trim());
-  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
+export const MASTER_ADMIN_USER_ID = 'user-452.066.308-37';
+export const LEGACY_MASTER_ADMIN_USER_ID = 'user-543.066.308-37';
+export const MASTER_ADMIN_CPF = '452.066.308-37';
+export const MASTER_ADMIN_DEFAULT_NAME = 'Lucas Valdeci Gonçalves';
+export const MASTER_ADMIN_DEFAULT_EMAIL = 'lucastecseg1@gmail.com';
 
-export interface DemoAccount {
-  cpf: string; // Número do CPF (Identificador principal de acesso)
-  username: string;
-  email: string;
-  passwordPlainText: string;
-  nome: string;
-  role: 'admin' | 'solicitante' | 'auditor';
-  empresaNome?: string;
-  cargo: string;
+export function isMasterAdminIdentifier(idOrCpf?: string | null): boolean {
+  if (!idOrCpf) return false;
+  const trimmed = idOrCpf.trim();
+  const digits = trimmed.replace(/\D/g, '');
+  return (
+    trimmed === MASTER_ADMIN_USER_ID ||
+    trimmed === LEGACY_MASTER_ADMIN_USER_ID ||
+    digits === '45206630837' ||
+    digits === '54306630837'
+  );
 }
-
-export const DEMO_PLATFORM_ACCOUNTS: DemoAccount[] = [
-  {
-    cpf: '452.066.308-37',
-    username: '452.066.308-37',
-    email: 'lucastecseg1@gmail.com',
-    passwordPlainText: '001122',
-    nome: 'Lucas Valdeci Gonçalves',
-    role: 'admin',
-    cargo: 'Administrador Mestre EHS (Acesso Completo)',
-  },
-];

@@ -13,6 +13,8 @@ export interface UserProfile {
   empresaNome?: string;
   cargo?: string;
   passwordHash?: string;
+  hashAlgorithm?: 'bcrypt';
+  passwordResetRequired?: boolean;
   fotoPerfilUrl?: string; // FOTO DE PERFIL persistente
   createdAt?: string;
   updatedAt?: string;

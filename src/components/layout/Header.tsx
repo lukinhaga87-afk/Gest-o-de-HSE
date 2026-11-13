@@ -98,114 +98,120 @@ export const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onOpenAlertsMod
         </div>
       </div>
 
-      {/* Right controls: Role Selector / Simulator, Alerts, User Profile */}
+      {/* Right controls: Role Badge / Admin Preview Switcher, Alerts, User Profile */}
       <div className="flex items-center gap-3">
-        {/* Role Switcher Button - Enables test verification for the 3 roles */}
-        <div className="relative">
-          <button
-            onClick={() => setRoleMenuOpen(!roleMenuOpen)}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-xs transition-colors"
-            title="Alternar Perfil para Teste"
-          >
-            <span className="text-slate-400 hidden md:inline">Perfil Ativo:</span>
-            {getRoleBadge(activeRole)}
-            {isSimulatingRole && (
-              <span className="text-[10px] px-1 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-mono">
-                Simulado
-              </span>
-            )}
-          </button>
-
-          {/* Role Dropdown */}
-          {roleMenuOpen && (
-            <div className="absolute right-0 mt-2 w-72 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-2 z-50">
-              <div className="px-3 py-2 border-b border-slate-800 text-xs">
-                <p className="font-semibold text-white">Perfis de Acesso (Teste)</p>
-                <p className="text-[11px] text-slate-400">
-                  Alterne para verificar permissões e regras de isolamento:
-                </p>
-              </div>
-
-              <div className="py-1 space-y-1">
-                <button
-                  onClick={() => {
-                    setSimulatedRole('admin');
-                    setRoleMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between ${
-                    activeRole === 'admin'
-                      ? 'bg-blue-600/20 text-blue-300 font-semibold border border-blue-500/30'
-                      : 'text-slate-300 hover:bg-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Shield size={14} className="text-blue-400" />
-                    <div>
-                      <p className="font-medium">ADMINISTRADOR EHS</p>
-                      <p className="text-[10px] text-slate-400">Controle total, aprovações e exclusão</p>
-                    </div>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => {
-                    const firstComp = companies[0];
-                    setSimulatedRole('solicitante', firstComp?.id, firstComp?.razaoSocial);
-                    setRoleMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between ${
-                    activeRole === 'solicitante'
-                      ? 'bg-amber-600/20 text-amber-300 font-semibold border border-amber-500/30'
-                      : 'text-slate-300 hover:bg-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Building size={14} className="text-amber-400" />
-                    <div>
-                      <p className="font-medium">SOLICITANTE / CONTRATADA</p>
-                      <p className="text-[10px] text-slate-400">Restrito à própria empresa</p>
-                    </div>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => {
-                    setSimulatedRole('auditor');
-                    setRoleMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between ${
-                    activeRole === 'auditor'
-                      ? 'bg-emerald-600/20 text-emerald-300 font-semibold border border-emerald-500/30'
-                      : 'text-slate-300 hover:bg-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Eye size={14} className="text-emerald-400" />
-                    <div>
-                      <p className="font-medium">AUDITOR</p>
-                      <p className="text-[10px] text-slate-400">Apenas consulta, relatórios e auditoria</p>
-                    </div>
-                  </div>
-                </button>
-              </div>
-
+        {profile?.role === 'admin' ? (
+          <div className="relative">
+            <button
+              onClick={() => setRoleMenuOpen(!roleMenuOpen)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-xs transition-colors"
+              title="Alternar Perfil para Teste"
+            >
+              <span className="text-slate-400 hidden md:inline">Perfil Ativo:</span>
+              {getRoleBadge(activeRole)}
               {isSimulatingRole && (
-                <div className="pt-2 border-t border-slate-800">
+                <span className="text-[10px] px-1 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-mono">
+                  Simulado
+                </span>
+              )}
+            </button>
+
+            {/* Role Dropdown (Admin Only) */}
+            {roleMenuOpen && (
+              <div className="absolute right-0 mt-2 w-72 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-2 z-50">
+                <div className="px-3 py-2 border-b border-slate-800 text-xs">
+                  <p className="font-semibold text-white">Perfis de Acesso (Teste)</p>
+                  <p className="text-[11px] text-slate-400">
+                    Alterne para verificar permissões e regras de isolamento:
+                  </p>
+                </div>
+
+                <div className="py-1 space-y-1">
                   <button
                     onClick={() => {
-                      resetSimulatedRole();
+                      setSimulatedRole('admin');
                       setRoleMenuOpen(false);
                     }}
-                    className="w-full text-center px-3 py-1.5 text-xs text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 flex items-center justify-center gap-1.5"
+                    className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between ${
+                      activeRole === 'admin'
+                        ? 'bg-blue-600/20 text-blue-300 font-semibold border border-blue-500/30'
+                        : 'text-slate-300 hover:bg-slate-800'
+                    }`}
                   >
-                    <RefreshCw size={12} />
-                    Restaurar perfil real
+                    <div className="flex items-center gap-2">
+                      <Shield size={14} className="text-blue-400" />
+                      <div>
+                        <p className="font-medium">ADMINISTRADOR EHS</p>
+                        <p className="text-[10px] text-slate-400">Controle total, aprovações e exclusão</p>
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      const firstComp = companies[0];
+                      setSimulatedRole('solicitante', firstComp?.id, firstComp?.razaoSocial);
+                      setRoleMenuOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between ${
+                      activeRole === 'solicitante'
+                        ? 'bg-amber-600/20 text-amber-300 font-semibold border border-amber-500/30'
+                        : 'text-slate-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Building size={14} className="text-amber-400" />
+                      <div>
+                        <p className="font-medium">SOLICITANTE / CONTRATADA</p>
+                        <p className="text-[10px] text-slate-400">Restrito à própria empresa</p>
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setSimulatedRole('auditor');
+                      setRoleMenuOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between ${
+                      activeRole === 'auditor'
+                        ? 'bg-emerald-600/20 text-emerald-300 font-semibold border border-emerald-500/30'
+                        : 'text-slate-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Eye size={14} className="text-emerald-400" />
+                      <div>
+                        <p className="font-medium">AUDITOR</p>
+                        <p className="text-[10px] text-slate-400">Apenas consulta, relatórios e auditoria</p>
+                      </div>
+                    </div>
                   </button>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
+
+                {isSimulatingRole && (
+                  <div className="pt-2 border-t border-slate-800">
+                    <button
+                      onClick={() => {
+                        resetSimulatedRole();
+                        setRoleMenuOpen(false);
+                      }}
+                      className="w-full text-center px-3 py-1.5 text-xs text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 flex items-center justify-center gap-1.5"
+                    >
+                      <RefreshCw size={12} />
+                      Restaurar perfil real
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-xs">
+            <span className="text-slate-400 hidden md:inline">Perfil Ativo:</span>
+            {getRoleBadge(activeRole)}
+          </div>
+        )}
 
         {/* Notifications / Pending indicator */}
         {totalPending > 0 && isAdmin && (

@@ -109,12 +109,13 @@ export const UsersPermissionsView: React.FC = () => {
     setTimeout(() => setSuccessMessage(null), 4000);
   };
 
-  // Subscribe to userProfiles
+  // Subscribe to userProfiles (stripping passwordHash in client state)
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'userProfiles'), (snap) => {
       const list: UserProfile[] = [];
       snap.forEach((d) => {
-        list.push({ id: d.id, ...(d.data() as Omit<UserProfile, 'id'>) });
+        const { passwordHash: _ignored, ...safeData } = d.data() as Omit<UserProfile, 'id'>;
+        list.push({ id: d.id, ...safeData });
       });
       setUsersList(list);
     });
@@ -443,69 +444,89 @@ export const UsersPermissionsView: React.FC = () => {
                 </thead>
                 <tbody className="divide-y divide-slate-800">
                   {/* Master Root User: Lucas Valdeci Gonçalves */}
-                  <tr className="hover:bg-slate-850/50 bg-blue-950/20">
-                    <td className="px-4 py-3.5 font-bold text-white flex items-center gap-2.5">
-                      {profile?.cpf === '452.066.308-37' && profile?.fotoPerfilUrl ? (
-                        <img
-                          src={profile.fotoPerfilUrl}
-                          alt="Lucas Valdeci Gonçalves"
-                          className="h-8 w-8 rounded-full object-cover border border-blue-400 shrink-0 shadow-sm"
-                        />
-                      ) : (
-                        <div className="h-8 w-8 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center text-xs shrink-0 border border-blue-400/40">
-                          L
-                        </div>
-                      )}
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span>Lucas Valdeci Gonçalves</span>
-                          <span className="text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">
-                            Mestre
+                  {(() => {
+                    const liveMaster = usersList.find(
+                      (u) => u.id === 'user-452.066.308-37' || u.cpf === '452.066.308-37'
+                    );
+                    const masterNome = liveMaster?.nome || 'Lucas Valdeci Gonçalves';
+                    const masterEmail = liveMaster?.email || 'lucastecseg1@gmail.com';
+                    const masterPhoto =
+                      liveMaster?.fotoPerfilUrl ||
+                      (profile?.cpf === '452.066.308-37' ? profile.fotoPerfilUrl : undefined);
+                    const masterNeedsReset = liveMaster?.passwordResetRequired === true;
+
+                    return (
+                      <tr className="hover:bg-slate-850/50 bg-blue-950/20">
+                        <td className="px-4 py-3.5 font-bold text-white flex items-center gap-2.5">
+                          {masterPhoto ? (
+                            <img
+                              src={masterPhoto}
+                              alt={masterNome}
+                              className="h-8 w-8 rounded-full object-cover border border-blue-400 shrink-0 shadow-sm"
+                            />
+                          ) : (
+                            <div className="h-8 w-8 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center text-xs shrink-0 border border-blue-400/40">
+                              {masterNome[0]?.toUpperCase() || 'L'}
+                            </div>
+                          )}
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span>{masterNome}</span>
+                              <span className="text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                                Mestre
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3.5 font-mono text-blue-400 font-bold">
+                          452.066.308-37
+                        </td>
+                        <td className="px-4 py-3.5 text-slate-300">{masterEmail}</td>
+                        <td className="px-4 py-3.5">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                            Administrador Mestre EHS
                           </span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3.5 font-mono text-blue-400 font-bold">
-                      452.066.308-37
-                    </td>
-                    <td className="px-4 py-3.5 text-slate-300">lucastecseg1@gmail.com</td>
-                    <td className="px-4 py-3.5">
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-500/20 text-blue-300 border border-blue-500/40">
-                        Administrador Mestre EHS
-                      </span>
-                    </td>
-                    <td className="px-4 py-3.5 text-slate-300">Todas as Contratadas (Global)</td>
-                    <td className="px-4 py-3.5 text-[11px] text-emerald-400 font-medium">
-                      Senha Protegida (SHA-256)
-                    </td>
-                    <td className="px-4 py-3.5 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        {isAdmin && (
-                          <button
-                            onClick={() =>
-                              handleOpenEditUser({
-                                id: 'user-452.066.308-37',
-                                nome: 'Lucas Valdeci Gonçalves',
-                                cpf: '452.066.308-37',
-                                username: '452.066.308-37',
-                                email: 'lucastecseg1@gmail.com',
-                                role: 'admin',
-                                cargo: 'Administrador Mestre EHS',
-                              })
-                            }
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-950/50 text-blue-300 hover:bg-blue-900/60 border border-blue-500/30 text-[11px] font-medium transition-colors"
-                            title="Editar Dados do Administrador"
-                          >
-                            <Edit3 size={13} />
-                            <span>Editar</span>
-                          </button>
-                        )}
-                        <span className="text-[10px] text-blue-400 font-semibold bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
-                          Mestre Protegido
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
+                        </td>
+                        <td className="px-4 py-3.5 text-slate-300">Todas as Contratadas (Global)</td>
+                        <td className="px-4 py-3.5 text-[11px] font-medium">
+                          {masterNeedsReset ? (
+                            <span className="text-amber-400">Aguardando Troca Inicial (bcrypt)</span>
+                          ) : (
+                            <span className="text-emerald-400">Senha Protegida (bcrypt)</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3.5 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {isAdmin && (
+                              <button
+                                onClick={() =>
+                                  handleOpenEditUser({
+                                    id: liveMaster?.id || 'user-452.066.308-37',
+                                    nome: masterNome,
+                                    cpf: '452.066.308-37',
+                                    username: '452.066.308-37',
+                                    email: masterEmail,
+                                    role: 'admin',
+                                    cargo: liveMaster?.cargo || 'Administrador Mestre EHS',
+                                    empresaNome: liveMaster?.empresaNome,
+                                    fotoPerfilUrl: masterPhoto,
+                                  })
+                                }
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-950/50 text-blue-300 hover:bg-blue-900/60 border border-blue-500/30 text-[11px] font-medium transition-colors"
+                                title="Editar Dados do Administrador"
+                              >
+                                <Edit3 size={13} />
+                                <span>Editar</span>
+                              </button>
+                            )}
+                            <span className="text-[10px] text-blue-400 font-semibold bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
+                              Mestre Protegido
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })()}
 
                   {/* Registered individual users */}
                   {filteredUsers
@@ -557,8 +578,12 @@ export const UsersPermissionsView: React.FC = () => {
                         <td className="px-4 py-3.5 text-slate-300">
                           {u.empresaNome || (u.role === 'admin' ? 'Todas' : '-')}
                         </td>
-                        <td className="px-4 py-3.5 text-[11px] text-emerald-400 font-medium">
-                          Senha Protegida (SHA-256)
+                        <td className="px-4 py-3.5 text-[11px] font-medium">
+                          {u.passwordResetRequired ? (
+                            <span className="text-amber-400">Aguardando Troca de Senha</span>
+                          ) : (
+                            <span className="text-emerald-400">Senha Protegida (bcrypt)</span>
+                          )}
                         </td>
                         <td className="px-4 py-3.5 text-right">
                           <div className="flex items-center justify-end gap-1.5">
@@ -620,42 +645,44 @@ export const UsersPermissionsView: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">Alternar Perfil:</span>
-              <button
-                onClick={() => setSimulatedRole('admin')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
-                  activeRole === 'admin'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                Admin EHS
-              </button>
-              <button
-                onClick={() => {
-                  const comp = companies[0];
-                  setSimulatedRole('solicitante', comp?.id, comp?.razaoSocial);
-                }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
-                  activeRole === 'solicitante'
-                    ? 'bg-amber-600 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                Solicitante da Contratada
-              </button>
-              <button
-                onClick={() => setSimulatedRole('auditor')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
-                  activeRole === 'auditor'
-                    ? 'bg-emerald-600 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                Auditor
-              </button>
-            </div>
+            {profile?.role === 'admin' && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">Alternar Perfil:</span>
+                <button
+                  onClick={() => setSimulatedRole('admin')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+                    activeRole === 'admin'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  Admin EHS
+                </button>
+                <button
+                  onClick={() => {
+                    const comp = companies[0];
+                    setSimulatedRole('solicitante', comp?.id, comp?.razaoSocial);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+                    activeRole === 'solicitante'
+                      ? 'bg-amber-600 text-white'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  Solicitante da Contratada
+                </button>
+                <button
+                  onClick={() => setSimulatedRole('auditor')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+                    activeRole === 'auditor'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  Auditor
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
