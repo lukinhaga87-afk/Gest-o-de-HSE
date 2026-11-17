@@ -21,12 +21,14 @@ import { ReportsView } from './components/views/ReportsView';
 import { UsersPermissionsView } from './components/views/UsersPermissionsView';
 import { SettingsImportView } from './components/views/SettingsImportView';
 import { NotificationsView } from './components/views/NotificationsView';
+import { SmartDocsView } from './components/views/SmartDocsView';
 import { ShieldCheck, Loader2 } from 'lucide-react';
 
 const SOLICITANTE_ALLOWED_TABS: NavItemKey[] = [
   'empresas',
   'colaboradores',
   'documentos',
+  'smartdocs',
   'treinamentos',
   'exames',
   'epi',
@@ -101,6 +103,7 @@ const MainAppContent: React.FC = () => {
             {currentTab === 'colaboradores' && <EmployeesView />}
             {currentTab === 'treinamentos' && <TrainingsView />}
             {currentTab === 'documentos' && <DocumentsView />}
+            {currentTab === 'smartdocs' && <SmartDocsView />}
             {currentTab === 'exames' && <ExamsView />}
             {currentTab === 'epi' && <EpiView />}
             {currentTab === 'apr_pt' && <PermitsView />}

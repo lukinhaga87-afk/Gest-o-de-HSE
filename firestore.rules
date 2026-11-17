@@ -164,5 +164,55 @@ service cloud.firestore {
                     && request.resource.data.status in ['sucesso', 'falha', 'simulado'];
       allow update, delete: if false;
     }
+
+    // EHS SmartDocs Collection
+    match /smartDocs/{smartDocId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['arquivoNome', 'arquivoMimeType', 'arquivoHashSha256', 'categoriaGrupo', 'tipoDocumento', 'status', 'enviadoPorId', 'dataEnvio'])
+                            && request.resource.data.arquivoNome is string && request.resource.data.arquivoNome.size() <= 250
+                            && request.resource.data.arquivoMimeType in ['application/pdf', 'image/jpeg', 'image/png']
+                            && request.resource.data.arquivoHashSha256 is string && request.resource.data.arquivoHashSha256.size() <= 128
+                            && request.resource.data.categoriaGrupo in ['saude_ocupacional', 'treinamentos', 'documentos_empresariais', 'outros']
+                            && request.resource.data.tipoDocumento is string && request.resource.data.tipoDocumento.size() <= 150
+                            && request.resource.data.status in ['AGUARDANDO_PROCESSAMENTO', 'PROCESSANDO', 'PROCESSADO', 'ERRO_LEITURA', 'PENDENTE_APROVACAO', 'APROVADO', 'REJEITADO'];
+      allow delete: if false;
+    }
+
+    // EHS SmartDocs Validity Rules Collection
+    match /smartDocValidityRules/{ruleId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['tipoDocumento', 'mesesValidade', 'ativo'])
+                            && request.resource.data.tipoDocumento is string && request.resource.data.tipoDocumento.size() <= 150
+                            && request.resource.data.mesesValidade is number
+                            && request.resource.data.ativo is bool;
+      allow delete: if true;
+    }
+
+    // Password Recovery Codes (Hashed single-use codes, never deletable for audit trace)
+    match /passwordRecoveryCodes/{codeId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['userId', 'cpfDigits', 'codeHash', 'codeSalt', 'canal', 'status', 'tentativas', 'maxTentativas', 'usado', 'invalidado', 'createdAt', 'expiresAt'])
+                            && request.resource.data.userId is string && request.resource.data.userId.size() <= 128
+                            && request.resource.data.cpfDigits is string && request.resource.data.cpfDigits.size() <= 11
+                            && request.resource.data.codeHash is string && request.resource.data.codeHash.size() <= 128
+                            && request.resource.data.codeSalt is string && request.resource.data.codeSalt.size() <= 64
+                            && request.resource.data.canal in ['admin', 'whatsapp', 'sms']
+                            && request.resource.data.status in ['ativo', 'utilizado', 'expirado', 'bloqueado', 'substituido']
+                            && request.resource.data.tentativas is number
+                            && request.resource.data.maxTentativas is number
+                            && request.resource.data.usado is bool
+                            && request.resource.data.invalidado is bool;
+      allow delete: if false;
+    }
+
+    // Password Recovery Brute-force Rate Limits
+    match /passwordRecoveryRateLimits/{rateKey} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['key', 'attempts', 'windowStart'])
+                            && request.resource.data.key is string && request.resource.data.key.size() <= 150
+                            && request.resource.data.attempts is number
+                            && request.resource.data.windowStart is number;
+      allow delete: if true;
+    }
   }
 }

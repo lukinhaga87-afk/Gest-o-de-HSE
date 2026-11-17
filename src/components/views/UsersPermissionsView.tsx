@@ -20,12 +20,18 @@ import {
   CreditCard,
   KeyRound,
   Camera,
+  Copy,
+  Clock,
 } from 'lucide-react';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
-import { UserProfile, UserRole } from '../../types/sst';
+import {
+  PasswordRecoveryGeneratedResult,
+  UserProfile,
+  UserRole,
+} from '../../types/sst';
 import { formatCPF, maskCPFInput } from '../../utils/trafficLight';
 
 export const UsersPermissionsView: React.FC = () => {
@@ -40,6 +46,7 @@ export const UsersPermissionsView: React.FC = () => {
     registerUser,
     updateUser,
     deleteUser,
+    adminGenerateRecoveryCode,
   } = useAuth();
 
   const [activeTab, setActiveTab] = useState<'usuarios' | 'perfis' | 'auditoria'>('usuarios');
@@ -100,6 +107,14 @@ export const UsersPermissionsView: React.FC = () => {
   const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null);
   const [deletingUser, setDeletingUser] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Admin password recovery code generation modal state
+  const [recoveryTargetUser, setRecoveryTargetUser] = useState<UserProfile | null>(null);
+  const [generatingRecoveryCode, setGeneratingRecoveryCode] = useState(false);
+  const [generatedRecoveryResult, setGeneratedRecoveryResult] =
+    useState<PasswordRecoveryGeneratedResult | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [copiedRecoveryCode, setCopiedRecoveryCode] = useState(false);
 
   // Success toast/message
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -274,6 +289,43 @@ export const UsersPermissionsView: React.FC = () => {
       setDeleteError(err.message || 'Falha ao excluir perfil.');
     } finally {
       setDeletingUser(false);
+    }
+  };
+
+  const handleOpenRecoveryModal = (u: UserProfile) => {
+    setRecoveryTargetUser(u);
+    setGeneratedRecoveryResult(null);
+    setRecoveryError(null);
+    setCopiedRecoveryCode(false);
+  };
+
+  const handleGenerateRecoveryCode = async () => {
+    if (!recoveryTargetUser || !isAdmin) return;
+    try {
+      setGeneratingRecoveryCode(true);
+      setRecoveryError(null);
+      setCopiedRecoveryCode(false);
+      const result = await adminGenerateRecoveryCode({
+        userId: recoveryTargetUser.id,
+        cpf: recoveryTargetUser.cpf || recoveryTargetUser.username,
+      });
+      setGeneratedRecoveryResult(result);
+    } catch (err: any) {
+      console.error(err);
+      setRecoveryError(err?.message || 'Não foi possível concluir a geração do código.');
+    } finally {
+      setGeneratingRecoveryCode(false);
+    }
+  };
+
+  const handleCopyRecoveryCode = async () => {
+    if (!generatedRecoveryResult?.code) return;
+    try {
+      await navigator.clipboard.writeText(generatedRecoveryResult.code);
+      setCopiedRecoveryCode(true);
+      setTimeout(() => setCopiedRecoveryCode(false), 3000);
+    } catch {
+      // Clipboard fallback ignored cleanly
     }
   };
 
@@ -498,26 +550,45 @@ export const UsersPermissionsView: React.FC = () => {
                         <td className="px-4 py-3.5 text-right">
                           <div className="flex items-center justify-end gap-1.5">
                             {isAdmin && (
-                              <button
-                                onClick={() =>
-                                  handleOpenEditUser({
-                                    id: liveMaster?.id || 'user-452.066.308-37',
-                                    nome: masterNome,
-                                    cpf: '452.066.308-37',
-                                    username: '452.066.308-37',
-                                    email: masterEmail,
-                                    role: 'admin',
-                                    cargo: liveMaster?.cargo || 'Administrador Mestre EHS',
-                                    empresaNome: liveMaster?.empresaNome,
-                                    fotoPerfilUrl: masterPhoto,
-                                  })
-                                }
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-950/50 text-blue-300 hover:bg-blue-900/60 border border-blue-500/30 text-[11px] font-medium transition-colors"
-                                title="Editar Dados do Administrador"
-                              >
-                                <Edit3 size={13} />
-                                <span>Editar</span>
-                              </button>
+                              <>
+                                <button
+                                  onClick={() =>
+                                    handleOpenEditUser({
+                                      id: liveMaster?.id || 'user-452.066.308-37',
+                                      nome: masterNome,
+                                      cpf: '452.066.308-37',
+                                      username: '452.066.308-37',
+                                      email: masterEmail,
+                                      role: 'admin',
+                                      cargo: liveMaster?.cargo || 'Administrador Mestre EHS',
+                                      empresaNome: liveMaster?.empresaNome,
+                                      fotoPerfilUrl: masterPhoto,
+                                    })
+                                  }
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-950/50 text-blue-300 hover:bg-blue-900/60 border border-blue-500/30 text-[11px] font-medium transition-colors cursor-pointer"
+                                  title="Editar Dados do Administrador"
+                                >
+                                  <Edit3 size={13} />
+                                  <span>Editar</span>
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleOpenRecoveryModal({
+                                      id: liveMaster?.id || 'user-452.066.308-37',
+                                      nome: masterNome,
+                                      cpf: '452.066.308-37',
+                                      username: '452.066.308-37',
+                                      email: masterEmail,
+                                      role: 'admin',
+                                    })
+                                  }
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-950/40 text-amber-300 hover:bg-amber-900/60 border border-amber-500/30 text-[11px] font-medium transition-colors cursor-pointer"
+                                  title="Gerar Código Temporário de Recuperação"
+                                >
+                                  <KeyRound size={13} />
+                                  <span>Código</span>
+                                </button>
+                              </>
                             )}
                             <span className="text-[10px] text-blue-400 font-semibold bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
                               Mestre Protegido
@@ -591,11 +662,19 @@ export const UsersPermissionsView: React.FC = () => {
                               <>
                                 <button
                                   onClick={() => handleOpenEditUser(u)}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-950/50 text-blue-300 hover:bg-blue-900/60 border border-blue-500/30 text-[11px] font-medium transition-colors"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-950/50 text-blue-300 hover:bg-blue-900/60 border border-blue-500/30 text-[11px] font-medium transition-colors cursor-pointer"
                                   title="Editar Usuário"
                                 >
                                   <Edit3 size={13} />
                                   <span>Editar</span>
+                                </button>
+                                <button
+                                  onClick={() => handleOpenRecoveryModal(u)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-950/40 text-amber-300 hover:bg-amber-900/60 border border-amber-500/30 text-[11px] font-medium transition-colors cursor-pointer"
+                                  title="Gerar Código Temporário de Recuperação"
+                                >
+                                  <KeyRound size={13} />
+                                  <span>Código</span>
                                 </button>
                                 <button
                                   onClick={() => {
@@ -1195,6 +1274,136 @@ export const UsersPermissionsView: React.FC = () => {
                 <span>{deletingUser ? 'Excluindo...' : 'Sim, Excluir Perfil'}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Gerar Código Temporário de Recuperação de Senha (Exclusivo Admin) */}
+      {recoveryTargetUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-amber-500/40 p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="h-9 w-9 rounded-xl bg-amber-500/15 text-amber-400 flex items-center justify-center border border-amber-500/30">
+                  <KeyRound size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Recuperação de Senha (Opção A – Admin)
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Código temporário de uso único • Validade 10 minutos
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRecoveryTargetUser(null)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="mt-4 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Usuário:</span>
+                <span className="font-bold text-white">{recoveryTargetUser.nome}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">CPF:</span>
+                <span className="font-mono text-blue-300">
+                  {formatCPF(recoveryTargetUser.cpf || recoveryTargetUser.username)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Perfil:</span>
+                <span className="uppercase font-bold text-slate-200">{recoveryTargetUser.role}</span>
+              </div>
+            </div>
+
+            {recoveryError && (
+              <div className="mt-3 p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-start gap-2">
+                <AlertTriangle size={15} className="shrink-0 mt-0.5 text-red-400" />
+                <span>{recoveryError}</span>
+              </div>
+            )}
+
+            {!generatedRecoveryResult ? (
+              <div className="mt-4 space-y-4">
+                <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 text-[11px] text-amber-200 leading-relaxed">
+                  O código gerado será exibido exclusivamente para você neste painel, terá validade de <strong>10 minutos</strong>, limite de tentativas e será invalidado após o uso. A operação ficará registrada na Trilha de Auditoria.
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRecoveryTargetUser(null)}
+                    className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={generatingRecoveryCode}
+                    onClick={handleGenerateRecoveryCode}
+                    className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs disabled:opacity-50 flex items-center gap-1.5 cursor-pointer shadow-md shadow-amber-600/20"
+                  >
+                    <KeyRound size={14} />
+                    <span>
+                      {generatingRecoveryCode
+                        ? 'Gerando código seguro...'
+                        : 'Gerar Código Temporário'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <div className="p-3 rounded-xl bg-emerald-950/50 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2 font-semibold">
+                  <CheckCircle size={16} className="shrink-0 text-emerald-400" />
+                  <span>Código gerado com sucesso.</span>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-950 border border-blue-500/40 text-center space-y-2">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
+                    Código de Recuperação (Uso Único)
+                  </div>
+                  <div className="text-2xl font-mono font-extrabold tracking-[0.2em] text-white select-all">
+                    {generatedRecoveryResult.code}
+                  </div>
+                  <div className="flex items-center justify-center gap-1.5 text-[11px] text-amber-300">
+                    <Clock size={12} />
+                    <span>
+                      Expira em 10 minutos (até{' '}
+                      {new Date(generatedRecoveryResult.expiresAt).toLocaleTimeString('pt-BR')})
+                    </span>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Repasse este código ao usuário por um <strong className="text-white">canal seguro</strong> para que ele acesse <strong className="text-white">&quot;Trocar senha&quot;</strong> na tela inicial e defina a nova senha.
+                </p>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={handleCopyRecoveryCode}
+                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy size={14} />
+                    <span>{copiedRecoveryCode ? 'Código Copiado!' : 'Copiar Código'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRecoveryTargetUser(null)}
+                    className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 cursor-pointer"
+                  >
+                    Fechar
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -50,6 +50,7 @@ export interface AuthTokenPayload {
   email: string;
   nome: string;
   role: UserRole;
+  ver?: number;
   iat: number;
   exp: number;
 }
@@ -64,9 +65,12 @@ export interface SanitizedUserProfile {
   empresaId?: string;
   empresaNome?: string;
   cargo?: string;
+  telefone?: string;
   fotoPerfilUrl?: string;
   hashAlgorithm?: 'bcrypt';
   passwordResetRequired?: boolean;
+  tokenVersion?: number;
+  passwordChangedAt?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -116,6 +120,63 @@ export function isBcryptHash(hash?: string): boolean {
   return typeof hash === 'string' && /^\$2[aby]\$\d{2}\$.{53}$/.test(hash);
 }
 
+export function validateRecoveryPasswordStrength(
+  password: string,
+  userCpfDigits?: string
+): { valid: boolean; message?: string } {
+  const trimmed = typeof password === 'string' ? password.trim() : '';
+  if (trimmed.length < 8) {
+    return {
+      valid: false,
+      message: 'A nova senha deve conter no mínimo 8 caracteres.',
+    };
+  }
+  if (trimmed.length > 128) {
+    return {
+      valid: false,
+      message: 'A nova senha não pode exceder 128 caracteres.',
+    };
+  }
+  if (!/[A-Za-zÀ-ÖØ-öø-ÿ]/.test(trimmed) || !/\d/.test(trimmed)) {
+    return {
+      valid: false,
+      message: 'A nova senha deve combinar letras e números.',
+    };
+  }
+  if (isForbiddenWeakPassword(trimmed)) {
+    return {
+      valid: false,
+      message: 'Senha padrão ou insegura não permitida. Defina uma senha exclusiva.',
+    };
+  }
+  const cleanPassDigits = trimmed.replace(/\D/g, '');
+  if (userCpfDigits && cleanPassDigits === userCpfDigits) {
+    return {
+      valid: false,
+      message: 'A nova senha não pode ser igual ao número do CPF.',
+    };
+  }
+  const commonWeakPasswords = new Set([
+    'senha123',
+    'senha1234',
+    'admin1234',
+    'qwerty12',
+    'qwerty123',
+    'password1',
+    'ehs12345',
+    'sst12345',
+    'mudar123',
+    'trocar123',
+  ]);
+  if (commonWeakPasswords.has(trimmed.toLowerCase())) {
+    return {
+      valid: false,
+      message: 'Escolha uma senha mais forte e menos previsível.',
+    };
+  }
+  return { valid: true };
+}
+
 export async function hashPasswordBcrypt(password: string): Promise<string> {
   const trimmed = password.trim();
   if (trimmed.length < 6) {
@@ -152,11 +213,14 @@ export function sanitizeUserProfile(id: string, data: Partial<UserProfile>): San
   if (data.empresaId) safe.empresaId = data.empresaId;
   if (data.empresaNome) safe.empresaNome = data.empresaNome;
   if (data.cargo) safe.cargo = data.cargo;
+  if (data.telefone) safe.telefone = data.telefone;
   if (data.fotoPerfilUrl) safe.fotoPerfilUrl = data.fotoPerfilUrl;
   if (data.hashAlgorithm === 'bcrypt') safe.hashAlgorithm = 'bcrypt';
   if (typeof data.passwordResetRequired === 'boolean') {
     safe.passwordResetRequired = data.passwordResetRequired;
   }
+  if (typeof data.tokenVersion === 'number') safe.tokenVersion = data.tokenVersion;
+  if (data.passwordChangedAt) safe.passwordChangedAt = data.passwordChangedAt;
   if (data.createdAt) safe.createdAt = data.createdAt;
   if (data.updatedAt) safe.updatedAt = data.updatedAt;
 
@@ -191,6 +255,7 @@ export function signAuthToken(user: {
   email: string;
   nome: string;
   role: UserRole;
+  tokenVersion?: number;
 }): { token: string; expiresAt: number } {
   const secret = getValidatedApiAuthSecret();
   if (!secret) {
@@ -202,6 +267,7 @@ export function signAuthToken(user: {
 
   const nowSec = Math.floor(Date.now() / 1000);
   const expSec = nowSec + TOKEN_TTL_SECONDS;
+  const ver = typeof user.tokenVersion === 'number' && user.tokenVersion > 0 ? user.tokenVersion : 1;
 
   const header = base64UrlEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payloadObj: AuthTokenPayload = {
@@ -210,6 +276,7 @@ export function signAuthToken(user: {
     email: user.email,
     nome: user.nome,
     role: user.role,
+    ver,
     iat: nowSec,
     exp: expSec,
   };
@@ -389,12 +456,39 @@ export async function authenticateUserCredentials(params: {
   return sanitizeUserProfile(id, data);
 }
 
+export async function findUserProfileByCpfDigits(
+  cpfDigits: string
+): Promise<{ id: string; data: UserProfile } | null> {
+  const cleanDigits = cpfDigits.replace(/\D/g, '');
+  if (cleanDigits.length !== 11) {
+    return null;
+  }
+
+  let snap;
+  try {
+    snap = await getDocs(collection(db, 'userProfiles'));
+  } catch (err) {
+    console.error('[AuthMiddleware] Falha ao consultar Firestore userProfiles:', err);
+    throw new AuthServiceUnavailableError('Serviço de autenticação indisponível no momento.');
+  }
+
+  for (const docSnap of snap.docs) {
+    const u = docSnap.data() as UserProfile;
+    const uDigits = (u.cpf || u.username || '').replace(/\D/g, '');
+    if (uDigits === cleanDigits) {
+      return { id: docSnap.id, data: u };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Queries official user profile and role in Firestore (fail-closed if Firebase is unavailable).
  */
 async function resolveAuthoritativeUser(
   payload: AuthTokenPayload
-): Promise<{ profile: SanitizedUserProfile; roleDiverged: boolean } | null> {
+): Promise<{ profile: SanitizedUserProfile; roleDiverged: boolean; sessionRevoked: boolean } | null> {
   let userDoc;
   try {
     userDoc = await getDoc(doc(db, 'userProfiles', payload.sub));
@@ -415,7 +509,14 @@ async function resolveAuthoritativeUser(
   const officialProfile = sanitizeUserProfile(userDoc.id, data);
   const roleDiverged = officialProfile.role !== payload.role;
 
-  return { profile: officialProfile, roleDiverged };
+  const officialVersion = typeof data.tokenVersion === 'number' ? data.tokenVersion : 1;
+  const payloadVersion = typeof payload.ver === 'number' ? payload.ver : 1;
+  const changedAtMs = data.passwordChangedAt ? Date.parse(data.passwordChangedAt) : NaN;
+  const issuedBeforePasswordChange =
+    Number.isFinite(changedAtMs) && payload.iat * 1000 < changedAtMs - 1000;
+  const sessionRevoked = payloadVersion !== officialVersion || issuedBeforePasswordChange;
+
+  return { profile: officialProfile, roleDiverged, sessionRevoked };
 }
 
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
@@ -452,6 +553,13 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       });
     }
 
+    if (resolved.sessionRevoked) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão encerrada após alteração ou redefinição de senha. Faça login novamente.',
+      });
+    }
+
     // Never trust payload.role: always overwrite authUser with official Firestore values
     req.officialProfile = resolved.profile;
     req.tokenRoleDiverged = resolved.roleDiverged;
@@ -461,6 +569,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       email: resolved.profile.email,
       nome: resolved.profile.nome,
       role: resolved.profile.role,
+      ver: resolved.profile.tokenVersion,
       iat: payload.iat,
       exp: payload.exp,
     };

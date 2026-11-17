@@ -12,12 +12,37 @@ export interface UserProfile {
   empresaId?: string;
   empresaNome?: string;
   cargo?: string;
+  telefone?: string;
   passwordHash?: string;
   hashAlgorithm?: 'bcrypt';
   passwordResetRequired?: boolean;
+  tokenVersion?: number;
+  passwordChangedAt?: string;
   fotoPerfilUrl?: string; // FOTO DE PERFIL persistente
   createdAt?: string;
   updatedAt?: string;
+}
+
+export type PasswordRecoveryChannel = 'admin' | 'whatsapp' | 'sms';
+
+export type PasswordRecoveryStatus =
+  | 'ativo'
+  | 'utilizado'
+  | 'expirado'
+  | 'bloqueado'
+  | 'substituido';
+
+export interface PasswordRecoveryGeneratedResult {
+  codeId: string;
+  code: string;
+  expiresAt: string;
+  ttlMinutes: number;
+  targetUser: {
+    id: string;
+    nome: string;
+    cpf: string;
+    role: UserRole;
+  };
 }
 
 export interface Company {
@@ -368,3 +393,160 @@ export interface SmtpSessionConfig {
   pass: string;
   from: string;
 }
+
+// ============================================================================
+// EHS SMARTDOCS – LEITURA INTELIGENTE DE DOCUMENTOS
+// ============================================================================
+
+export type SmartDocProcessingState =
+  | 'AGUARDANDO_PROCESSAMENTO'
+  | 'PROCESSANDO'
+  | 'PROCESSADO'
+  | 'ERRO_LEITURA'
+  | 'PENDENTE_APROVACAO'
+  | 'APROVADO'
+  | 'REJEITADO';
+
+export type SmartDocValidityStatus =
+  | 'REGULAR'
+  | 'A_VENCER'
+  | 'VENCIDO'
+  | 'SEM_VALIDADE_DEFINIDA'
+  | 'PENDENTE_APROVACAO'
+  | 'REJEITADO';
+
+export type SmartDocCategoryGroup =
+  | 'saude_ocupacional'
+  | 'treinamentos'
+  | 'documentos_empresariais'
+  | 'outros';
+
+export interface SmartDocExtractedData {
+  nomeDocumento?: string;
+  nomeColaborador?: string;
+  cpf?: string;
+  empresa?: string;
+  cnpj?: string;
+  dataRealizacao?: string;
+  dataEmissao?: string;
+  dataRevisao?: string;
+  dataValidade?: string;
+  validadeExplicitaNoDocumento?: boolean;
+  validadeOrigem?: 'documento' | 'regra_configurada' | 'manual' | 'nao_identificada';
+  semValidade?: boolean;
+
+  // ASO / Saúde ocupacional
+  funcao?: string;
+  tipoExame?: string;
+  resultadoAptidao?: 'apto' | 'inapto' | 'apto_com_restricoes' | '';
+  medicoResponsavel?: string;
+  crm?: string;
+
+  // Treinamentos e capacitações
+  nomeTreinamento?: string;
+  nrCorrespondente?: string;
+  cargaHoraria?: string;
+  nomeInstrutor?: string;
+  registroProfissionalInstrutor?: string;
+  instituicaoEmissora?: string;
+
+  // Documentos empresariais
+  razaoSocial?: string;
+  unidade?: string;
+  numeroDocumento?: string;
+  responsavelTecnico?: string;
+  registroProfissionalRT?: string;
+
+  resumoConteudo?: string;
+  observacoes?: string;
+  observacoesIA?: string[];
+}
+
+export interface SmartDocInconsistency {
+  codigo: string;
+  severidade: 'alta' | 'media' | 'baixa';
+  campo?: string;
+  mensagem: string;
+}
+
+export interface SmartDocHistoryEntry {
+  dataHora: string;
+  usuarioId: string;
+  usuarioNome: string;
+  usuarioRole: UserRole;
+  acao:
+    | 'ENVIO_INICIAL'
+    | 'PROCESSAMENTO_IA'
+    | 'ERRO_PROCESSAMENTO'
+    | 'REPROCESSAMENTO_IA'
+    | 'EDICAO_MANUAL'
+    | 'APROVACAO'
+    | 'SOLICITACAO_CORRECAO'
+    | 'REJEICAO'
+    | 'ACESSO_MEDICO_LGPD';
+  detalhes: string;
+  camposAlterados?: string[];
+}
+
+export interface SmartDocValidityRule {
+  id: string;
+  tipoDocumento: string;
+  mesesValidade: number;
+  ativo: boolean;
+  observacao?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SmartDocRecord {
+  id: string;
+  arquivoNome: string;
+  arquivoMimeType: 'application/pdf' | 'image/jpeg' | 'image/png';
+  arquivoTamanhoBytes: number;
+  arquivoHashSha256: string;
+  arquivoUrl?: string;
+  previewTruncated?: boolean;
+  previewIndisponivelMotivo?: string;
+
+  categoriaGrupo: SmartDocCategoryGroup;
+  tipoDocumento: string;
+  classificacaoManual: boolean;
+  classificacaoConfianca: number;
+
+  status: SmartDocProcessingState;
+  statusValidade: SmartDocValidityStatus;
+  erroLeitura?: string;
+
+  empresaId?: string;
+  empresaNome?: string;
+  empresaMatchMetodo?: 'cnpj' | 'nome' | 'manual' | 'nao_vinculada' | 'ambiguo';
+  colaboradorId?: string;
+  colaboradorNome?: string;
+  colaboradorMatchMetodo?: 'cpf' | 'nome' | 'manual' | 'nao_vinculado' | 'ambiguo';
+
+  dadosExtraidos: SmartDocExtractedData;
+  camposNaoIdentificados: string[];
+  inconsistencias: SmartDocInconsistency[];
+
+  isSensitiveMedical: boolean;
+  lgpdRedacted?: boolean;
+
+  enviadoPorId: string;
+  enviadoPorNome: string;
+  enviadoPorEmail: string;
+  dataEnvio: string;
+  analisadoPorId?: string;
+  analisadoPorNome?: string;
+  dataAnalise?: string;
+  correcaoSolicitada?: boolean;
+  motivoCorrecao?: string;
+  motivoRejeicao?: string;
+
+  integratedCollection?: 'exams' | 'trainings' | 'documents';
+  integratedDocId?: string;
+
+  historico: SmartDocHistoryEntry[];
+  createdAt: string;
+  updatedAt: string;
+}
+

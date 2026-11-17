@@ -1,7 +1,11 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, signOut as fbSignOut } from 'firebase/auth';
 import { auth } from '../lib/firebase';
-import { UserProfile, UserRole } from '../types/sst';
+import {
+  PasswordRecoveryGeneratedResult,
+  UserProfile,
+  UserRole,
+} from '../types/sst';
 import { isMasterAdminIdentifier } from '../utils/cryptoAuth';
 
 interface AuthContextType {
@@ -19,6 +23,21 @@ interface AuthContextType {
     currentPassword: string,
     newPassword: string
   ) => Promise<{ success: boolean; message: string }>;
+  getRecoveryChannelsStatus: () => Promise<{ whatsappConfigured: boolean; smsConfigured: boolean }>;
+  requestRecoveryChannel: (
+    cpf: string,
+    canal: 'whatsapp' | 'sms'
+  ) => Promise<{ success: boolean; configured?: boolean; message: string }>;
+  resetPasswordWithCode: (params: {
+    cpf: string;
+    code: string;
+    newPassword: string;
+    confirmPassword: string;
+  }) => Promise<{ success: boolean; message: string }>;
+  adminGenerateRecoveryCode: (target: {
+    userId?: string;
+    cpf?: string;
+  }) => Promise<PasswordRecoveryGeneratedResult>;
   registerUser: (
     nome: string,
     cpf: string,
@@ -262,6 +281,118 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const getRecoveryChannelsStatus = async (): Promise<{
+    whatsappConfigured: boolean;
+    smsConfigured: boolean;
+  }> => {
+    try {
+      const resp = await fetch('/api/auth/recovery/channels-status');
+      const data = await resp.json().catch(() => ({}));
+      return {
+        whatsappConfigured: Boolean(data?.whatsappConfigured),
+        smsConfigured: Boolean(data?.smsConfigured),
+      };
+    } catch {
+      return { whatsappConfigured: false, smsConfigured: false };
+    }
+  };
+
+  const requestRecoveryChannel = async (
+    cpf: string,
+    canal: 'whatsapp' | 'sms'
+  ): Promise<{ success: boolean; configured?: boolean; message: string }> => {
+    try {
+      const resp = await fetch('/api/auth/recovery/request-channel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cpf: cpf.trim(), canal }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          configured: data?.configured,
+          message: data?.message || 'Não foi possível concluir a recuperação.',
+        };
+      }
+      return {
+        success: true,
+        configured: true,
+        message: data.message,
+      };
+    } catch {
+      return {
+        success: false,
+        message: 'Não foi possível concluir a recuperação.',
+      };
+    }
+  };
+
+  const resetPasswordWithCode = async (params: {
+    cpf: string;
+    code: string;
+    newPassword: string;
+    confirmPassword: string;
+  }): Promise<{ success: boolean; message: string }> => {
+    try {
+      const resp = await fetch('/api/auth/recovery/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cpf: params.cpf.trim(),
+          code: params.code.trim(),
+          newPassword: params.newPassword,
+          confirmPassword: params.confirmPassword,
+        }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          message: data?.message || 'Não foi possível concluir a recuperação.',
+        };
+      }
+
+      return {
+        success: true,
+        message: data.message || 'Senha alterada com sucesso.',
+      };
+    } catch {
+      return {
+        success: false,
+        message: 'Não foi possível concluir a recuperação.',
+      };
+    }
+  };
+
+  const adminGenerateRecoveryCode = async (target: {
+    userId?: string;
+    cpf?: string;
+  }): Promise<PasswordRecoveryGeneratedResult> => {
+    if (!isAdmin) {
+      throw new Error('Somente o Administrador de EHS pode gerar códigos de recuperação.');
+    }
+
+    const resp = await authorizedFetch('/api/auth/recovery/admin-generate', {
+      method: 'POST',
+      body: JSON.stringify(target),
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data?.success || !data?.code) {
+      throw new Error(data?.message || 'Não foi possível gerar o código de recuperação.');
+    }
+
+    return {
+      codeId: data.codeId,
+      code: data.code,
+      expiresAt: data.expiresAt,
+      ttlMinutes: data.ttlMinutes || 10,
+      targetUser: data.targetUser,
+    };
+  };
+
   // Register a new platform user via admin-protected backend API (bcrypt hashing on server)
   const registerUser = async (
     nome: string,
@@ -498,6 +629,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isSimulatingRole: profile?.role === 'admin' && !!simulatedRole,
         loginWithCredentials,
         changePassword,
+        getRecoveryChannelsStatus,
+        requestRecoveryChannel,
+        resetPasswordWithCode,
+        adminGenerateRecoveryCode,
         registerUser,
         updateUser,
         updateProfilePhoto,

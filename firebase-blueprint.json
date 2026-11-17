@@ -268,12 +268,15 @@
         "role": { "type": "string", "enum": ["admin", "solicitante", "auditor"] },
         "empresaId": { "type": "string", "maxLength": 128 },
         "empresaNome": { "type": "string", "maxLength": 200 },
+        "telefone": { "type": "string", "maxLength": 30 },
         "passwordHash": { "type": "string", "maxLength": 128 },
+        "tokenVersion": { "type": "number" },
+        "passwordChangedAt": { "type": "string", "maxLength": 40 },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
       "required": ["cpf", "email", "role"]
-    }
+    },
     "notificationConfig": {
       "title": "Configuração de Notificação",
       "description": "Regras de disparo automático de e-mails para controle de vencimentos",
@@ -316,6 +319,89 @@
         "createdAt": { "type": "string" }
       },
       "required": ["dataHora", "documentoId", "marco", "status", "idempotencyKey"]
+    },
+    "smartDoc": {
+      "title": "Documento SmartDocs (EHS IA)",
+      "description": "Documento submetido ao fluxo de leitura inteligente OCR + IA com revisão humana e integração controlada",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "arquivoNome": { "type": "string", "maxLength": 250 },
+        "arquivoMimeType": { "type": "string", "enum": ["application/pdf", "image/jpeg", "image/png"] },
+        "arquivoTamanhoBytes": { "type": "number" },
+        "arquivoHashSha256": { "type": "string", "maxLength": 128 },
+        "arquivoUrl": { "type": "string", "maxLength": 800000 },
+        "categoriaGrupo": { "type": "string", "enum": ["saude_ocupacional", "treinamentos", "documentos_empresariais", "outros"] },
+        "tipoDocumento": { "type": "string", "maxLength": 150 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "AGUARDANDO_PROCESSAMENTO",
+            "PROCESSANDO",
+            "PROCESSADO",
+            "ERRO_LEITURA",
+            "PENDENTE_APROVACAO",
+            "APROVADO",
+            "REJEITADO"
+          ]
+        },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "colaboradorId": { "type": "string", "maxLength": 128 },
+        "isSensitiveMedical": { "type": "boolean" },
+        "enviadoPorId": { "type": "string", "maxLength": 128 },
+        "dataEnvio": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["arquivoNome", "arquivoMimeType", "arquivoHashSha256", "categoriaGrupo", "tipoDocumento", "status", "enviadoPorId", "dataEnvio"]
+    },
+    "smartDocValidityRule": {
+      "title": "Regra de Validade SmartDocs",
+      "description": "Regra configurável de prazo de validade para tipos documentais sem validade impressa",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "tipoDocumento": { "type": "string", "maxLength": 150 },
+        "mesesValidade": { "type": "number" },
+        "ativo": { "type": "boolean" }
+      },
+      "required": ["tipoDocumento", "mesesValidade", "ativo"]
+    },
+    "passwordRecoveryCode": {
+      "title": "Código Temporário de Recuperação de Senha",
+      "description": "Armazenamento seguro em hash HMAC-SHA256 de códigos temporários de uso único (10 min) para recuperação por CPF",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "cpfDigits": { "type": "string", "maxLength": 11 },
+        "codeHash": { "type": "string", "maxLength": 128 },
+        "codeSalt": { "type": "string", "maxLength": 64 },
+        "canal": { "type": "string", "enum": ["admin", "whatsapp", "sms"] },
+        "status": { "type": "string", "enum": ["ativo", "utilizado", "expirado", "bloqueado", "substituido"] },
+        "tentativas": { "type": "number" },
+        "maxTentativas": { "type": "number" },
+        "usado": { "type": "boolean" },
+        "invalidado": { "type": "boolean" },
+        "geradoPorId": { "type": "string", "maxLength": 128 },
+        "geradoPorNome": { "type": "string", "maxLength": 150 },
+        "geradoPorCpf": { "type": "string", "maxLength": 25 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "expiresAt": { "type": "string", "maxLength": 40 },
+        "usedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["userId", "cpfDigits", "codeHash", "codeSalt", "canal", "status", "tentativas", "maxTentativas", "usado", "invalidado", "createdAt", "expiresAt"]
+    },
+    "passwordRecoveryRateLimit": {
+      "title": "Controle de Tentativas de Recuperação",
+      "description": "Limitação de taxa contra força bruta e automação em recuperação de senha",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "maxLength": 150 },
+        "attempts": { "type": "number" },
+        "windowStart": { "type": "number" },
+        "blockedUntil": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["key", "attempts", "windowStart"]
     }
   },
   "firestore": {
@@ -374,6 +460,22 @@
     "/notificationLogs/{logId}": {
       "schema": "notificationLog",
       "description": "Histórico de disparos de notificação por e-mail com idempotência"
+    },
+    "/smartDocs/{smartDocId}": {
+      "schema": "smartDoc",
+      "description": "Fila e histórico de leitura inteligente e aprovação do módulo EHS SmartDocs"
+    },
+    "/smartDocValidityRules/{ruleId}": {
+      "schema": "smartDocValidityRule",
+      "description": "Regras configuradas de cálculo automático de vencimento no SmartDocs"
+    },
+    "/passwordRecoveryCodes/{codeId}": {
+      "schema": "passwordRecoveryCode",
+      "description": "Códigos temporários hash-protegidos de recuperação de senha"
+    },
+    "/passwordRecoveryRateLimits/{rateKey}": {
+      "schema": "passwordRecoveryRateLimit",
+      "description": "Controle de limite de tentativas contra ataques automatizados na recuperação"
     }
   }
 }

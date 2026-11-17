@@ -111,10 +111,11 @@ export async function collectAllCandidateItems(): Promise<MonitoredItem[]> {
   const items: MonitoredItem[] = [];
 
   try {
-    // 1. Documents
+    // 1. Documents (only approved/active records trigger definitive expiration alerts)
     const docsSnap = await getDocs(collection(db, 'documents'));
     docsSnap.forEach((d) => {
       const data = d.data();
+      if (data.situacao === 'pendente' || data.situacao === 'reprovado') return;
       if (!data.semValidade && data.dataValidade) {
         items.push({
           id: d.id,
@@ -131,10 +132,11 @@ export async function collectAllCandidateItems(): Promise<MonitoredItem[]> {
       }
     });
 
-    // 2. Trainings
+    // 2. Trainings (only approved/active records trigger definitive expiration alerts)
     const trnSnap = await getDocs(collection(db, 'trainings'));
     trnSnap.forEach((d) => {
       const data = d.data();
+      if (data.situacao === 'pendente' || data.situacao === 'reprovado') return;
       if (!data.semValidade && data.dataValidade) {
         items.push({
           id: d.id,
@@ -151,10 +153,11 @@ export async function collectAllCandidateItems(): Promise<MonitoredItem[]> {
       }
     });
 
-    // 3. Exams
+    // 3. Exams (only approved/active records trigger definitive expiration alerts)
     const examSnap = await getDocs(collection(db, 'exams'));
     examSnap.forEach((d) => {
       const data = d.data();
+      if (data.situacao === 'pendente' || data.situacao === 'reprovado') return;
       if (!data.semValidade && data.dataValidade) {
         items.push({
           id: d.id,

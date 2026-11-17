@@ -16,6 +16,7 @@ import {
   Settings,
   LayoutDashboard,
   Mail,
+  FileSearch,
   X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -26,6 +27,7 @@ export type NavItemKey =
   | 'colaboradores'
   | 'treinamentos'
   | 'documentos'
+  | 'smartdocs'
   | 'exames'
   | 'epi'
   | 'apr_pt'
@@ -58,6 +60,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { key: 'colaboradores', label: 'Colaboradores', icon: <Users size={18} /> },
     { key: 'treinamentos', label: 'Treinamentos', icon: <GraduationCap size={18} /> },
     { key: 'documentos', label: 'Documentos', icon: <FileText size={18} /> },
+    { key: 'smartdocs', label: 'EHS SMARTDOCS', icon: <FileSearch size={18} /> },
     { key: 'exames', label: 'Exames e ASO', icon: <HeartPulse size={18} /> },
     { key: 'epi', label: 'Controle de EPI', icon: <HardHat size={18} /> },
     { key: 'apr_pt', label: 'APR e PT (LOTO)', icon: <FileWarning size={18} /> },
@@ -75,6 +78,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     'empresas',
     'colaboradores',
     'documentos',
+    'smartdocs',
     'treinamentos',
     'exames',
     'epi',
