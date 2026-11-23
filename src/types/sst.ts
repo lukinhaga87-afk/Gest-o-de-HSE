@@ -23,28 +23,6 @@ export interface UserProfile {
   updatedAt?: string;
 }
 
-export type PasswordRecoveryChannel = 'admin' | 'whatsapp' | 'sms';
-
-export type PasswordRecoveryStatus =
-  | 'ativo'
-  | 'utilizado'
-  | 'expirado'
-  | 'bloqueado'
-  | 'substituido';
-
-export interface PasswordRecoveryGeneratedResult {
-  codeId: string;
-  code: string;
-  expiresAt: string;
-  ttlMinutes: number;
-  targetUser: {
-    id: string;
-    nome: string;
-    cpf: string;
-    role: UserRole;
-  };
-}
-
 export interface Company {
   id: string;
   razaoSocial: string;
@@ -59,6 +37,7 @@ export interface Company {
   atividadeContratada: string;
   dataInicioContrato: string;
   dataTerminoContrato: string;
+  contrato_indeterminado?: boolean;
   situacao: 'ativa' | 'inativa';
   documentosLegais?: {
     nome: string;
@@ -460,12 +439,49 @@ export interface SmartDocExtractedData {
   resumoConteudo?: string;
   observacoes?: string;
   observacoesIA?: string[];
+  qualidadeLeitura?: 'alta' | 'media' | 'baixa' | 'ilegivel';
+  documentoIlegivel?: boolean;
+  documentoIncompleto?: boolean;
+  ocrAplicado?: boolean;
+  tabelasExtraidasResumo?: string;
+}
+
+export interface SmartDocDiagnosticsReport {
+  geminiKeyConfigured: boolean;
+  geminiKeyStatus: 'ok' | 'missing' | 'placeholder' | 'malformed' | 'oauth_token_not_supported';
+  authSecretConfigured: boolean;
+  primaryModel: string;
+  fallbackModel: string | null;
+  authMode: 'api_key_x_goog_api_key';
+  endpoint: 'https://generativelanguage.googleapis.com/';
+  runtime: 'netlify_functions' | 'node_server';
+  backendStatus: 'online';
+  connectionStatus: 'connected' | 'error' | 'not_tested' | 'key_missing';
+  lastTestedAt: string | null;
+  lastModelTested: string | null;
+  lastLatencyMs: number | null;
+  lastError: string | null;
+  lastErrorCode: string | null;
 }
 
 export interface SmartDocInconsistency {
   codigo: string;
   severidade: 'alta' | 'media' | 'baixa';
   campo?: string;
+  mensagem: string;
+}
+
+export interface SmartDocProcessingAttempt {
+  tentativa: number;
+  dataHora: string;
+  modelo: string;
+  fallbackModelo: boolean;
+  origem: 'inicial' | 'automatica_503' | 'manual_reprocessamento' | 'versao_corrigida';
+  sucesso: boolean;
+  codigoHttp?: number;
+  codigoErro?: string;
+  retryable?: boolean;
+  duracaoMs: number;
   mensagem: string;
 }
 
@@ -476,9 +492,14 @@ export interface SmartDocHistoryEntry {
   usuarioRole: UserRole;
   acao:
     | 'ENVIO_INICIAL'
+    | 'INICIO_PROCESSAMENTO'
+    | 'RESULTADO_OCR'
     | 'PROCESSAMENTO_IA'
     | 'ERRO_PROCESSAMENTO'
     | 'REPROCESSAMENTO_IA'
+    | 'TENTATIVA_AUTOMATICA'
+    | 'MODELO_FALLBACK'
+    | 'VERSAO_CORRIGIDA'
     | 'EDICAO_MANUAL'
     | 'APROVACAO'
     | 'SOLICITACAO_CORRECAO'
@@ -505,6 +526,9 @@ export interface SmartDocRecord {
   arquivoTamanhoBytes: number;
   arquivoHashSha256: string;
   arquivoUrl?: string;
+  hasPreservedFile?: boolean;
+  fileStorageMode?: 'inline' | 'chunked';
+  chunkCount?: number;
   previewTruncated?: boolean;
   previewIndisponivelMotivo?: string;
 
@@ -516,6 +540,12 @@ export interface SmartDocRecord {
   status: SmartDocProcessingState;
   statusValidade: SmartDocValidityStatus;
   erroLeitura?: string;
+  erroCodigo?: string;
+  erroRetryable?: boolean;
+  tentativasCount?: number;
+  ultimoModeloUsado?: string;
+  fallbackModeloUtilizado?: boolean;
+  tentativasHistorico?: SmartDocProcessingAttempt[];
 
   empresaId?: string;
   empresaNome?: string;
@@ -549,4 +579,5 @@ export interface SmartDocRecord {
   createdAt: string;
   updatedAt: string;
 }
+
 

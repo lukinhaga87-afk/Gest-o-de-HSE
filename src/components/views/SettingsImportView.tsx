@@ -146,6 +146,7 @@ export const SettingsImportView: React.FC = () => {
             atividadeContratada: 'Serviços Terceirizados',
             dataInicioContrato: new Date().toISOString().split('T')[0],
             dataTerminoContrato: '',
+            contrato_indeterminado: false,
             situacao: 'ativa',
           });
           compCount++;

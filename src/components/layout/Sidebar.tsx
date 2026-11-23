@@ -17,6 +17,7 @@ import {
   LayoutDashboard,
   Mail,
   FileSearch,
+  KeyRound,
   X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -44,6 +45,7 @@ interface SidebarProps {
   onSelectTab: (tab: NavItemKey) => void;
   isOpen: boolean;
   onClose: () => void;
+  onOpenPasswordModal?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -51,6 +53,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectTab,
   isOpen,
   onClose,
+  onOpenPasswordModal,
 }) => {
   const { activeRole, activeEmpresaNome, isSolicitante, profile } = useAuth();
 
@@ -132,34 +135,50 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* User identification card with Profile Photo */}
         {profile && (
-          <div className="mx-3 mt-3 p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center gap-2.5">
-            {profile.fotoPerfilUrl ? (
-              <img
-                src={profile.fotoPerfilUrl}
-                alt={profile.nome}
-                className="h-9 w-9 rounded-full object-cover border border-blue-400/50 shadow shrink-0"
-              />
-            ) : (
-              <div className="h-9 w-9 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center text-xs border border-blue-400/40 shrink-0">
-                {profile.nome?.[0]?.toUpperCase() || 'U'}
-              </div>
-            )}
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold text-white truncate">{profile.nome}</p>
-              <div className="flex items-center gap-1 mt-0.5">
-                <span
-                  className={`text-[9px] uppercase font-bold px-1.5 py-0.2 rounded border ${
-                    activeRole === 'admin'
-                      ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
-                      : activeRole === 'solicitante'
-                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                      : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                  }`}
-                >
-                  {activeRole === 'admin' ? 'Administrador' : activeRole === 'solicitante' ? 'Solicitante' : 'Auditor'}
-                </span>
+          <div className="mx-3 mt-3 p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2">
+            <div className="flex items-center gap-2.5">
+              {profile.fotoPerfilUrl ? (
+                <img
+                  src={profile.fotoPerfilUrl}
+                  alt={profile.nome}
+                  className="h-9 w-9 rounded-full object-cover border border-blue-400/50 shadow shrink-0"
+                />
+              ) : (
+                <div className="h-9 w-9 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center text-xs border border-blue-400/40 shrink-0">
+                  {profile.nome?.[0]?.toUpperCase() || 'U'}
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-bold text-white truncate">{profile.nome}</p>
+                <div className="flex items-center gap-1 mt-0.5">
+                  <span
+                    className={`text-[9px] uppercase font-bold px-1.5 py-0.2 rounded border ${
+                      activeRole === 'admin'
+                        ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                        : activeRole === 'solicitante'
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                    }`}
+                  >
+                    {activeRole === 'admin' ? 'Administrador' : activeRole === 'solicitante' ? 'Solicitante' : 'Auditor'}
+                  </span>
+                </div>
               </div>
             </div>
+
+            {onOpenPasswordModal && (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenPasswordModal();
+                  onClose();
+                }}
+                className="w-full py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-[11px] font-medium text-slate-300 hover:text-blue-400 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <KeyRound size={12} />
+                <span>Alterar senha</span>
+              </button>
+            )}
           </div>
         )}
 

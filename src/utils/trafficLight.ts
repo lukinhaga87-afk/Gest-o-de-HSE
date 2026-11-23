@@ -279,6 +279,51 @@ export function formatDateBR(dateStr?: string): string {
   return dateStr;
 }
 
+export interface CompanyContractStatus {
+  isIndeterminate: boolean;
+  isExpired: boolean;
+  isExpiringSoon: boolean;
+  daysRemaining: number | null;
+  label: string;
+}
+
+/**
+ * Evaluates company contract expiration without considering indeterminate contracts as expired or generating alerts.
+ */
+export function getCompanyContractStatus(
+  dataTerminoContrato?: string,
+  contratoIndeterminado?: boolean
+): CompanyContractStatus {
+  if (contratoIndeterminado) {
+    return {
+      isIndeterminate: true,
+      isExpired: false,
+      isExpiringSoon: false,
+      daysRemaining: null,
+      label: 'Prazo indeterminado',
+    };
+  }
+
+  const days = getDaysRemaining(dataTerminoContrato);
+  if (days === null) {
+    return {
+      isIndeterminate: false,
+      isExpired: false,
+      isExpiringSoon: false,
+      daysRemaining: null,
+      label: '-',
+    };
+  }
+
+  return {
+    isIndeterminate: false,
+    isExpired: days < 0,
+    isExpiringSoon: days >= 0 && days <= 30,
+    daysRemaining: days,
+    label: formatDateBR(dataTerminoContrato),
+  };
+}
+
 export function formatCPF(cpf?: string): string {
   if (!cpf) return '-';
   const clean = cpf.replace(/\D/g, '');

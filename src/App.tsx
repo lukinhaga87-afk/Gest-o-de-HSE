@@ -41,6 +41,7 @@ const MainAppContent: React.FC = () => {
   const { isAuthenticated, loading: authLoading, isSolicitante } = useAuth();
   const [currentTab, setCurrentTab] = useState<NavItemKey>(() => (isSolicitante ? 'empresas' : 'dashboard'));
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const { loading: sstLoading } = useSST();
 
   // Auto-redirect Solicitante away from unauthorized modules (Dashboard, Notificações, Usuários, Relatórios, etc.)
@@ -88,12 +89,18 @@ const MainAppContent: React.FC = () => {
         onSelectTab={handleSelectTab}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        onOpenPasswordModal={() => setIsPasswordModalOpen(true)}
       />
 
       {/* Main Content Viewport */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
         {/* Top Header with Role Switcher & Logout */}
-        <Header onToggleSidebar={() => setSidebarOpen(!sidebarOpen)} />
+        <Header
+          onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+          isPasswordModalOpen={isPasswordModalOpen}
+          onOpenPasswordModal={() => setIsPasswordModalOpen(true)}
+          onClosePasswordModal={() => setIsPasswordModalOpen(false)}
+        />
 
         {/* View Content */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 custom-scrollbar">

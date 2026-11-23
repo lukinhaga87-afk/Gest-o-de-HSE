@@ -46,6 +46,7 @@ export const CompaniesView: React.FC = () => {
     atividadeContratada: '',
     dataInicioContrato: '',
     dataTerminoContrato: '',
+    contrato_indeterminado: false,
     situacao: 'ativa',
   });
 
@@ -86,12 +87,14 @@ export const CompaniesView: React.FC = () => {
       atividadeContratada: '',
       dataInicioContrato: '',
       dataTerminoContrato: '',
+      contrato_indeterminado: false,
       situacao: 'ativa',
     });
     setIsModalOpen(true);
   };
 
   const handleOpenEditModal = (comp: Company) => {
+    const isIndeterminate = Boolean(comp.contrato_indeterminado);
     setEditingCompany(comp);
     setFormData({
       razaoSocial: comp.razaoSocial,
@@ -104,8 +107,9 @@ export const CompaniesView: React.FC = () => {
       endereco: comp.endereco,
       unidadeAtendimento: comp.unidadeAtendimento,
       atividadeContratada: comp.atividadeContratada,
-      dataInicioContrato: comp.dataInicioContrato,
-      dataTerminoContrato: comp.dataTerminoContrato,
+      dataInicioContrato: comp.dataInicioContrato || '',
+      dataTerminoContrato: isIndeterminate ? '' : comp.dataTerminoContrato || '',
+      contrato_indeterminado: isIndeterminate,
       situacao: comp.situacao,
     });
     setIsModalOpen(true);
@@ -118,11 +122,18 @@ export const CompaniesView: React.FC = () => {
       return;
     }
 
+    const isIndeterminate = Boolean(formData.contrato_indeterminado);
+    const payload: Omit<Company, 'id'> = {
+      ...formData,
+      contrato_indeterminado: isIndeterminate,
+      dataTerminoContrato: isIndeterminate ? '' : formData.dataTerminoContrato,
+    };
+
     try {
       if (editingCompany) {
-        await updateCompany(editingCompany.id, formData);
+        await updateCompany(editingCompany.id, payload);
       } else {
-        await addCompany(formData);
+        await addCompany(payload);
       }
       setIsModalOpen(false);
     } catch (err) {
@@ -247,6 +258,14 @@ export const CompaniesView: React.FC = () => {
                     <p className="flex items-center gap-2">
                       <span className="text-slate-400 font-medium">Unidade:</span>
                       <span className="text-slate-200">{company.unidadeAtendimento || 'Matriz'}</span>
+                    </p>
+                    <p className="flex items-center gap-2">
+                      <span className="text-slate-400 font-medium">Término do Contrato:</span>
+                      <span className={company.contrato_indeterminado ? 'text-blue-300 font-medium' : 'text-slate-200'}>
+                        {company.contrato_indeterminado
+                          ? 'Prazo indeterminado'
+                          : formatDateBR(company.dataTerminoContrato)}
+                      </span>
                     </p>
                     <p className="text-slate-400 text-[11px] line-clamp-2">
                       <span className="font-medium text-slate-400">Atividade: </span>
@@ -448,10 +467,30 @@ export const CompaniesView: React.FC = () => {
                   <label className="block text-xs font-medium text-slate-300 mb-1">Término do Contrato</label>
                   <input
                     type="date"
-                    value={formData.dataTerminoContrato}
+                    disabled={Boolean(formData.contrato_indeterminado)}
+                    value={formData.contrato_indeterminado ? '' : formData.dataTerminoContrato}
                     onChange={(e) => setFormData({ ...formData, dataTerminoContrato: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
                   />
+                </div>
+
+                <div className="md:col-span-2 -mt-1">
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(formData.contrato_indeterminado)}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setFormData((prev) => ({
+                          ...prev,
+                          contrato_indeterminado: checked,
+                          dataTerminoContrato: checked ? '' : prev.dataTerminoContrato,
+                        }));
+                      }}
+                      className="rounded bg-slate-950 border-slate-700 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>Prazo indeterminado</span>
+                  </label>
                 </div>
               </div>
 
@@ -553,7 +592,11 @@ export const CompaniesView: React.FC = () => {
                 </div>
                 <div>
                   <span className="text-slate-400 block text-[11px]">Término do Contrato:</span>
-                  <span className="text-slate-200">{formatDateBR(selectedCompanyDetail.dataTerminoContrato)}</span>
+                  <span className="text-slate-200">
+                    {selectedCompanyDetail.contrato_indeterminado
+                      ? 'Prazo indeterminado'
+                      : formatDateBR(selectedCompanyDetail.dataTerminoContrato)}
+                  </span>
                 </div>
               </div>
             </div>

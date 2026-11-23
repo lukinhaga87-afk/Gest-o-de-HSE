@@ -18,6 +18,7 @@
         "atividadeContratada": { "type": "string", "maxLength": 250 },
         "dataInicioContrato": { "type": "string", "maxLength": 15 },
         "dataTerminoContrato": { "type": "string", "maxLength": 15 },
+        "contrato_indeterminado": { "type": "boolean" },
         "situacao": { "type": "string", "enum": ["ativa", "inativa"] },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
@@ -331,6 +332,9 @@
         "arquivoTamanhoBytes": { "type": "number" },
         "arquivoHashSha256": { "type": "string", "maxLength": 128 },
         "arquivoUrl": { "type": "string", "maxLength": 800000 },
+        "hasPreservedFile": { "type": "boolean" },
+        "fileStorageMode": { "type": "string", "enum": ["inline", "chunked"] },
+        "chunkCount": { "type": "number" },
         "categoriaGrupo": { "type": "string", "enum": ["saude_ocupacional", "treinamentos", "documentos_empresariais", "outros"] },
         "tipoDocumento": { "type": "string", "maxLength": 150 },
         "status": {
@@ -345,6 +349,11 @@
             "REJEITADO"
           ]
         },
+        "erroCodigo": { "type": "string", "maxLength": 80 },
+        "erroRetryable": { "type": "boolean" },
+        "tentativasCount": { "type": "number" },
+        "ultimoModeloUsado": { "type": "string", "maxLength": 80 },
+        "fallbackModeloUtilizado": { "type": "boolean" },
         "empresaId": { "type": "string", "maxLength": 128 },
         "colaboradorId": { "type": "string", "maxLength": 128 },
         "isSensitiveMedical": { "type": "boolean" },
@@ -352,6 +361,20 @@
         "dataEnvio": { "type": "string", "maxLength": 40 }
       },
       "required": ["arquivoNome", "arquivoMimeType", "arquivoHashSha256", "categoriaGrupo", "tipoDocumento", "status", "enviadoPorId", "dataEnvio"]
+    },
+    "smartDocFileChunk": {
+      "title": "Fragmento de Arquivo Preservado SmartDocs",
+      "description": "Armazenamento em blocos base64 de arquivos originais >500 KB até 5 MB para reprocessamento sem novo upload",
+      "type": "object",
+      "properties": {
+        "smartDocId": { "type": "string", "maxLength": 150 },
+        "chunkIndex": { "type": "number" },
+        "totalChunks": { "type": "number" },
+        "mimeType": { "type": "string", "enum": ["application/pdf", "image/jpeg", "image/png"] },
+        "data": { "type": "string", "maxLength": 600000 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["smartDocId", "chunkIndex", "totalChunks", "mimeType", "data"]
     },
     "smartDocValidityRule": {
       "title": "Regra de Validade SmartDocs",
@@ -464,6 +487,10 @@
     "/smartDocs/{smartDocId}": {
       "schema": "smartDoc",
       "description": "Fila e histórico de leitura inteligente e aprovação do módulo EHS SmartDocs"
+    },
+    "/smartDocFileChunks/{chunkId}": {
+      "schema": "smartDocFileChunk",
+      "description": "Fragmentos base64 do arquivo original preservado para reprocessamento resiliente"
     },
     "/smartDocValidityRules/{ruleId}": {
       "schema": "smartDocValidityRule",

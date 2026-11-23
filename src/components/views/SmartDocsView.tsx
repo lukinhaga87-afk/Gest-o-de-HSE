@@ -31,6 +31,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useSST } from '../../context/SSTContext';
 import {
   SmartDocCategoryGroup,
+  SmartDocDiagnosticsReport,
   SmartDocExtractedData,
   SmartDocProcessingState,
   SmartDocRecord,
@@ -157,8 +158,8 @@ async function readAndOptimizeFileForUpload(file: File): Promise<{
     throw new Error('Formato não suportado. Selecione apenas PDF, JPG, JPEG ou PNG.');
   }
 
-  if (file.size > 5 * 1024 * 1024) {
-    throw new Error('O arquivo excede o limite de 5 MB por operação.');
+  if (file.size > 4 * 1024 * 1024) {
+    throw new Error('O arquivo excede o limite de 4 MB por operação.');
   }
 
   const readAsDataUrl = (blob: Blob) =>
@@ -171,7 +172,12 @@ async function readAndOptimizeFileForUpload(file: File): Promise<{
 
   const rawDataUrl = await readAsDataUrl(file);
   if (isPdf) {
-    return { fileName: file.name, mimeType: 'application/pdf', dataUrl: rawDataUrl };
+    const commaIdx = rawDataUrl.indexOf(',');
+    const normalizedPdfDataUrl =
+      commaIdx >= 0
+        ? `data:application/pdf;base64,${rawDataUrl.slice(commaIdx + 1)}`
+        : rawDataUrl;
+    return { fileName: file.name, mimeType: 'application/pdf', dataUrl: normalizedPdfDataUrl };
   }
 
   const baseMime: 'image/jpeg' | 'image/png' = isPng ? 'image/png' : 'image/jpeg';
@@ -233,14 +239,152 @@ const FieldLabel: React.FC<{ label: string; value?: string; required?: boolean }
   );
 };
 
+const RETRY_DELAYS_SECONDS = [5, 15, 30] as const;
+
+interface AutoRetryState {
+  docId: string;
+  attempt: number;
+  maxAttempts: number;
+  delaySeconds: number;
+  secondsRemaining: number;
+  executing: boolean;
+  errorCode: string;
+  message: string;
+}
+
+function isRetryableTemporaryError(status: number, code?: string, retryableFlag?: boolean): boolean {
+  if (retryableFlag === false) return false;
+  if (status === 400 || status === 401 || status === 403) return false;
+  if (
+    code &&
+    [
+      'GEMINI_API_KEY_MISSING',
+      'GEMINI_API_KEY_INVALID',
+      'AI_BAD_REQUEST_400',
+      'GEMINI_AUTH_401',
+      'GEMINI_PERMISSION_403',
+      'MODEL_UNAVAILABLE_404',
+      'INVALID_PDF',
+      'INCOMPATIBLE_FILE',
+      'AI_PROCESSING_FAILED',
+    ].includes(code)
+  ) {
+    return false;
+  }
+  return (
+    Boolean(retryableFlag) ||
+    status === 503 ||
+    status === 500 ||
+    status === 429 ||
+    status === 504 ||
+    code === 'AI_UNAVAILABLE_503' ||
+    code === 'AI_INTERNAL_500' ||
+    code === 'AI_RATE_LIMIT_429' ||
+    code === 'AI_TIMEOUT'
+  );
+}
+
+function getErrorDiagnosticMeta(code?: string) {
+  switch (code) {
+    case 'AI_UNAVAILABLE_503':
+      return {
+        title: 'Serviço de IA Temporariamente Indisponível (HTTP 503)',
+        badgeCls: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+        hint: 'Alta demanda temporária no modelo de IA. O arquivo original permanece armazenado com leitura pendente e você pode tentar novamente sem novo upload.',
+      };
+    case 'AI_INTERNAL_500':
+      return {
+        title: 'Erro Interno Temporário do Serviço Gemini (HTTP 500)',
+        badgeCls: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+        hint: 'Instabilidade momentânea na API Gemini. O arquivo original foi mantido armazenado (leitura pendente) para nova tentativa.',
+      };
+    case 'AI_RATE_LIMIT_429':
+      return {
+        title: 'Limite de Requisições Atingido (HTTP 429)',
+        badgeCls: 'bg-orange-500/20 text-orange-300 border-orange-500/40',
+        hint: 'Limite temporário de cota/requisições na API. Aguarde alguns instantes e clique em "Tentar novamente" usando o arquivo preservado.',
+      };
+    case 'AI_TIMEOUT':
+      return {
+        title: 'Tempo Limite Excedido (Timeout)',
+        badgeCls: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+        hint: 'A leitura demorou mais que o esperado. O arquivo original está salvo com leitura pendente; clique em "Reprocessar documento".',
+      };
+    case 'GEMINI_API_KEY_MISSING':
+      return {
+        title: 'Variável GEMINI_API_KEY Ausente no Servidor / Netlify',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'Não são feitas tentativas repetidas quando a chave está ausente. O arquivo permanece salvo (leitura pendente). Configure GEMINI_API_KEY no backend/Netlify e reprocessar.',
+      };
+    case 'GEMINI_API_KEY_INVALID':
+      return {
+        title: 'Chave GEMINI_API_KEY Inválida (API_KEY_INVALID)',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'Erro permanente de autenticação: não são feitas tentativas repetidas. Corrija GEMINI_API_KEY nas variáveis protegidas do Netlify e clique em "Reprocessar documento".',
+      };
+    case 'INVALID_PDF':
+      return {
+        title: 'Arquivo PDF Inválido, Corrompido ou Protegido',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'O PDF enviado não pôde ser interpretado (corrompido, vazio ou protegido por senha). Envie uma versão legível e desprotegida.',
+      };
+    case 'INCOMPATIBLE_FILE':
+      return {
+        title: 'Arquivo Incompatível',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'O arquivo não corresponde a um PDF, JPG, JPEG ou PNG válido. Envie um arquivo compatível.',
+      };
+    case 'MODEL_UNAVAILABLE_404':
+      return {
+        title: 'Modelo Gemini Indisponível (HTTP 404)',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'O modelo configurado não está disponível para a chave/versão da API. Revise a variável GEMINI_MODEL no servidor/Netlify.',
+      };
+    case 'AI_BAD_REQUEST_400':
+      return {
+        title: 'Requisição Incorreta à API Gemini (HTTP 400)',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'A API rejeitou os parâmetros da requisição (sem nova tentativa automática). Verifique o arquivo enviado ou reenvie uma versão corrigida.',
+      };
+    case 'GEMINI_AUTH_401':
+      return {
+        title: 'Falha de Autenticação Gemini (HTTP 401 – UNAUTHENTICATED)',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'Erro permanente de autenticação (sem nova tentativa automática). Confirme que GEMINI_API_KEY é uma API Key do Google AI Studio com a "Generative Language API" habilitada (e não token OAuth Bearer).',
+      };
+    case 'GEMINI_PERMISSION_403':
+      return {
+        title: 'Autorização Negada na API Gemini (HTTP 403)',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'A chave/projeto não possui permissão para o modelo Gemini configurado (sem nova tentativa automática).',
+      };
+    default:
+      return {
+        title: 'Erro no Processamento Automático',
+        badgeCls: 'bg-red-500/20 text-red-300 border-red-500/40',
+        hint: 'O arquivo original permanece preservado para nova tentativa ou envio de versão corrigida.',
+      };
+  }
+}
+
 export const SmartDocsView: React.FC = () => {
   const { authorizedFetch, isAdmin, isSolicitante, isAuditor, canEdit, activeEmpresaId } = useAuth();
   const { companies, employees } = useSST();
 
   const [items, setItems] = useState<SmartDocRecord[]>([]);
   const [aiConfigured, setAiConfigured] = useState<boolean>(true);
+  const [aiKeyStatus, setAiKeyStatus] = useState<
+    'ok' | 'missing' | 'placeholder' | 'malformed' | 'oauth_token_not_supported'
+  >('ok');
+  const [diagnostics, setDiagnostics] = useState<SmartDocDiagnosticsReport | null>(null);
+  const [testingConnection, setTestingConnection] = useState<boolean>(false);
+  const [connectionFeedback, setConnectionFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
   const [loadingList, setLoadingList] = useState<boolean>(true);
   const [listError, setListError] = useState<string>('');
+  const [listSuccessBanner, setListSuccessBanner] = useState<string>('');
 
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -261,8 +405,21 @@ export const SmartDocsView: React.FC = () => {
   const [uploadStep, setUploadStep] = useState<
     'IDLE' | 'AGUARDANDO_PROCESSAMENTO' | 'PROCESSANDO' | 'PROCESSADO' | 'ERRO_LEITURA'
   >('IDLE');
-  const [uploadFeedback, setUploadFeedback] = useState<{ type: 'error' | 'success'; msg: string } | null>(null);
+  const [uploadFeedback, setUploadFeedback] = useState<{
+    type: 'error' | 'success';
+    msg: string;
+    code?: string;
+    existingId?: string;
+    failedDocId?: string;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Automatic progressive retry state ONLY for temporary errors (503, 500, 429, Timeout)
+  const [autoRetryState, setAutoRetryState] = useState<AutoRetryState | null>(null);
+  const retryControlRef = useRef<{ cancelled: boolean; skipWaitResolver: (() => void) | null }>({
+    cancelled: false,
+    skipWaitResolver: null,
+  });
 
   // Review / Conference modal
   const [activeDoc, setActiveDoc] = useState<SmartDocRecord | null>(null);
@@ -274,11 +431,21 @@ export const SmartDocsView: React.FC = () => {
   const [editColaboradorId, setEditColaboradorId] = useState('');
   const [editDados, setEditDados] = useState<SmartDocExtractedData>({});
   const [actionBusy, setActionBusy] = useState(false);
-  const [actionBanner, setActionBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [actionBanner, setActionBanner] = useState<{
+    type: 'success' | 'error';
+    text: string;
+    code?: string;
+    retryable?: boolean;
+  } | null>(null);
 
   // Correction / Rejection modals
   const [decisionModal, setDecisionModal] = useState<'correction' | 'reject' | null>(null);
   const [decisionReason, setDecisionReason] = useState('');
+
+  // Rejected document deletion confirmation modal (Admin only)
+  const [deleteConfirmDoc, setDeleteConfirmDoc] = useState<SmartDocRecord | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   // Validity rules modal
   const [isRulesOpen, setIsRulesOpen] = useState(false);
@@ -298,6 +465,9 @@ export const SmartDocsView: React.FC = () => {
       }
       setItems(Array.isArray(data.items) ? data.items : []);
       setAiConfigured(Boolean(data.aiConfigured));
+      if (data.aiKeyStatus) {
+        setAiKeyStatus(data.aiKeyStatus);
+      }
     } catch (err: any) {
       setListError(err?.message || 'Não foi possível carregar os registros do SmartDocs.');
     } finally {
@@ -317,10 +487,244 @@ export const SmartDocsView: React.FC = () => {
     }
   };
 
+  const loadDiagnostics = async () => {
+    if (!isAdmin) return;
+    try {
+      const resp = await authorizedFetch('/api/smartdocs/diagnostics');
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.success && data?.diagnostics) {
+        setDiagnostics(data.diagnostics as SmartDocDiagnosticsReport);
+      }
+    } catch {
+      // Non-blocking admin diagnostics
+    }
+  };
+
+  const handleTestGeminiConnection = async () => {
+    if (!isAdmin || testingConnection) return;
+    setTestingConnection(true);
+    setConnectionFeedback(null);
+    try {
+      const resp = await authorizedFetch('/api/smartdocs/test-connection', {
+        method: 'POST',
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (data?.diagnostics) {
+        setDiagnostics(data.diagnostics as SmartDocDiagnosticsReport);
+        setAiConfigured(Boolean(data.diagnostics.geminiKeyConfigured));
+        setAiKeyStatus(data.diagnostics.geminiKeyStatus);
+      }
+      if (resp.ok && data?.success) {
+        setConnectionFeedback({
+          type: 'success',
+          text: data.message || 'Conexão real com a API Google Gemini validada com sucesso.',
+        });
+      } else {
+        setConnectionFeedback({
+          type: 'error',
+          text: data?.message || 'Falha ao validar conexão real com a API Google Gemini.',
+        });
+      }
+    } catch (err: any) {
+      setConnectionFeedback({
+        type: 'error',
+        text: err?.message || 'Erro de comunicação ao testar conexão com a API Gemini.',
+      });
+    } finally {
+      setTestingConnection(false);
+    }
+  };
+
   useEffect(() => {
     loadSmartDocs();
     loadValidityRules();
-  }, []);
+    if (isAdmin) {
+      loadDiagnostics();
+    }
+    return () => {
+      retryControlRef.current.cancelled = true;
+      if (retryControlRef.current.skipWaitResolver) {
+        retryControlRef.current.skipWaitResolver();
+      }
+    };
+  }, [isAdmin]);
+
+  const cancelProgressiveRetries = () => {
+    retryControlRef.current.cancelled = true;
+    if (retryControlRef.current.skipWaitResolver) {
+      retryControlRef.current.skipWaitResolver();
+      retryControlRef.current.skipWaitResolver = null;
+    }
+    setAutoRetryState(null);
+  };
+
+  const triggerRetryCountdownSkip = () => {
+    if (retryControlRef.current.skipWaitResolver) {
+      retryControlRef.current.skipWaitResolver();
+      retryControlRef.current.skipWaitResolver = null;
+    }
+  };
+
+  const waitSecondsWithCountdown = async (
+    seconds: number,
+    onTick: (remaining: number) => void
+  ): Promise<boolean> => {
+    for (let rem = seconds; rem > 0; rem--) {
+      if (retryControlRef.current.cancelled) return false;
+      onTick(rem);
+      const skipped = await new Promise<'tick' | 'skip'>((resolve) => {
+        const timer = setTimeout(() => {
+          if (retryControlRef.current.skipWaitResolver === skipHandler) {
+            retryControlRef.current.skipWaitResolver = null;
+          }
+          resolve('tick');
+        }, 1000);
+        const skipHandler = () => {
+          clearTimeout(timer);
+          resolve('skip');
+        };
+        retryControlRef.current.skipWaitResolver = skipHandler;
+      });
+      if (retryControlRef.current.cancelled) return false;
+      if (skipped === 'skip') return true;
+    }
+    return !retryControlRef.current.cancelled;
+  };
+
+  const runProgressiveTemporaryAutoRetries = async (
+    initialDoc: SmartDocRecord,
+    initialCode: string,
+    initialMessage: string,
+    fromUploadModal: boolean
+  ): Promise<SmartDocRecord | null> => {
+    retryControlRef.current.cancelled = false;
+    let latestDoc = initialDoc;
+    let latestMsg = initialMessage;
+    let latestCode = initialCode || 'AI_UNAVAILABLE_503';
+
+    for (let idx = 0; idx < RETRY_DELAYS_SECONDS.length; idx++) {
+      if (retryControlRef.current.cancelled) return null;
+
+      const attemptNum = idx + 1;
+      const delaySec = RETRY_DELAYS_SECONDS[idx];
+
+      setAutoRetryState({
+        docId: initialDoc.id,
+        attempt: attemptNum,
+        maxAttempts: RETRY_DELAYS_SECONDS.length,
+        delaySeconds: delaySec,
+        secondsRemaining: delaySec,
+        executing: false,
+        errorCode: latestCode,
+        message: latestMsg,
+      });
+
+      if (fromUploadModal) {
+        setUploadFeedback({
+          type: 'error',
+          code: latestCode,
+          failedDocId: initialDoc.id,
+          msg: `Indisponibilidade temporária (${latestCode}). Arquivo preservado (leitura pendente). Tentativa automática ${attemptNum}/${RETRY_DELAYS_SECONDS.length} agendada (${delaySec}s)...`,
+        });
+      }
+
+      const shouldContinue = await waitSecondsWithCountdown(delaySec, (remaining) => {
+        setAutoRetryState((prev) =>
+          prev && prev.docId === initialDoc.id ? { ...prev, secondsRemaining: remaining } : prev
+        );
+      });
+      if (!shouldContinue || retryControlRef.current.cancelled) {
+        return null;
+      }
+
+      setAutoRetryState((prev) =>
+        prev && prev.docId === initialDoc.id
+          ? { ...prev, secondsRemaining: 0, executing: true }
+          : prev
+      );
+
+      try {
+        const retryResp = await authorizedFetch(`/api/smartdocs/${encodeURIComponent(initialDoc.id)}/reprocess`, {
+          method: 'POST',
+          body: JSON.stringify({
+            isAutoRetry: true,
+            attemptNumber: attemptNum,
+            maxAttempts: RETRY_DELAYS_SECONDS.length,
+            retryDelaySeconds: delaySec,
+          }),
+        });
+        const retryData = await retryResp.json().catch(() => ({}));
+
+        if (retryData?.item) {
+          latestDoc = retryData.item as SmartDocRecord;
+          setActiveDoc((curr) => (curr && curr.id === latestDoc.id ? latestDoc : curr));
+        }
+
+        if (retryResp.ok && retryData?.success && retryData?.item) {
+          setAutoRetryState(null);
+          await loadSmartDocs();
+          populateReviewForm(retryData.item as SmartDocRecord);
+          setActionBanner({
+            type: 'success',
+            text: retryData.fallbackUsed
+              ? `Leitura concluída na tentativa automática ${attemptNum}/${RETRY_DELAYS_SECONDS.length} com modelo alternativo (${retryData.modelUsed}). Documento pendente de aprovação humana.`
+              : `Leitura concluída na tentativa automática ${attemptNum}/${RETRY_DELAYS_SECONDS.length}. Documento pendente de aprovação humana.`,
+          });
+          return retryData.item as SmartDocRecord;
+        }
+
+        latestMsg = retryData?.message || 'Erro no reprocessamento automático.';
+        latestCode = retryData?.code || latestCode;
+        // Stop immediately if error became permanent (e.g. 400 API_KEY_INVALID, 401, 403)
+        if (!isRetryableTemporaryError(retryResp.status, retryData?.code, retryData?.retryable)) {
+          setAutoRetryState(null);
+          await loadSmartDocs();
+          if (retryData?.item) {
+            populateReviewForm(retryData.item as SmartDocRecord);
+          }
+          setActionBanner({
+            type: 'error',
+            code: retryData?.code,
+            retryable: false,
+            text: latestMsg,
+          });
+          if (fromUploadModal) {
+            setUploadStep('ERRO_LEITURA');
+            setUploadFeedback({
+              type: 'error',
+              code: retryData?.code,
+              failedDocId: latestDoc.id,
+              msg: latestMsg,
+            });
+          }
+          return null;
+        }
+      } catch (err: any) {
+        latestMsg = err?.message || 'Falha de comunicação na tentativa automática.';
+      }
+    }
+
+    // All 3 automatic retries exhausted
+    setAutoRetryState(null);
+    await loadSmartDocs();
+    populateReviewForm(latestDoc);
+    setActionBanner({
+      type: 'error',
+      code: latestCode,
+      retryable: true,
+      text: `As 3 tentativas automáticas (5s, 15s e 30s) retornaram erro temporário (${latestCode}). O arquivo original continua preservado com leitura pendente — clique em "Tentar novamente" quando desejar.`,
+    });
+    if (fromUploadModal) {
+      setUploadStep('ERRO_LEITURA');
+      setUploadFeedback({
+        type: 'error',
+        code: latestCode,
+        failedDocId: latestDoc.id,
+        msg: 'As 3 tentativas automáticas (5s, 15s e 30s) não concluíram devido à indisponibilidade temporária. O arquivo original foi mantido armazenado (leitura pendente).',
+      });
+    }
+    return null;
+  };
 
   const populateReviewForm = (record: SmartDocRecord) => {
     setActiveDoc(record);
@@ -382,10 +786,10 @@ export const SmartDocsView: React.FC = () => {
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
+    if (file.size > 4 * 1024 * 1024) {
       setUploadFeedback({
         type: 'error',
-        msg: 'O arquivo excede o limite de 5 MB. Reduza o tamanho e tente novamente.',
+        msg: 'O arquivo excede o limite de 4 MB. Reduza o tamanho e tente novamente.',
       });
       setSelectedFile(null);
       setPreviewLocalUrl('');
@@ -404,6 +808,7 @@ export const SmartDocsView: React.FC = () => {
       return;
     }
 
+    cancelProgressiveRetries();
     setUploadFeedback(null);
     setUploadStep('AGUARDANDO_PROCESSAMENTO');
 
@@ -430,11 +835,36 @@ export const SmartDocsView: React.FC = () => {
 
       if (!resp.ok || !data?.success) {
         setUploadStep('ERRO_LEITURA');
+        const shouldAutoRetry = isRetryableTemporaryError(resp.status, data?.code, data?.retryable);
+
+        await loadSmartDocs();
+
+        if (shouldAutoRetry && data?.item) {
+          const failedDoc = data.item as SmartDocRecord;
+          populateReviewForm(failedDoc);
+          const recoveredDoc = await runProgressiveTemporaryAutoRetries(
+            failedDoc,
+            data?.code || 'AI_UNAVAILABLE_503',
+            data?.message || 'Erro temporário de processamento IA',
+            true
+          );
+          if (recoveredDoc) {
+            setUploadStep('PROCESSADO');
+            setIsUploadOpen(false);
+            setSelectedFile(null);
+            setPreviewLocalUrl('');
+            setUploadStep('IDLE');
+          }
+          return;
+        }
+
         setUploadFeedback({
           type: 'error',
+          code: data?.code,
+          existingId: data?.existingId,
+          failedDocId: data?.item?.id,
           msg: data?.message || 'Não foi possível concluir a leitura inteligente do documento.',
         });
-        await loadSmartDocs();
         if (data?.item) {
           populateReviewForm(data.item as SmartDocRecord);
         }
@@ -449,6 +879,12 @@ export const SmartDocsView: React.FC = () => {
         setPreviewLocalUrl('');
         setUploadStep('IDLE');
         populateReviewForm(data.item as SmartDocRecord);
+        if (data.fallbackUsed) {
+          setActionBanner({
+            type: 'success',
+            text: `Leitura concluída com modelo alternativo compatível (${data.modelUsed}). Confira os dados e aprove manualmente.`,
+          });
+        }
       }
     } catch (err: any) {
       setUploadStep('ERRO_LEITURA');
@@ -494,7 +930,12 @@ export const SmartDocsView: React.FC = () => {
     }
   };
 
-  const handleReprocess = async (docId: string, replacementFile?: File) => {
+  const handleReprocess = async (
+    docId: string,
+    replacementFile?: File,
+    options?: { skipAutoRetryOn503?: boolean }
+  ) => {
+    cancelProgressiveRetries();
     setActionBusy(true);
     setActionBanner(null);
     try {
@@ -513,12 +954,50 @@ export const SmartDocsView: React.FC = () => {
         body: JSON.stringify(bodyPayload),
       });
       const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || !data?.success) {
-        throw new Error(data?.message || 'Falha no reprocessamento pela IA.');
-      }
-      if (activeDoc && activeDoc.id === docId && data.item) {
+
+      if (data?.item && (!activeDoc || activeDoc.id === docId)) {
         populateReviewForm(data.item as SmartDocRecord);
-        setActionBanner({ type: 'success', text: 'Reprocessamento concluído com sucesso.' });
+      }
+
+      if (!resp.ok || !data?.success) {
+        const shouldAutoRetry = isRetryableTemporaryError(resp.status, data?.code, data?.retryable);
+        await loadSmartDocs();
+
+        if (shouldAutoRetry && data?.item && !options?.skipAutoRetryOn503) {
+          setActionBusy(false);
+          await runProgressiveTemporaryAutoRetries(
+            data.item as SmartDocRecord,
+            data?.code || 'AI_UNAVAILABLE_503',
+            data?.message || 'Serviço de IA temporariamente indisponível.',
+            false
+          );
+          return;
+        }
+
+        const errText = data?.message || 'Falha no reprocessamento pela IA.';
+        if (activeDoc && activeDoc.id === docId) {
+          setActionBanner({
+            type: 'error',
+            code: data?.code,
+            retryable: Boolean(data?.retryable),
+            text: errText,
+          });
+        } else {
+          setListError(errText);
+        }
+        return;
+      }
+
+      if (data.item) {
+        populateReviewForm(data.item as SmartDocRecord);
+        setActionBanner({
+          type: 'success',
+          text: replacementFile
+            ? 'Versão corrigida processada com sucesso preservando registros vinculados. Confira e aprove manualmente.'
+            : data.fallbackUsed
+            ? `Reprocessamento concluído com modelo alternativo (${data.modelUsed}). Confira e aprove manualmente.`
+            : 'Reprocessamento concluído com sucesso. Aguardando aprovação humana.',
+        });
       }
       await loadSmartDocs();
     } catch (err: any) {
@@ -593,6 +1072,43 @@ export const SmartDocsView: React.FC = () => {
       setActionBanner({ type: 'error', text: err?.message || 'Falha ao processar decisão.' });
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const handleConfirmDeleteRejected = async () => {
+    if (!deleteConfirmDoc || !isAdmin) return;
+    if (deleteConfirmDoc.status !== 'REJEITADO') {
+      setDeleteError('Somente documentos com status REJEITADO podem ser excluídos.');
+      return;
+    }
+
+    setDeleteBusy(true);
+    setDeleteError('');
+    setListError('');
+    setListSuccessBanner('');
+
+    const targetId = deleteConfirmDoc.id;
+    try {
+      const resp = await authorizedFetch(`/api/smartdocs/${encodeURIComponent(targetId)}`, {
+        method: 'DELETE',
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.success) {
+        throw new Error(data?.message || 'Não foi possível excluir o documento recusado.');
+      }
+
+      // Immediately remove from list state without needing page reload
+      setItems((prev) => prev.filter((item) => item.id !== targetId));
+      if (activeDoc?.id === targetId) {
+        setActiveDoc(null);
+        setActionBanner(null);
+      }
+      setDeleteConfirmDoc(null);
+      setListSuccessBanner(data.message || 'Documento recusado excluído definitivamente com sucesso.');
+    } catch (err: any) {
+      setDeleteError(err?.message || 'Falha ao excluir documento recusado.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -696,7 +1212,22 @@ export const SmartDocsView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+          {isAdmin && (
+            <button
+              type="button"
+              disabled={testingConnection}
+              onClick={handleTestGeminiConnection}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-200 text-xs font-medium border border-slate-700 transition-colors whitespace-nowrap"
+            >
+              {testingConnection ? (
+                <Loader2 size={15} className="text-blue-400 animate-spin" />
+              ) : (
+                <ShieldCheck size={15} className="text-emerald-400" />
+              )}
+              {testingConnection ? 'Testando Gemini...' : 'Testar Conexão Gemini'}
+            </button>
+          )}
           {isAdmin && (
             <button
               type="button"
@@ -727,18 +1258,71 @@ export const SmartDocsView: React.FC = () => {
         </div>
       </div>
 
+      {/* Admin-only Gemini Connection Test feedback */}
+      {isAdmin && connectionFeedback && (
+        <div
+          className={`p-3.5 rounded-xl border flex items-start justify-between gap-3 text-xs ${
+            connectionFeedback.type === 'success'
+              ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+              : 'bg-red-950/40 border-red-500/40 text-red-300'
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            {connectionFeedback.type === 'success' ? (
+              <CheckCircle size={16} className="shrink-0 mt-0.5" />
+            ) : (
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+            )}
+            <div>
+              <p className="font-semibold">{connectionFeedback.text}</p>
+              {diagnostics && (
+                <p className="text-[11px] opacity-80 mt-0.5">
+                  GEMINI_API_KEY: {diagnostics.geminiKeyConfigured ? 'Configurada' : 'Ausente/Inválida'} • Modelo: {diagnostics.primaryModel} • Autenticação: API Key (x-goog-api-key)
+                  {diagnostics.lastTestedAt ? ` • Último teste: ${new Date(diagnostics.lastTestedAt).toLocaleString('pt-BR')}` : ''}
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setConnectionFeedback(null)}
+            className="opacity-70 hover:opacity-100"
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
+
       {/* Diagnostic banner if GEMINI_API_KEY is not configured */}
       {!aiConfigured && (
         <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 flex items-start gap-3 text-xs">
           <AlertTriangle size={18} className="text-amber-400 shrink-0 mt-0.5" />
           <div>
             <p className="font-bold text-amber-300">
-              Motor de Leitura Inteligente (GEMINI_API_KEY) pendente de configuração no servidor
+              {aiKeyStatus === 'oauth_token_not_supported'
+                ? 'Variável GEMINI_API_KEY contém token OAuth/Bearer não suportado (HTTP 401)'
+                : aiKeyStatus === 'placeholder'
+                ? 'Variável GEMINI_API_KEY com valor de exemplo no servidor/Netlify'
+                : aiKeyStatus === 'malformed'
+                ? 'Variável GEMINI_API_KEY com formato inválido no servidor/Netlify'
+                : 'Motor de Leitura Inteligente (GEMINI_API_KEY) pendente de configuração no servidor'}
             </p>
             <p className="text-amber-200/80 mt-0.5">
-              Nenhum dado é simulado ou fabricado sem IA real. Configure a variável protegida <code className="font-mono bg-slate-950 px-1.5 py-0.5 rounded">GEMINI_API_KEY</code> no ambiente do servidor / Netlify para habilitar o processamento automático.
+              Nenhum dado é simulado ou fabricado sem IA real. Configure uma chave de API válida em <code className="font-mono bg-slate-950 px-1.5 py-0.5 rounded">GEMINI_API_KEY</code> nas variáveis de ambiente do Netlify / servidor para habilitar o processamento automático.
             </p>
           </div>
+        </div>
+      )}
+
+      {listSuccessBanner && (
+        <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 flex items-center justify-between gap-3 text-xs text-emerald-300">
+          <div className="flex items-center gap-2">
+            <CheckCircle size={16} className="shrink-0" />
+            <span>{listSuccessBanner}</span>
+          </div>
+          <button onClick={() => setListSuccessBanner('')} className="text-emerald-400 hover:text-white">
+            <X size={15} />
+          </button>
         </div>
       )}
 
@@ -1059,14 +1643,35 @@ export const SmartDocsView: React.FC = () => {
                           >
                             Conferir
                           </button>
-                          {canEdit && docItem.status === 'ERRO_LEITURA' && (
+                          {canEdit && docItem.status !== 'APROVADO' && docItem.status !== 'REJEITADO' && (
                             <button
                               type="button"
+                              disabled={actionBusy}
                               onClick={() => handleReprocess(docItem.id)}
-                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-amber-600/20 text-amber-400"
-                              title="Reprocessar leitura inteligente"
+                              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors ${
+                                docItem.status === 'ERRO_LEITURA'
+                                  ? 'bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/40'
+                                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                              }`}
+                              title="Reprocessar documento sem novo upload"
                             >
-                              <RefreshCw size={14} />
+                              <RefreshCw size={13} />
+                              {docItem.status === 'ERRO_LEITURA' ? 'Reprocessar' : ''}
+                            </button>
+                          )}
+                          {isAdmin && docItem.status === 'REJEITADO' && (
+                            <button
+                              type="button"
+                              disabled={deleteBusy}
+                              onClick={() => {
+                                setDeleteError('');
+                                setDeleteConfirmDoc(docItem);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 text-xs font-semibold flex items-center gap-1 transition-colors"
+                              title="Excluir documento recusado definitivamente"
+                            >
+                              <Trash2 size={13} />
+                              EXCLUIR
                             </button>
                           )}
                         </div>
@@ -1114,7 +1719,7 @@ export const SmartDocsView: React.FC = () => {
                   {selectedFile ? selectedFile.name : 'Clique para selecionar 1 documento'}
                 </p>
                 <p className="text-xs text-slate-400 mt-1">
-                  Formatos aceitos: PDF, JPG, JPEG, PNG • Máximo 5 MB • Apenas 1 arquivo por operação
+                  Formatos aceitos: PDF, JPG, JPEG, PNG • Máximo 4 MB • Apenas 1 arquivo por operação
                 </p>
                 {selectedFile && (
                   <p className="text-[11px] font-mono text-blue-300 mt-2">
@@ -1233,28 +1838,97 @@ export const SmartDocsView: React.FC = () => {
 
               {uploadFeedback && (
                 <div
-                  className={`p-3 rounded-lg text-xs flex items-start gap-2 ${
+                  className={`p-3 rounded-lg text-xs space-y-2 ${
                     uploadFeedback.type === 'error'
                       ? 'bg-red-950/50 border border-red-500/40 text-red-300'
                       : 'bg-emerald-950/50 border border-emerald-500/40 text-emerald-300'
                   }`}
                 >
-                  <AlertTriangle size={15} className="shrink-0 mt-0.5" />
-                  <span>{uploadFeedback.msg}</span>
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+                    <span>{uploadFeedback.msg}</span>
+                  </div>
+
+                  {autoRetryState && autoRetryState.docId === uploadFeedback.failedDocId && (
+                    <div className="p-2.5 rounded-lg bg-slate-950/80 border border-amber-500/40 text-amber-200 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold flex items-center gap-1.5">
+                          <Loader2 size={13} className="animate-spin text-amber-400" />
+                          {autoRetryState.executing
+                            ? `Executando tentativa automática ${autoRetryState.attempt}/${autoRetryState.maxAttempts}...`
+                            : `Tentativa automática ${autoRetryState.attempt}/${autoRetryState.maxAttempts} em ${autoRetryState.secondsRemaining}s`}
+                        </span>
+                        <span className="font-mono text-[10px] text-amber-300">
+                          Intervalos: 5s / 15s / 30s
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {!autoRetryState.executing && (
+                          <button
+                            type="button"
+                            onClick={triggerRetryCountdownSkip}
+                            className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold"
+                          >
+                            Tentar agora
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={cancelProgressiveRetries}
+                          className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px]"
+                        >
+                          Cancelar tentativas automáticas
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {!autoRetryState && uploadFeedback.failedDocId && (
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsUploadOpen(false);
+                          handleOpenDetail(uploadFeedback.failedDocId!);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold"
+                      >
+                        Abrir documento preservado e reprocessar
+                      </button>
+                    </div>
+                  )}
+
+                  {uploadFeedback.code === 'DUPLICATE_DOCUMENT' && uploadFeedback.existingId && (
+                    <div className="pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsUploadOpen(false);
+                          handleOpenDetail(uploadFeedback.existingId!);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-blue-600 text-white font-semibold"
+                      >
+                        Abrir registro existente (reprocessar sem duplicar)
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setIsUploadOpen(false)}
+                  onClick={() => {
+                    cancelProgressiveRetries();
+                    setIsUploadOpen(false);
+                  }}
                   className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  disabled={!selectedFile || uploadStep === 'PROCESSANDO' || uploadStep === 'AGUARDANDO_PROCESSAMENTO'}
+                  disabled={!selectedFile || uploadStep === 'PROCESSANDO' || uploadStep === 'AGUARDANDO_PROCESSAMENTO' || Boolean(autoRetryState)}
                   className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-semibold text-white flex items-center gap-2"
                 >
                   {uploadStep === 'PROCESSANDO' ? (
@@ -1410,41 +2084,117 @@ export const SmartDocsView: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Status / Correction / Error alerts */}
-                    {activeDoc.status === 'ERRO_LEITURA' && (
-                      <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/40 text-xs space-y-2">
-                        <p className="font-bold text-red-300 flex items-center gap-1.5">
-                          <XCircle size={15} /> Erro no processamento automático
+                    {/* Active Progressive 503 Retry Countdown Banner */}
+                    {autoRetryState && autoRetryState.docId === activeDoc.id && (
+                      <div className="p-3.5 rounded-xl bg-amber-950/50 border border-amber-500/50 text-xs space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-bold text-amber-200 flex items-center gap-2">
+                            <Loader2 size={15} className="animate-spin text-amber-400" />
+                            {autoRetryState.executing
+                              ? `Executando tentativa automática ${autoRetryState.attempt} de ${autoRetryState.maxAttempts}...`
+                              : `Erro 503 detectado — Tentativa automática ${autoRetryState.attempt} de ${autoRetryState.maxAttempts} em ${autoRetryState.secondsRemaining}s`}
+                          </span>
+                          <span className="font-mono text-[10px] text-amber-300">
+                            Backoff progressivo: 5s → 15s → 30s
+                          </span>
+                        </div>
+                        <p className="text-amber-100/80">
+                          O arquivo original permanece armazenado com segurança. Os dados já extraídos anteriormente serão preservados sem duplicar cadastros.
                         </p>
-                        <p className="text-red-200/90">{activeDoc.erroLeitura}</p>
-                        {canEdit && (
-                          <div className="flex flex-wrap items-center gap-2 pt-1">
-                            {activeDoc.arquivoUrl && (
-                              <button
-                                type="button"
-                                disabled={actionBusy}
-                                onClick={() => handleReprocess(activeDoc.id)}
-                                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-semibold flex items-center gap-1.5"
-                              >
-                                <RefreshCw size={13} /> Reprocessar Agora
-                              </button>
-                            )}
-                            <label className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 cursor-pointer">
-                              Enviar arquivo corrigido e reprocessar
-                              <input
-                                type="file"
-                                accept=".pdf,.jpg,.jpeg,.png"
-                                className="hidden"
-                                onChange={(ev) => {
-                                  const f = ev.target.files?.[0];
-                                  if (f) handleReprocess(activeDoc.id, f);
-                                }}
-                              />
-                            </label>
-                          </div>
-                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {!autoRetryState.executing && (
+                            <button
+                              type="button"
+                              onClick={triggerRetryCountdownSkip}
+                              className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold"
+                            >
+                              Tentar agora
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={cancelProgressiveRetries}
+                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200"
+                          >
+                            Cancelar tentativas automáticas
+                          </button>
+                        </div>
                       </div>
                     )}
+
+                    {/* Status / Correction / Error alerts */}
+                    {activeDoc.status === 'ERRO_LEITURA' && (() => {
+                      const diag = getErrorDiagnosticMeta(activeDoc.erroCodigo);
+                      const filePreserved = Boolean(
+                        activeDoc.hasPreservedFile ||
+                          activeDoc.arquivoUrl ||
+                          activeDoc.fileStorageMode === 'chunked'
+                      );
+                      return (
+                        <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/40 text-xs space-y-2.5">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <p className="font-bold text-red-300 flex items-center gap-1.5">
+                              <XCircle size={15} /> {diag.title}
+                            </p>
+                            {activeDoc.erroCodigo && (
+                              <span className={`px-2 py-0.5 rounded border font-mono text-[10px] font-bold ${diag.badgeCls}`}>
+                                {activeDoc.erroCodigo}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-red-200/95">{activeDoc.erroLeitura}</p>
+                          <p className="text-slate-300 text-[11px]">{diag.hint}</p>
+
+                          {filePreserved && (
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-950/50 border border-emerald-600/40 text-emerald-300 text-[11px]">
+                              <CheckCircle size={13} />
+                              Arquivo original preservado ({activeDoc.fileStorageMode === 'chunked' ? 'armazenamento em blocos' : 'inline'}) — não é necessário reenviar
+                            </div>
+                          )}
+
+                          {canEdit && (
+                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                              {filePreserved && (
+                                <button
+                                  type="button"
+                                  disabled={actionBusy || Boolean(autoRetryState)}
+                                  onClick={() => handleReprocess(activeDoc.id)}
+                                  className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-semibold flex items-center gap-1.5"
+                                >
+                                  <RefreshCw size={13} className={actionBusy ? 'animate-spin' : ''} />
+                                  Tentar novamente
+                                </button>
+                              )}
+                              {filePreserved && (
+                                <button
+                                  type="button"
+                                  disabled={actionBusy || Boolean(autoRetryState)}
+                                  onClick={() => handleReprocess(activeDoc.id, undefined, { skipAutoRetryOn503: true })}
+                                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-blue-600 disabled:opacity-50 text-slate-200 hover:text-white font-semibold flex items-center gap-1.5"
+                                >
+                                  <RefreshCw size={13} />
+                                  Reprocessar documento
+                                </button>
+                              )}
+                              <label className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 cursor-pointer flex items-center gap-1.5">
+                                <Upload size={13} />
+                                Enviar versão corrigida e reprocessar
+                                <input
+                                  type="file"
+                                  accept=".pdf,.jpg,.jpeg,.png"
+                                  className="hidden"
+                                  onChange={(ev) => {
+                                    const f = ev.target.files?.[0];
+                                    if (f) handleReprocess(activeDoc.id, f);
+                                    ev.target.value = '';
+                                  }}
+                                />
+                              </label>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {activeDoc.correcaoSolicitada && activeDoc.motivoCorrecao && activeDoc.status === 'PENDENTE_APROVACAO' && (
                       <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs space-y-2">
@@ -2041,6 +2791,54 @@ export const SmartDocsView: React.FC = () => {
                       )}
                     </div>
 
+                    {/* Processing Attempts & Model History */}
+                    {(activeDoc.tentativasHistorico || []).length > 0 && (
+                      <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                            <RefreshCw size={14} className="text-cyan-400" />
+                            Tentativas de Processamento IA ({activeDoc.tentativasHistorico!.length})
+                          </h4>
+                          {activeDoc.ultimoModeloUsado && (
+                            <div className="flex items-center gap-1.5">
+                              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-slate-300">
+                                Modelo: {activeDoc.ultimoModeloUsado}
+                              </span>
+                              {activeDoc.fallbackModeloUtilizado && (
+                                <span className="px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-[10px] font-semibold text-cyan-300">
+                                  Modelo Alternativo
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <div className="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar">
+                          {activeDoc.tentativasHistorico!.slice().reverse().map((att, idx) => (
+                            <div
+                              key={idx}
+                              className={`p-2 rounded-lg border text-[11px] ${
+                                att.sucesso
+                                  ? 'bg-emerald-950/25 border-emerald-800/50 text-emerald-200'
+                                  : 'bg-red-950/25 border-red-800/50 text-red-200'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <span className="font-semibold">
+                                  #{att.tentativa} • {att.modelo}
+                                  {att.fallbackModelo ? ' (Fallback)' : ''} •{' '}
+                                  {att.sucesso ? 'Sucesso' : att.codigoErro || 'Falha'}
+                                </span>
+                                <span className="font-mono text-[10px] text-slate-400 tabular-nums">
+                                  {new Date(att.dataHora).toLocaleString('pt-BR')} ({att.duracaoMs}ms)
+                                </span>
+                              </div>
+                              <p className="text-slate-300/90 mt-0.5">{att.mensagem}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Audit & Alteration History */}
                     <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
                       <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
@@ -2070,17 +2868,45 @@ export const SmartDocsView: React.FC = () => {
 
                   {/* Action Footer */}
                   <div className="px-5 py-3.5 border-t border-slate-800 bg-slate-950/80 flex flex-wrap items-center justify-between gap-2 shrink-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {!isLocked && canEdit && (
-                        <button
-                          type="button"
-                          disabled={actionBusy}
-                          onClick={handleSaveEdits}
-                          className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white border border-slate-700 flex items-center gap-1.5 disabled:opacity-50"
-                        >
-                          <Save size={14} />
-                          Salvar Conferência
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            disabled={actionBusy || Boolean(autoRetryState)}
+                            onClick={handleSaveEdits}
+                            className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white border border-slate-700 flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <Save size={14} />
+                            Salvar Conferência
+                          </button>
+                          {(activeDoc.hasPreservedFile || activeDoc.arquivoUrl || activeDoc.fileStorageMode === 'chunked') && (
+                            <button
+                              type="button"
+                              disabled={actionBusy || Boolean(autoRetryState)}
+                              onClick={() => handleReprocess(activeDoc.id)}
+                              className="px-3 py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                              title="Reprocessar leitura IA utilizando o arquivo original preservado"
+                            >
+                              <RefreshCw size={14} className={actionBusy ? 'animate-spin' : ''} />
+                              Reprocessar documento
+                            </button>
+                          )}
+                          <label className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer">
+                            <Upload size={14} />
+                            Versão corrigida
+                            <input
+                              type="file"
+                              accept=".pdf,.jpg,.jpeg,.png"
+                              className="hidden"
+                              onChange={(ev) => {
+                                const f = ev.target.files?.[0];
+                                if (f) handleReprocess(activeDoc.id, f);
+                                ev.target.value = '';
+                              }}
+                            />
+                          </label>
+                        </>
                       )}
                     </div>
 
@@ -2123,6 +2949,21 @@ export const SmartDocsView: React.FC = () => {
                             Aprovar e Integrar
                           </button>
                         </>
+                      )}
+
+                      {isAdmin && activeDoc.status === 'REJEITADO' && (
+                        <button
+                          type="button"
+                          disabled={actionBusy || deleteBusy}
+                          onClick={() => {
+                            setDeleteError('');
+                            setDeleteConfirmDoc(activeDoc);
+                          }}
+                          className="px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                        >
+                          <Trash2 size={14} />
+                          EXCLUIR
+                        </button>
                       )}
 
                       {isAuditor && (
@@ -2199,6 +3040,63 @@ export const SmartDocsView: React.FC = () => {
                 }`}
               >
                 {decisionModal === 'reject' ? 'Confirmar Rejeição' : 'Enviar Solicitação'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* REJECTED DOCUMENT DELETION CONFIRMATION MODAL (ADMIN ONLY) */}
+      {deleteConfirmDoc && isAdmin && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-red-500/40 shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-red-500/15 border border-red-500/30 text-red-400 shrink-0">
+                <Trash2 size={20} />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-base font-bold text-white">Excluir Documento Recusado</h3>
+                <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
+                  Tem certeza de que deseja excluir este documento? Esta operação não poderá ser desfeita.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
+              <p className="text-slate-200 font-semibold truncate">{deleteConfirmDoc.arquivoNome}</p>
+              <p className="text-slate-400">
+                Tipo: <span className="text-slate-300">{deleteConfirmDoc.tipoDocumento}</span>
+                {deleteConfirmDoc.empresaNome ? ` • ${deleteConfirmDoc.empresaNome}` : ''}
+              </p>
+            </div>
+
+            {deleteError && (
+              <div className="p-3 rounded-lg bg-red-950/60 border border-red-500/50 text-xs text-red-300 flex items-start gap-2">
+                <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+                <span>{deleteError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={deleteBusy}
+                onClick={() => {
+                  setDeleteConfirmDoc(null);
+                  setDeleteError('');
+                }}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deleteBusy}
+                onClick={handleConfirmDeleteRejected}
+                className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {deleteBusy ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                EXCLUIR DEFINITIVAMENTE
               </button>
             </div>
           </div>

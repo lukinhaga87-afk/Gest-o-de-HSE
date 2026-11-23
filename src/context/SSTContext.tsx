@@ -343,8 +343,11 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // CRUD Implementations
   const addCompany = async (comp: Omit<Company, 'id'>) => {
     const colRef = collection(db, 'companies');
+    const isIndeterminate = Boolean(comp.contrato_indeterminado);
     const docRef = await addDoc(colRef, {
       ...comp,
+      contrato_indeterminado: isIndeterminate,
+      dataTerminoContrato: isIndeterminate ? '' : comp.dataTerminoContrato || '',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -354,10 +357,18 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateCompany = async (id: string, comp: Partial<Company>) => {
     const docRef = doc(db, 'companies', id);
-    await updateDoc(docRef, {
+    const payload: Partial<Company> & { updatedAt: string } = {
       ...comp,
       updatedAt: new Date().toISOString(),
-    });
+    };
+    if ('contrato_indeterminado' in comp) {
+      const isIndeterminate = Boolean(comp.contrato_indeterminado);
+      payload.contrato_indeterminado = isIndeterminate;
+      if (isIndeterminate) {
+        payload.dataTerminoContrato = '';
+      }
+    }
+    await updateDoc(docRef, payload);
     await logAudit('Atualização', 'Empresa', id, `Atualizados dados da empresa ${comp.razaoSocial || id}`);
   };
 

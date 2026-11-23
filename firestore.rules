@@ -45,7 +45,8 @@ service cloud.firestore {
       allow create, update: if request.resource.data.keys().hasAll(['razaoSocial', 'cnpj', 'situacao'])
                             && request.resource.data.razaoSocial is string && request.resource.data.razaoSocial.size() <= 250
                             && request.resource.data.cnpj is string && request.resource.data.cnpj.size() <= 30
-                            && request.resource.data.situacao in ['ativa', 'inativa'];
+                            && request.resource.data.situacao in ['ativa', 'inativa']
+                            && (!('contrato_indeterminado' in request.resource.data) || request.resource.data.contrato_indeterminado is bool);
       allow delete: if true;
     }
 
@@ -175,7 +176,19 @@ service cloud.firestore {
                             && request.resource.data.categoriaGrupo in ['saude_ocupacional', 'treinamentos', 'documentos_empresariais', 'outros']
                             && request.resource.data.tipoDocumento is string && request.resource.data.tipoDocumento.size() <= 150
                             && request.resource.data.status in ['AGUARDANDO_PROCESSAMENTO', 'PROCESSANDO', 'PROCESSADO', 'ERRO_LEITURA', 'PENDENTE_APROVACAO', 'APROVADO', 'REJEITADO'];
-      allow delete: if false;
+      allow delete: if resource != null && resource.data.status == 'REJEITADO';
+    }
+
+    // EHS SmartDocs Preserved File Chunks Collection (for files > 500 KB up to 5 MB)
+    match /smartDocFileChunks/{chunkId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(['smartDocId', 'chunkIndex', 'totalChunks', 'mimeType', 'data'])
+                            && request.resource.data.smartDocId is string && request.resource.data.smartDocId.size() <= 150
+                            && request.resource.data.chunkIndex is number
+                            && request.resource.data.totalChunks is number
+                            && request.resource.data.mimeType in ['application/pdf', 'image/jpeg', 'image/png']
+                            && request.resource.data.data is string && request.resource.data.data.size() <= 600000;
+      allow delete: if true;
     }
 
     // EHS SmartDocs Validity Rules Collection

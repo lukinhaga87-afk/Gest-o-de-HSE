@@ -2,7 +2,6 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, signOut as fbSignOut } from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import {
-  PasswordRecoveryGeneratedResult,
   UserProfile,
   UserRole,
 } from '../types/sst';
@@ -18,26 +17,15 @@ interface AuthContextType {
   activeEmpresaNome: string | null;
   isSimulatingRole: boolean;
   loginWithCredentials: (cpfOrIdentifier: string, password: string) => Promise<{ success: boolean; message?: string }>;
-  changePassword: (
-    cpfOrIdentifier: string,
-    currentPassword: string,
-    newPassword: string
+  changeOwnPassword: (
+    newPassword: string,
+    confirmPassword: string
   ) => Promise<{ success: boolean; message: string }>;
-  getRecoveryChannelsStatus: () => Promise<{ whatsappConfigured: boolean; smsConfigured: boolean }>;
-  requestRecoveryChannel: (
-    cpf: string,
-    canal: 'whatsapp' | 'sms'
-  ) => Promise<{ success: boolean; configured?: boolean; message: string }>;
-  resetPasswordWithCode: (params: {
-    cpf: string;
-    code: string;
-    newPassword: string;
-    confirmPassword: string;
-  }) => Promise<{ success: boolean; message: string }>;
-  adminGenerateRecoveryCode: (target: {
-    userId?: string;
-    cpf?: string;
-  }) => Promise<PasswordRecoveryGeneratedResult>;
+  adminChangeUserPassword: (
+    userId: string,
+    newPassword: string,
+    confirmPassword: string
+  ) => Promise<{ success: boolean; message: string }>;
   registerUser: (
     nome: string,
     cpf: string,
@@ -232,31 +220,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // Self-service password change verified by current password on backend
-  const changePassword = async (
-    cpfOrIdentifier: string,
-    currentPassword: string,
-    newPassword: string
+  // Simplified password change for currently logged-in user (no old password, code, or email)
+  const changeOwnPassword = async (
+    newPassword: string,
+    confirmPassword: string
   ): Promise<{ success: boolean; message: string }> => {
-    const cleanIdentifier = cpfOrIdentifier.trim();
-    const cleanCurrent = currentPassword.trim();
     const cleanNew = newPassword.trim();
+    const cleanConfirm = confirmPassword.trim();
 
-    if (!cleanIdentifier || !cleanCurrent || !cleanNew) {
+    if (!cleanNew || !cleanConfirm) {
       return {
         success: false,
-        message: 'Preencha CPF, senha atual e nova senha.',
+        message: 'Preencha a nova senha e a confirmação.',
+      };
+    }
+
+    if (cleanNew.length < 6) {
+      return {
+        success: false,
+        message: 'A nova senha deve conter no mínimo 6 caracteres.',
+      };
+    }
+
+    if (cleanNew !== cleanConfirm) {
+      return {
+        success: false,
+        message: 'A confirmação da nova senha não confere.',
       };
     }
 
     try {
-      const resp = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const resp = await authorizedFetch('/api/auth/me/password', {
+        method: 'PUT',
         body: JSON.stringify({
-          cpfOrIdentifier: cleanIdentifier,
-          currentPassword: cleanCurrent,
           newPassword: cleanNew,
+          confirmPassword: cleanConfirm,
         }),
       });
 
@@ -268,128 +266,71 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
 
-      return {
-        success: true,
-        message: data.message || 'Senha alterada com sucesso!',
-      };
-    } catch (err) {
-      console.error('Erro ao alterar senha no servidor:', err);
-      return {
-        success: false,
-        message: 'Não foi possível conectar ao servidor para alterar a senha.',
-      };
-    }
-  };
-
-  const getRecoveryChannelsStatus = async (): Promise<{
-    whatsappConfigured: boolean;
-    smsConfigured: boolean;
-  }> => {
-    try {
-      const resp = await fetch('/api/auth/recovery/channels-status');
-      const data = await resp.json().catch(() => ({}));
-      return {
-        whatsappConfigured: Boolean(data?.whatsappConfigured),
-        smsConfigured: Boolean(data?.smsConfigured),
-      };
-    } catch {
-      return { whatsappConfigured: false, smsConfigured: false };
-    }
-  };
-
-  const requestRecoveryChannel = async (
-    cpf: string,
-    canal: 'whatsapp' | 'sms'
-  ): Promise<{ success: boolean; configured?: boolean; message: string }> => {
-    try {
-      const resp = await fetch('/api/auth/recovery/request-channel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cpf: cpf.trim(), canal }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || !data?.success) {
-        return {
-          success: false,
-          configured: data?.configured,
-          message: data?.message || 'Não foi possível concluir a recuperação.',
-        };
-      }
-      return {
-        success: true,
-        configured: true,
-        message: data.message,
-      };
-    } catch {
-      return {
-        success: false,
-        message: 'Não foi possível concluir a recuperação.',
-      };
-    }
-  };
-
-  const resetPasswordWithCode = async (params: {
-    cpf: string;
-    code: string;
-    newPassword: string;
-    confirmPassword: string;
-  }): Promise<{ success: boolean; message: string }> => {
-    try {
-      const resp = await fetch('/api/auth/recovery/reset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cpf: params.cpf.trim(),
-          code: params.code.trim(),
-          newPassword: params.newPassword,
-          confirmPassword: params.confirmPassword,
-        }),
-      });
-
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || !data?.success) {
-        return {
-          success: false,
-          message: data?.message || 'Não foi possível concluir a recuperação.',
-        };
+      if (data.token && data.user) {
+        const safeUser = stripSensitiveProfileFields(data.user as UserProfile);
+        localStorage.setItem(LOCAL_STORAGE_API_TOKEN_KEY, data.token);
+        localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
+        setApiToken(data.token);
+        setProfile(safeUser);
       }
 
       return {
         success: true,
         message: data.message || 'Senha alterada com sucesso.',
       };
-    } catch {
+    } catch (err) {
+      console.error('Erro ao alterar senha no servidor:', err);
       return {
         success: false,
-        message: 'Não foi possível concluir a recuperação.',
+        message: 'Não foi possível conectar ao servidor para salvar a nova senha.',
       };
     }
   };
 
-  const adminGenerateRecoveryCode = async (target: {
-    userId?: string;
-    cpf?: string;
-  }): Promise<PasswordRecoveryGeneratedResult> => {
+  // Admin direct password change for any user (without previous password or confirmation codes)
+  const adminChangeUserPassword = async (
+    userId: string,
+    newPassword: string,
+    confirmPassword: string
+  ): Promise<{ success: boolean; message: string }> => {
     if (!isAdmin) {
-      throw new Error('Somente o Administrador de EHS pode gerar códigos de recuperação.');
+      throw new Error('Apenas o Administrador de EHS pode alterar a senha de outros usuários.');
     }
 
-    const resp = await authorizedFetch('/api/auth/recovery/admin-generate', {
-      method: 'POST',
-      body: JSON.stringify(target),
+    const cleanNew = newPassword.trim();
+    const cleanConfirm = confirmPassword.trim();
+
+    if (cleanNew.length < 6) {
+      throw new Error('A nova senha deve conter no mínimo 6 caracteres.');
+    }
+    if (cleanNew !== cleanConfirm) {
+      throw new Error('A confirmação da nova senha não confere.');
+    }
+
+    const resp = await authorizedFetch(`/api/auth/users/${encodeURIComponent(userId)}/password`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        newPassword: cleanNew,
+        confirmPassword: cleanConfirm,
+      }),
     });
 
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok || !data?.success || !data?.code) {
-      throw new Error(data?.message || 'Não foi possível gerar o código de recuperação.');
+    if (!resp.ok || !data?.success) {
+      throw new Error(data?.message || 'Não foi possível atualizar a senha do usuário.');
+    }
+
+    if (profile && profile.id === userId && data.token && data.user) {
+      const safeUser = stripSensitiveProfileFields(data.user as UserProfile);
+      localStorage.setItem(LOCAL_STORAGE_API_TOKEN_KEY, data.token);
+      localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
+      setApiToken(data.token);
+      setProfile(safeUser);
     }
 
     return {
-      codeId: data.codeId,
-      code: data.code,
-      expiresAt: data.expiresAt,
-      ttlMinutes: data.ttlMinutes || 10,
-      targetUser: data.targetUser,
+      success: true,
+      message: data.message || 'Senha alterada com sucesso.',
     };
   };
 
@@ -462,6 +403,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safeUser = stripSensitiveProfileFields(data.user as UserProfile);
       setProfile(safeUser);
       localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
+      if (data.token) {
+        localStorage.setItem(LOCAL_STORAGE_API_TOKEN_KEY, data.token);
+        setApiToken(data.token);
+      }
     }
   };
 
@@ -628,11 +573,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeEmpresaNome,
         isSimulatingRole: profile?.role === 'admin' && !!simulatedRole,
         loginWithCredentials,
-        changePassword,
-        getRecoveryChannelsStatus,
-        requestRecoveryChannel,
-        resetPasswordWithCode,
-        adminGenerateRecoveryCode,
+        changeOwnPassword,
+        adminChangeUserPassword,
         registerUser,
         updateUser,
         updateProfilePhoto,

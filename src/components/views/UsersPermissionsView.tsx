@@ -20,15 +20,12 @@ import {
   CreditCard,
   KeyRound,
   Camera,
-  Copy,
-  Clock,
 } from 'lucide-react';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
 import {
-  PasswordRecoveryGeneratedResult,
   UserProfile,
   UserRole,
 } from '../../types/sst';
@@ -40,13 +37,11 @@ export const UsersPermissionsView: React.FC = () => {
     profile,
     activeRole,
     setSimulatedRole,
-    resetSimulatedRole,
-    isSimulatingRole,
     isAdmin,
     registerUser,
     updateUser,
     deleteUser,
-    adminGenerateRecoveryCode,
+    adminChangeUserPassword,
   } = useAuth();
 
   const [activeTab, setActiveTab] = useState<'usuarios' | 'perfis' | 'auditoria'>('usuarios');
@@ -108,13 +103,12 @@ export const UsersPermissionsView: React.FC = () => {
   const [deletingUser, setDeletingUser] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  // Admin password recovery code generation modal state
-  const [recoveryTargetUser, setRecoveryTargetUser] = useState<UserProfile | null>(null);
-  const [generatingRecoveryCode, setGeneratingRecoveryCode] = useState(false);
-  const [generatedRecoveryResult, setGeneratedRecoveryResult] =
-    useState<PasswordRecoveryGeneratedResult | null>(null);
-  const [recoveryError, setRecoveryError] = useState<string | null>(null);
-  const [copiedRecoveryCode, setCopiedRecoveryCode] = useState(false);
+  // Admin direct password change modal state (no old password / code / email)
+  const [passwordTargetUser, setPasswordTargetUser] = useState<UserProfile | null>(null);
+  const [adminNewPass, setAdminNewPass] = useState('');
+  const [adminConfirmPass, setAdminConfirmPass] = useState('');
+  const [savingAdminPass, setSavingAdminPass] = useState(false);
+  const [adminPassError, setAdminPassError] = useState<string | null>(null);
 
   // Success toast/message
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -292,40 +286,47 @@ export const UsersPermissionsView: React.FC = () => {
     }
   };
 
-  const handleOpenRecoveryModal = (u: UserProfile) => {
-    setRecoveryTargetUser(u);
-    setGeneratedRecoveryResult(null);
-    setRecoveryError(null);
-    setCopiedRecoveryCode(false);
+  const handleOpenAdminPasswordModal = (u: UserProfile) => {
+    setPasswordTargetUser(u);
+    setAdminNewPass('');
+    setAdminConfirmPass('');
+    setAdminPassError(null);
   };
 
-  const handleGenerateRecoveryCode = async () => {
-    if (!recoveryTargetUser || !isAdmin) return;
+  const handleAdminChangePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passwordTargetUser || !isAdmin) return;
+
+    const cleanNew = adminNewPass.trim();
+    const cleanConfirm = adminConfirmPass.trim();
+
+    if (!cleanNew || !cleanConfirm) {
+      setAdminPassError('Preencha a nova senha e a confirmação.');
+      return;
+    }
+    if (cleanNew.length < 6) {
+      setAdminPassError('A nova senha deve conter no mínimo 6 caracteres.');
+      return;
+    }
+    if (cleanNew !== cleanConfirm) {
+      setAdminPassError('A confirmação da nova senha não confere.');
+      return;
+    }
+
     try {
-      setGeneratingRecoveryCode(true);
-      setRecoveryError(null);
-      setCopiedRecoveryCode(false);
-      const result = await adminGenerateRecoveryCode({
-        userId: recoveryTargetUser.id,
-        cpf: recoveryTargetUser.cpf || recoveryTargetUser.username,
-      });
-      setGeneratedRecoveryResult(result);
+      setSavingAdminPass(true);
+      setAdminPassError(null);
+      await adminChangeUserPassword(passwordTargetUser.id, cleanNew, cleanConfirm);
+      const updatedName = passwordTargetUser.nome;
+      setPasswordTargetUser(null);
+      setAdminNewPass('');
+      setAdminConfirmPass('');
+      showSuccess(`Senha de ${updatedName} alterada com sucesso.`);
     } catch (err: any) {
       console.error(err);
-      setRecoveryError(err?.message || 'Não foi possível concluir a geração do código.');
+      setAdminPassError(err?.message || 'Não foi possível atualizar a senha do usuário.');
     } finally {
-      setGeneratingRecoveryCode(false);
-    }
-  };
-
-  const handleCopyRecoveryCode = async () => {
-    if (!generatedRecoveryResult?.code) return;
-    try {
-      await navigator.clipboard.writeText(generatedRecoveryResult.code);
-      setCopiedRecoveryCode(true);
-      setTimeout(() => setCopiedRecoveryCode(false), 3000);
-    } catch {
-      // Clipboard fallback ignored cleanly
+      setSavingAdminPass(false);
     }
   };
 
@@ -573,7 +574,7 @@ export const UsersPermissionsView: React.FC = () => {
                                 </button>
                                 <button
                                   onClick={() =>
-                                    handleOpenRecoveryModal({
+                                    handleOpenAdminPasswordModal({
                                       id: liveMaster?.id || 'user-452.066.308-37',
                                       nome: masterNome,
                                       cpf: '452.066.308-37',
@@ -583,10 +584,10 @@ export const UsersPermissionsView: React.FC = () => {
                                     })
                                   }
                                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-950/40 text-amber-300 hover:bg-amber-900/60 border border-amber-500/30 text-[11px] font-medium transition-colors cursor-pointer"
-                                  title="Gerar Código Temporário de Recuperação"
+                                  title="Alterar senha do Administrador"
                                 >
                                   <KeyRound size={13} />
-                                  <span>Código</span>
+                                  <span>Alterar senha</span>
                                 </button>
                               </>
                             )}
@@ -669,12 +670,12 @@ export const UsersPermissionsView: React.FC = () => {
                                   <span>Editar</span>
                                 </button>
                                 <button
-                                  onClick={() => handleOpenRecoveryModal(u)}
+                                  onClick={() => handleOpenAdminPasswordModal(u)}
                                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-950/40 text-amber-300 hover:bg-amber-900/60 border border-amber-500/30 text-[11px] font-medium transition-colors cursor-pointer"
-                                  title="Gerar Código Temporário de Recuperação"
+                                  title="Alterar senha do Usuário"
                                 >
                                   <KeyRound size={13} />
-                                  <span>Código</span>
+                                  <span>Alterar senha</span>
                                 </button>
                                 <button
                                   onClick={() => {
@@ -1278,8 +1279,8 @@ export const UsersPermissionsView: React.FC = () => {
         </div>
       )}
 
-      {/* Modal: Gerar Código Temporário de Recuperação de Senha (Exclusivo Admin) */}
-      {recoveryTargetUser && (
+      {/* Modal: Alterar Senha de Usuário (Exclusivo Admin, sem senha anterior) */}
+      {passwordTargetUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-amber-500/40 p-6 shadow-2xl">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
@@ -1288,17 +1289,15 @@ export const UsersPermissionsView: React.FC = () => {
                   <KeyRound size={18} />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-white">
-                    Recuperação de Senha (Opção A – Admin)
-                  </h3>
+                  <h3 className="text-sm font-bold text-white">Alterar senha do usuário</h3>
                   <p className="text-[11px] text-slate-400">
-                    Código temporário de uso único • Validade 10 minutos
+                    Definição direta pelo Administrador de EHS
                   </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setRecoveryTargetUser(null)}
+                onClick={() => setPasswordTargetUser(null)}
                 className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X size={18} />
@@ -1308,102 +1307,82 @@ export const UsersPermissionsView: React.FC = () => {
             <div className="mt-4 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
               <div className="flex justify-between">
                 <span className="text-slate-400">Usuário:</span>
-                <span className="font-bold text-white">{recoveryTargetUser.nome}</span>
+                <span className="font-bold text-white">{passwordTargetUser.nome}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">CPF:</span>
                 <span className="font-mono text-blue-300">
-                  {formatCPF(recoveryTargetUser.cpf || recoveryTargetUser.username)}
+                  {formatCPF(passwordTargetUser.cpf || passwordTargetUser.username)}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Perfil:</span>
-                <span className="uppercase font-bold text-slate-200">{recoveryTargetUser.role}</span>
+                <span className="uppercase font-bold text-slate-200">{passwordTargetUser.role}</span>
               </div>
             </div>
 
-            {recoveryError && (
+            {adminPassError && (
               <div className="mt-3 p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-start gap-2">
                 <AlertTriangle size={15} className="shrink-0 mt-0.5 text-red-400" />
-                <span>{recoveryError}</span>
+                <span>{adminPassError}</span>
               </div>
             )}
 
-            {!generatedRecoveryResult ? (
-              <div className="mt-4 space-y-4">
-                <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 text-[11px] text-amber-200 leading-relaxed">
-                  O código gerado será exibido exclusivamente para você neste painel, terá validade de <strong>10 minutos</strong>, limite de tentativas e será invalidado após o uso. A operação ficará registrada na Trilha de Auditoria.
-                </div>
-
-                <div className="flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setRecoveryTargetUser(null)}
-                    className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 cursor-pointer"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="button"
-                    disabled={generatingRecoveryCode}
-                    onClick={handleGenerateRecoveryCode}
-                    className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs disabled:opacity-50 flex items-center gap-1.5 cursor-pointer shadow-md shadow-amber-600/20"
-                  >
-                    <KeyRound size={14} />
-                    <span>
-                      {generatingRecoveryCode
-                        ? 'Gerando código seguro...'
-                        : 'Gerar Código Temporário'}
-                    </span>
-                  </button>
+            <form onSubmit={handleAdminChangePasswordSubmit} className="mt-4 space-y-3.5 text-xs">
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">Nova senha</label>
+                <div className="relative">
+                  <KeyRound size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    autoComplete="new-password"
+                    value={adminNewPass}
+                    onChange={(e) => setAdminNewPass(e.target.value)}
+                    placeholder="Mínimo 6 caracteres"
+                    className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                  />
                 </div>
               </div>
-            ) : (
-              <div className="mt-4 space-y-4">
-                <div className="p-3 rounded-xl bg-emerald-950/50 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2 font-semibold">
-                  <CheckCircle size={16} className="shrink-0 text-emerald-400" />
-                  <span>Código gerado com sucesso.</span>
-                </div>
 
-                <div className="p-4 rounded-xl bg-slate-950 border border-blue-500/40 text-center space-y-2">
-                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-                    Código de Recuperação (Uso Único)
-                  </div>
-                  <div className="text-2xl font-mono font-extrabold tracking-[0.2em] text-white select-all">
-                    {generatedRecoveryResult.code}
-                  </div>
-                  <div className="flex items-center justify-center gap-1.5 text-[11px] text-amber-300">
-                    <Clock size={12} />
-                    <span>
-                      Expira em 10 minutos (até{' '}
-                      {new Date(generatedRecoveryResult.expiresAt).toLocaleTimeString('pt-BR')})
-                    </span>
-                  </div>
-                </div>
-
-                <p className="text-[11px] text-slate-300 leading-relaxed">
-                  Repasse este código ao usuário por um <strong className="text-white">canal seguro</strong> para que ele acesse <strong className="text-white">&quot;Trocar senha&quot;</strong> na tela inicial e defina a nova senha.
-                </p>
-
-                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={handleCopyRecoveryCode}
-                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Copy size={14} />
-                    <span>{copiedRecoveryCode ? 'Código Copiado!' : 'Copiar Código'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setRecoveryTargetUser(null)}
-                    className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 cursor-pointer"
-                  >
-                    Fechar
-                  </button>
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">
+                  Confirmar nova senha
+                </label>
+                <div className="relative">
+                  <KeyRound size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    autoComplete="new-password"
+                    value={adminConfirmPass}
+                    onChange={(e) => setAdminConfirmPass(e.target.value)}
+                    placeholder="Repita a nova senha"
+                    className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                  />
                 </div>
               </div>
-            )}
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setPasswordTargetUser(null)}
+                  className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingAdminPass}
+                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <KeyRound size={14} />
+                  <span>{savingAdminPass ? 'Salvando...' : 'Salvar nova senha'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
