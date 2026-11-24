@@ -15,6 +15,7 @@ import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
 import { EPIDelivery } from '../../types/sst';
 import { formatDateBR } from '../../utils/trafficLight';
+import { ProtectedDocumentButton } from '../common/ProtectedDocumentButton';
 
 export const EpiView: React.FC = () => {
   const { epiDeliveries, employees, companies, addEPIDelivery, deleteEPIDelivery } = useSST();
@@ -247,15 +248,13 @@ export const EpiView: React.FC = () => {
                     <td className="px-4 py-3.5 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         {ep.assinaturaUrl && (
-                          <a
-                            href={ep.assinaturaUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                          <ProtectedDocumentButton
+                            url={ep.assinaturaUrl}
+                            fileName={`Ficha EPI - ${ep.nomeEpi} - ${ep.colaboradorNome}`}
                             title="Comprovante / Assinatura"
-                          >
-                            <FileCheck size={15} />
-                          </a>
+                            className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                            icon={<FileCheck size={15} />}
+                          />
                         )}
 
                         {isAdmin && (

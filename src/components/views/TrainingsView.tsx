@@ -21,6 +21,7 @@ import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
 import { Training } from '../../types/sst';
 import { formatDateBR, getTrafficLightStatus } from '../../utils/trafficLight';
+import { ProtectedDocumentButton } from '../common/ProtectedDocumentButton';
 
 export const TrainingsView: React.FC = () => {
   const {
@@ -503,15 +504,13 @@ export const TrainingsView: React.FC = () => {
                       <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           {t.certificadoUrl && (
-                            <a
-                              href={t.certificadoUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                            <ProtectedDocumentButton
+                              url={t.certificadoUrl}
+                              fileName={t.certificadoNome || `${t.nomeTreinamento} - ${t.colaboradorNome}`}
                               title="Visualizar Certificado"
-                            >
-                              <FileText size={15} />
-                            </a>
+                              className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                              icon={<FileText size={15} />}
+                            />
                           )}
 
                           {isAdmin && t.situacao === 'pendente' && (

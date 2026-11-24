@@ -35,6 +35,7 @@ export interface Company {
   endereco: string;
   unidadeAtendimento: string;
   atividadeContratada: string;
+  atividadesAutorizadasIds?: string[]; // IDs de ActivityProfile vinculadas à empresa contratada
   dataInicioContrato: string;
   dataTerminoContrato: string;
   contrato_indeterminado?: boolean;
@@ -64,6 +65,7 @@ export interface Employee {
   cargo: string;
   setor: string;
   atividadeExecutada?: string;
+  atividadesHabilitadasIds?: string[]; // IDs de ActivityProfile vinculadas ao colaborador terceirizado
   unidadeAlocacao?: string;
   dataAdmissao?: string;
   dataIntegracao?: string;
@@ -100,6 +102,7 @@ export interface DocumentVersion {
 export interface DocumentSST {
   id: string;
   nomeDocumento: string; // Campo livre e inicialmente em branco
+  tipoDocumentoCanonico?: string; // Código canônico opcional alinhado ao SmartDocs e à Matriz de Atividades (ex.: PGR, PCMSO, PET, ART_ESCORAMENTO)
   categoria: DocumentCategory | string;
   empresaId: string;
   empresaNome: string;
@@ -126,6 +129,7 @@ export interface DocumentSST {
 export interface Training {
   id: string;
   nomeTreinamento: string; // Campo livre e inicialmente em branco
+  tipoDocumentoCanonico?: string; // Código canônico opcional alinhado ao SmartDocs e à Matriz de Atividades (ex.: NR-35, NR-33, NR-10, NR-18, NR-23)
   colaboradorId: string;
   colaboradorNome: string;
   empresaId: string;
@@ -161,6 +165,8 @@ export type ConclusaoAptidao = 'apto' | 'inapto' | 'apto_com_restricoes';
 export interface OccupationalExam {
   id: string;
   tipoExame: TipoExame;
+  tipoDocumentoCanonico?: string; // Código canônico opcional alinhado ao SmartDocs e à Matriz de Atividades (ex.: ASO)
+  aptidoesEspecificas?: string[]; // Aptidões específicas declaradas no ASO (ex.: trabalho_altura, espaco_confinado, eletricidade)
   colaboradorId: string;
   colaboradorNome: string;
   empresaId: string;
@@ -200,23 +206,114 @@ export interface EPIDelivery {
 }
 
 export type SafetyPermitType = 'APR' | 'PT' | 'LOTO';
-export type SafetyPermitStatus = 'elaboracao' | 'aprovado' | 'em_execucao' | 'encerrado' | 'cancelado';
+export type SafetyPermitStatus =
+  | 'elaboracao' // 1. Rascunho / Em Elaboração (retrocompatível)
+  | 'pendente_liberacao' // 2. Solicitação Enviada (retrocompatível)
+  | 'em_analise' // 3. Em Análise pelo Admin EHS
+  | 'pendente_documentacao' // 4. Pendente de Documentação
+  | 'pendente_correcao' // 5. Pendente de Correção
+  | 'aprovado' // 6. Aprovada (retrocompatível)
+  | 'liberado' // 7. Liberada para Execução
+  | 'em_execucao' // Execução em campo (legado retrocompatível)
+  | 'reprovado' // 8. Reprovada
+  | 'cancelado' // 9. Cancelada (retrocompatível)
+  | 'encerrado'; // 10. Encerrada (retrocompatível)
+
+export type OperationalControlAttachmentType = 'APR' | 'PT' | 'LOTO' | 'PET';
+
+export interface SafetyPermitOperationalControls {
+  exigeAPR: boolean;
+  exigePT: boolean;
+  exigeLOTO: boolean;
+  exigePET: boolean;
+}
+
+export interface SafetyPermitControlAttachment {
+  tipo: OperationalControlAttachmentType;
+  nomeArquivo: string;
+  url: string;
+  enviadoEm?: string;
+  enviadoPorNome?: string;
+}
+
+export interface SafetyPermitWorkflowHistoryEntry {
+  dataHora: string;
+  usuarioId: string;
+  usuarioNome: string;
+  usuarioRole: UserRole;
+  acao: string;
+  statusAnterior: SafetyPermitStatus | null;
+  statusNovo: SafetyPermitStatus;
+  justificativa?: string;
+}
+
+export interface SafetyPermitEmployeeSnapshot {
+  id: string;
+  nomeCompleto: string;
+  cargo: string;
+  cpf?: string;
+}
+
+export interface ActivityComplianceSnapshot {
+  avaliadoEm: string;
+  statusGeral: ActivityComplianceOverallStatus;
+  podeLiberar: boolean;
+  totalRequisitosAvaliados: number;
+  conformes: number;
+  alertasAVencer: number;
+  pendentesAprovacao: number;
+  bloqueiosObrigatorios: number;
+  motivosBloqueio: string[];
+}
 
 export interface SafetyPermit {
   id: string;
   tipo: SafetyPermitType;
   titulo: string;
+  descricaoServico?: string;
   empresaId: string;
   empresaNome: string;
   localTrabalho: string;
   dataInicio: string;
   dataFim: string;
   responsavelEmissao: string;
+  responsavelAtividade?: string;
   riscosIdentificados: string;
   medidasPreventivas: string;
+  observacoes?: string;
   status: SafetyPermitStatus;
   anexoUrl?: string;
+  controlesOperacionais?: SafetyPermitOperationalControls;
+  anexosControles?: SafetyPermitControlAttachment[];
+  // Campos opcionais para Gestão de Terceiros e Liberação de Atividades
+  atividadeIds?: string[];
+  atividadeNomes?: string[];
+  colaboradorIds?: string[];
+  colaboradoresSnapshot?: SafetyPermitEmployeeSnapshot[];
+  statusConformidade?: ActivityComplianceOverallStatus;
+  pendenciasObrigatoriasCount?: number;
+  pendenciasAlertaCount?: number;
+  snapshotValidacao?: ActivityComplianceSnapshot;
+  solicitadoPorId?: string;
+  solicitadoPorNome?: string;
+  solicitadoPorRole?: UserRole;
+  dataSolicitacao?: string;
+  aprovadoPorId?: string;
+  aprovadoPorNome?: string;
+  dataAprovacao?: string;
+  liberadoPorId?: string;
+  liberadoPorNome?: string;
+  liberadoPorRole?: 'admin';
+  dataLiberacao?: string;
+  motivoBloqueioOuRejeicao?: string;
+  motivoCorrecao?: string;
+  justificativaDecisao?: string;
+  versaoConcorrencia?: number;
+  complianceFingerprint?: string;
+  validadoServerSide?: boolean;
+  historicoWorkflow?: SafetyPermitWorkflowHistoryEntry[];
   createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Inspection {
@@ -580,4 +677,433 @@ export interface SmartDocRecord {
   updatedAt: string;
 }
 
+// ============================================================================
+// GESTÃO DE TERCEIROS — MATRIZ DE ATIVIDADES E DOCUMENTOS OBRIGATÓRIOS
+// ============================================================================
+
+export type ActivityRiskLevel = 'baixo' | 'medio' | 'alto' | 'critico';
+
+export type ActivityRequirementScope = 'empresa' | 'colaborador' | 'atividade_pt';
+
+export type ActivityRequirementSourceCollection =
+  | 'documents'
+  | 'trainings'
+  | 'exams'
+  | 'epiDeliveries'
+  | 'safetyPermits';
+
+export type ActivityRequirementComplianceStatus =
+  | 'CONFORME'
+  | 'A_VENCER'
+  | 'PENDENTE_APROVACAO'
+  | 'VENCIDO'
+  | 'REPROVADO'
+  | 'ASO_INAPTO'
+  | 'AUSENTE';
+
+export type ActivityComplianceOverallStatus = 'conforme' | 'atencao' | 'bloqueado';
+
+export interface ActivityProfile {
+  id: string;
+  codigo: string; // Ex.: TRABALHO_ALTURA, ESPACO_CONFINADO, SERVICOS_ELETRICOS, TRABALHO_QUENTE, ESCAVACAO
+  nome: string;
+  descricao: string;
+  nivelRisco: ActivityRiskLevel;
+  riscosAssociados: string[];
+  normasAplicaveis: string[];
+  exigeAPR: boolean;
+  exigePT: boolean;
+  exigeLOTO: boolean;
+  exigePET?: boolean;
+  templateOrigem?: string; // Identificador do template inicial (editável pelo Admin EHS)
+  ativo: boolean;
+  criadoPorId: string;
+  criadoPorNome?: string;
+  atualizadoPorId?: string;
+  atualizadoPorNome?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ActivityDocumentRequirement {
+  id: string;
+  activityId: string;
+  activityCodigo?: string;
+  nomeExibicao: string;
+  descricao?: string;
+  documentoCodigoCanonico: string; // Ex.: NR-35, NR-33, NR-10, NR-18, NR-23, ASO, PGR, PCMSO, APR, PT, PET, LOTO
+  palavrasChaveMatch: string[]; // Termos normalizados para reconhecimento de documentos legados em texto livre
+  escopo: ActivityRequirementScope;
+  origemColecao: ActivityRequirementSourceCollection;
+  funcoesAplicaveis: string[]; // Vazio = todos os terceirizados executantes; preenchido = filtra por cargo/função
+  exigeAptoASO?: boolean;
+  aptidaoEspecifica?: string; // Ex.: trabalho_altura, espaco_confinado, eletricidade
+  validadePadraoMeses?: number;
+  obrigatorioParaLiberacao: boolean;
+  baseLegal?: string;
+  ordemExibicao?: number;
+  templateOrigem?: string; // Editável pelo Admin EHS
+  ativo: boolean;
+  criadoPorId: string;
+  criadoPorNome?: string;
+  atualizadoPorId?: string;
+  atualizadoPorNome?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ActivityComplianceItemResult {
+  requirementId: string;
+  activityId: string;
+  activityIds?: string[];
+  activityNome: string;
+  nomeExibicao: string;
+  documentoCodigoCanonico: string;
+  escopo: ActivityRequirementScope;
+  origemColecao: ActivityRequirementSourceCollection;
+  obrigatorioParaLiberacao: boolean;
+  baseLegal?: string;
+  colaboradorId?: string;
+  colaboradorNome?: string;
+  colaboradorCargo?: string;
+  status: ActivityRequirementComplianceStatus;
+  bloqueante: boolean;
+  motivo: string;
+  matchedRecordId?: string;
+  matchedCollection?: ActivityRequirementSourceCollection | 'smartDocs';
+  matchedTitulo?: string;
+  dataEmissao?: string;
+  dataValidade?: string;
+  diasRestantes?: number | null;
+  pendenteSmartDocId?: string;
+}
+
+export interface EmployeeActivityComplianceSummary {
+  colaboradorId: string;
+  colaboradorNome: string;
+  cargo: string;
+  situacaoCadastral: SituacaoColaborador;
+  statusGeral: ActivityComplianceOverallStatus;
+  aptoParaExecucao: boolean;
+  itens: ActivityComplianceItemResult[];
+  totalObrigatorios: number;
+  conformesCount: number;
+  alertasCount: number;
+  bloqueiosCount: number;
+  pendentesAprovacaoCount: number;
+}
+
+export interface ActivityComplianceResult {
+  empresaId: string;
+  empresaNome: string;
+  contratoVigente: boolean;
+  contratoIndeterminado: boolean;
+  contratoMensagem: string;
+  atividadeIds: string[];
+  atividadeNomes: string[];
+  statusGeral: ActivityComplianceOverallStatus;
+  podeLiberar: boolean;
+  avaliadoEm: string;
+  itensEmpresa: ActivityComplianceItemResult[];
+  itensAtividade: ActivityComplianceItemResult[];
+  colaboradores: EmployeeActivityComplianceSummary[];
+  resumo: {
+    totalRequisitosAvaliados: number;
+    conformes: number;
+    alertasAVencer: number;
+    pendentesAprovacao: number;
+    bloqueiosObrigatorios: number;
+    ausentes: number;
+    vencidosOuReprovados: number;
+  };
+  motivosBloqueio: string[];
+}
+
+// ============================================================================
+// CENTRAL DE INTEGRAÇÃO DE TERCEIROS (NORMALIZADO / PREPARADO PARA DATAVERSE)
+// ============================================================================
+
+export type IntegrationType = 'INTEGRACAO_INICIAL' | 'ATUALIZACAO_DOCUMENTAL';
+
+export type IntegrationWorkflowStatus =
+  | 'RASCUNHO'
+  | 'PENDENTE_DOCUMENTACAO'
+  | 'EM_ENVIO'
+  | 'ENVIADA'
+  | 'AGUARDANDO_ANALISE'
+  | 'EM_ANALISE'
+  | 'PENDENTE_CORRECAO'
+  | 'REENVIADA'
+  | 'APROVADA'
+  | 'REPROVADA'
+  | 'ENCERRADA';
+
+export type IntegrationItemStatus =
+  | 'PENDENTE_ENVIO'
+  | 'ENVIADO'
+  | 'EM_ANALISE'
+  | 'APROVADO'
+  | 'REPROVADO'
+  | 'SUBSTITUIDO';
+
+export type IntegrationItemCategory = 'empresa' | 'colaborador' | 'atividade_critica';
+
+export type IntegrationOfficialCollection = 'documents' | 'trainings' | 'exams' | 'epiDeliveries';
+
+export type IntegrationDocumentGroupId =
+  | 'pessoais_legais'
+  | 'saude_ocupacional'
+  | 'seguranca_trabalho'
+  | 'vinculo_empregaticio';
+
+export type IntegrationFileStorageProvider =
+  | 'local_private'
+  | 'memory'
+  | 'firebase_storage'
+  | 'gcs'
+  | 'azure_blob'
+  | 'legacy_inline';
+
+export interface IntegrationSmartDocsSuggestion {
+  processadoEm: string;
+  smartDocId?: string;
+  tipoDocumentoSugerido?: string;
+  categoriaGrupoSugerida?: SmartDocCategoryGroup;
+  nomeDocumentoSugerido?: string;
+  nomeColaboradorSugerido?: string;
+  cpfSugerido?: string;
+  empresaSugerida?: string;
+  cnpjSugerido?: string;
+  dataEmissaoSugerida?: string;
+  dataValidadeSugerida?: string;
+  semValidadeSugerida?: boolean;
+  resultadoAptidaoSugerido?: ConclusaoAptidao | '';
+  confianca?: number;
+  qualidadeLeitura?: 'alta' | 'media' | 'baixa' | 'ilegivel';
+  documentoIlegivel?: boolean;
+  documentoIncompleto?: boolean;
+  alertas?: string[];
+  modeloUtilizado?: string;
+  erroLeitura?: string;
+}
+
+export interface IntegrationDocumentVersion {
+  versao: number;
+  arquivoId?: string;
+  storageProvider?: IntegrationFileStorageProvider;
+  storageKey?: string;
+  arquivoNome: string;
+  arquivoMimeType: 'application/pdf' | 'image/jpeg' | 'image/png';
+  arquivoTamanhoBytes: number;
+  arquivoHashSha256: string;
+  arquivoUrl?: string;
+  hasStoredFile?: boolean;
+  smartDocId?: string;
+  dataEmissao?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  numeroDocumento?: string;
+  conclusaoAso?: ConclusaoAptidao;
+  aptidoesEspecificas?: string[];
+  observacoes?: string;
+  enviadoPorId: string;
+  enviadoPorNome: string;
+  enviadoEm: string;
+  status: Exclude<IntegrationItemStatus, 'PENDENTE_ENVIO'>;
+  analisadoPorId?: string;
+  analisadoPorNome?: string;
+  analisadoEm?: string;
+  motivoReprovacao?: string;
+  smartDocsSugestao?: IntegrationSmartDocsSuggestion;
+}
+
+export interface IntegrationWorkflowHistoryEntry {
+  dataHora: string;
+  usuarioId: string;
+  usuarioNome: string;
+  usuarioRole: UserRole;
+  acao: string;
+  statusAnterior: IntegrationWorkflowStatus | IntegrationItemStatus | null;
+  statusNovo: IntegrationWorkflowStatus | IntegrationItemStatus;
+  itemId?: string;
+  detalhes: string;
+  justificativa?: string;
+}
+
+export interface IntegrationCompanyRequest {
+  razaoSocial: string;
+  nomeFantasia: string;
+  cnpj: string;
+  responsavelLegal: string;
+  responsavelSST: string;
+  telefone: string;
+  email: string;
+  endereco: string;
+  unidadeAtendimento: string;
+  atividadeContratada: string;
+  dataInicioContrato: string;
+  dataTerminoContrato: string;
+  contrato_indeterminado?: boolean;
+  aprovadoCompanyId?: string;
+}
+
+export interface IntegrationEmployeeCandidate {
+  candidateId: string;
+  colaboradorId?: string;
+  nomeCompleto: string;
+  cpf: string;
+  cargo: string;
+  setor: string;
+  telefone?: string;
+  email?: string;
+  atividadeExecutada?: string;
+  atividadesHabilitadasIds: string[];
+  jaExistiaNaBase: boolean;
+  aprovadoEmployeeId?: string;
+}
+
+export interface ContractorIntegrationItem {
+  id: string;
+  integrationId: string;
+  empresaId?: string;
+  empresaNome: string;
+  colaboradorId?: string;
+  colaboradorCandidateId?: string;
+  colaboradorNome?: string;
+  colaboradorCpf?: string;
+  colaboradorCargo?: string;
+  categoria: IntegrationItemCategory;
+  categoriaOrganizacional?: IntegrationDocumentGroupId;
+  requirementId?: string;
+  activityId?: string;
+  activityNome?: string;
+  documentoCodigoCanonico: string;
+  nomeExibicao: string;
+  origemColecao: IntegrationOfficialCollection;
+  obrigatorio: boolean;
+  exigeAptoASO?: boolean;
+  aptidaoEspecifica?: string;
+  baseLegal?: string;
+  status: IntegrationItemStatus;
+  versaoAtual: number;
+  versoes: IntegrationDocumentVersion[];
+  arquivoId?: string;
+  storageProvider?: IntegrationFileStorageProvider;
+  storageKey?: string;
+  hasStoredFile?: boolean;
+  arquivoNome?: string;
+  arquivoMimeType?: 'application/pdf' | 'image/jpeg' | 'image/png';
+  arquivoTamanhoBytes?: number;
+  arquivoHashSha256?: string;
+  arquivoUrl?: string;
+  smartDocId?: string;
+  dataEmissao?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  numeroDocumento?: string;
+  conclusaoAso?: ConclusaoAptidao;
+  aptidoesEspecificas?: string[];
+  observacoes?: string;
+  smartDocsSugestao?: IntegrationSmartDocsSuggestion;
+  analisadoPorId?: string;
+  analisadoPorNome?: string;
+  dataAnalise?: string;
+  motivoReprovacao?: string;
+  officialCollection?: IntegrationOfficialCollection;
+  officialRecordId?: string;
+  enviadoPorId?: string;
+  enviadoPorNome?: string;
+  dataEnvio?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContractorIntegrationSummaryCounts {
+  total: number;
+  obrigatorios: number;
+  pendentesEnvio: number;
+  enviados: number;
+  emAnalise: number;
+  aprovados: number;
+  reprovados: number;
+  substituidos: number;
+}
+
+export interface IntegrationPendingDocumentInfo {
+  itemId: string;
+  documentoCodigoCanonico: string;
+  nomeExibicao: string;
+  categoria: IntegrationItemCategory;
+  categoriaOrganizacional?: IntegrationDocumentGroupId;
+  colaboradorId?: string;
+  colaboradorCandidateId?: string;
+  colaboradorNome?: string;
+  status: IntegrationItemStatus;
+  motivo: string;
+  motivoReprovacao?: string;
+}
+
+export interface IntegrationCollaboratorReadiness {
+  colaboradorKey: string;
+  colaboradorId?: string;
+  colaboradorCandidateId?: string;
+  colaboradorNome: string;
+  completo: boolean;
+  totalObrigatorios: number;
+  obrigatoriosConfirmados: number;
+  obrigatoriosPendentes: number;
+  totalOpcionais: number;
+  opcionaisEnviados: number;
+  pendencias: IntegrationPendingDocumentInfo[];
+}
+
+export interface IntegrationSubmissionReadiness {
+  podeSubmeter: boolean;
+  totalItens: number;
+  totalObrigatorios: number;
+  obrigatoriosConfirmados: number;
+  obrigatoriosPendentes: number;
+  totalOpcionais: number;
+  opcionaisEnviados: number;
+  pendenciasObrigatorias: IntegrationPendingDocumentInfo[];
+  porColaborador?: IntegrationCollaboratorReadiness[];
+  resumoBloqueio?: string;
+}
+
+export interface ContractorIntegration {
+  id: string;
+  codigoProtocolo: string;
+  tipo: IntegrationType;
+  status: IntegrationWorkflowStatus;
+  empresaId?: string;
+  empresaNome: string;
+  empresaCnpj: string;
+  solicitacaoNovaEmpresa?: IntegrationCompanyRequest;
+  empresaPendenteCadastro?: boolean;
+  atividadeIds: string[];
+  atividadeNomes: string[];
+  colaboradorIds: string[];
+  colaboradoresCandidatos: IntegrationEmployeeCandidate[];
+  observacoes?: string;
+  solicitadoPorId: string;
+  solicitadoPorNome: string;
+  solicitadoPorEmail: string;
+  solicitadoPorRole: UserRole;
+  dataCriacao: string;
+  dataEnvio?: string;
+  dataUltimaAtualizacao: string;
+  analisadoPorId?: string;
+  analisadoPorNome?: string;
+  dataAnalise?: string;
+  aprovadoPorId?: string;
+  aprovadoPorNome?: string;
+  dataAprovacao?: string;
+  motivoReprovacaoOuDevolucao?: string;
+  itensPendentesCorrecao?: IntegrationPendingDocumentInfo[];
+  resumoItens: ContractorIntegrationSummaryCounts;
+  versaoConcorrencia: number;
+  historicoWorkflow: IntegrationWorkflowHistoryEntry[];
+  createdAt: string;
+  updatedAt: string;
+}
 

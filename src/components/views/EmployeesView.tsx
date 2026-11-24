@@ -13,11 +13,11 @@ import {
   Upload,
   User,
   X,
-  FileDown,
+  Layers,
 } from 'lucide-react';
 import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
-import { Employee, SituacaoColaborador } from '../../types/sst';
+import { Employee } from '../../types/sst';
 import { formatCPF, formatDateBR } from '../../utils/trafficLight';
 import { EmployeeDossierModal } from './EmployeeDossierModal';
 
@@ -34,7 +34,14 @@ const SAMPLE_AVATARS = [
 ];
 
 export const EmployeesView: React.FC = () => {
-  const { employees, companies, addEmployee, updateEmployee, deleteEmployee } = useSST();
+  const {
+    employees,
+    companies,
+    activityProfiles,
+    addEmployee,
+    updateEmployee,
+    deleteEmployee,
+  } = useSST();
   const { isAdmin, isSolicitante, activeEmpresaId } = useAuth();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -44,6 +51,15 @@ export const EmployeesView: React.FC = () => {
   const [selectedDossierEmployee, setSelectedDossierEmployee] = useState<Employee | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(
+    null
+  );
+  const [pendingDeleteEmployee, setPendingDeleteEmployee] = useState<Employee | null>(null);
+
+  const activeActivities = useMemo(
+    () => activityProfiles.filter((a) => a.ativo),
+    [activityProfiles]
+  );
 
   // Form states
   const [formData, setFormData] = useState<Omit<Employee, 'id'>>({
@@ -59,6 +75,7 @@ export const EmployeesView: React.FC = () => {
     cargo: '',
     setor: '',
     atividadeExecutada: '',
+    atividadesHabilitadasIds: [],
     unidadeAlocacao: '',
     dataAdmissao: '',
     dataIntegracao: '',
@@ -95,10 +112,11 @@ export const EmployeesView: React.FC = () => {
   }, [employees, isSolicitante, activeEmpresaId, companyFilter, statusFilter, searchTerm]);
 
   const handleOpenAddModal = () => {
+    setFeedback(null);
     setEditingEmployee(null);
     const defaultEmp = isSolicitante && activeEmpresaId
       ? companies.find((c) => c.id === activeEmpresaId)
-      : companies[0];
+      : companies.find((c) => c.situacao === 'ativa') || companies[0];
 
     setFormData({
       empresaId: defaultEmp?.id || '',
@@ -113,6 +131,7 @@ export const EmployeesView: React.FC = () => {
       cargo: '',
       setor: '',
       atividadeExecutada: '',
+      atividadesHabilitadasIds: [],
       unidadeAlocacao: '',
       dataAdmissao: '',
       dataIntegracao: '',
@@ -124,6 +143,7 @@ export const EmployeesView: React.FC = () => {
   };
 
   const handleOpenEditModal = (emp: Employee) => {
+    setFeedback(null);
     setEditingEmployee(emp);
     setFormData({
       empresaId: emp.empresaId,
@@ -138,6 +158,7 @@ export const EmployeesView: React.FC = () => {
       cargo: emp.cargo,
       setor: emp.setor,
       atividadeExecutada: emp.atividadeExecutada || '',
+      atividadesHabilitadasIds: [...(emp.atividadesHabilitadasIds || [])],
       unidadeAlocacao: emp.unidadeAlocacao || '',
       dataAdmissao: emp.dataAdmissao || '',
       dataIntegracao: emp.dataIntegracao || '',
@@ -148,11 +169,23 @@ export const EmployeesView: React.FC = () => {
     setIsModalOpen(true);
   };
 
+  const toggleEnabledActivity = (actId: string) => {
+    setFormData((prev) => {
+      const current = prev.atividadesHabilitadasIds || [];
+      return {
+        ...prev,
+        atividadesHabilitadasIds: current.includes(actId)
+          ? current.filter((id) => id !== actId)
+          : [...current, actId],
+      };
+    });
+  };
+
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       if (file.size > 2 * 1024 * 1024) {
-        alert('A fotografia deve ter até 2MB.');
+        setFeedback({ type: 'error', message: 'A fotografia deve ter no máximo 2MB.' });
         return;
       }
       const reader = new FileReader();
@@ -167,44 +200,74 @@ export const EmployeesView: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.nomeCompleto || !formData.cpf || !formData.empresaId || !formData.cargo) {
-      alert('Nome, CPF, Empresa e Cargo são obrigatórios.');
+    setFeedback(null);
+    if (!formData.nomeCompleto.trim() || !formData.cpf.trim() || !formData.empresaId || !formData.cargo.trim()) {
+      setFeedback({
+        type: 'error',
+        message: 'Nome completo, CPF, Empresa Contratada e Cargo/Função são obrigatórios.',
+      });
       return;
     }
 
     try {
       const targetEmpresaId = isSolicitante && activeEmpresaId ? activeEmpresaId : formData.empresaId;
       const selectedComp = companies.find((c) => c.id === targetEmpresaId);
-      const payload = {
+      if (!selectedComp) {
+        setFeedback({
+          type: 'error',
+          message: 'Vincule obrigatoriamente o colaborador terceirizado a uma empresa contratada cadastrada.',
+        });
+        return;
+      }
+
+      const payload: Omit<Employee, 'id'> = {
         ...formData,
         empresaId: targetEmpresaId,
-        empresaNome: selectedComp ? selectedComp.razaoSocial : formData.empresaNome,
+        empresaNome: selectedComp.razaoSocial,
+        atividadesHabilitadasIds: formData.atividadesHabilitadasIds || [],
       };
 
       if (editingEmployee) {
         await updateEmployee(editingEmployee.id, payload);
+        setFeedback({ type: 'success', message: `Colaborador "${payload.nomeCompleto}" atualizado.` });
       } else {
         await addEmployee(payload);
+        setFeedback({ type: 'success', message: `Colaborador terceirizado "${payload.nomeCompleto}" cadastrado.` });
       }
       setIsModalOpen(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Erro ao salvar os dados do colaborador.');
+      setFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao salvar os dados do colaborador.',
+      });
     }
   };
 
-  const handleDelete = async (id: string, name: string) => {
+  const confirmDeleteEmployee = async () => {
+    if (!pendingDeleteEmployee) return;
     if (!isAdmin) {
-      alert('Apenas o Administrador SST tem autorização para excluir colaboradores.');
+      setFeedback({
+        type: 'error',
+        message: 'Apenas o Administrador EHS tem autorização para excluir colaboradores.',
+      });
+      setPendingDeleteEmployee(null);
       return;
     }
-    if (confirm(`Confirma a exclusão do colaborador "${name}"?`)) {
-      try {
-        await deleteEmployee(id);
-      } catch (err) {
-        console.error(err);
-        alert('Erro ao excluir colaborador.');
-      }
+    try {
+      await deleteEmployee(pendingDeleteEmployee.id);
+      setFeedback({
+        type: 'success',
+        message: `Colaborador "${pendingDeleteEmployee.nomeCompleto}" removido.`,
+      });
+    } catch (err: any) {
+      console.error(err);
+      setFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao excluir colaborador.',
+      });
+    } finally {
+      setPendingDeleteEmployee(null);
     }
   };
 
@@ -215,10 +278,10 @@ export const EmployeesView: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Users className="text-blue-500" />
-            Cadastro Completo de Colaboradores
+            Colaboradores Terceirizados (Empresas Contratadas)
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Ficha individual, prontuário SST, exames ocupacionais, ASO, treinamentos e controle de EPI
+            Ficha individual de terceiros, vínculo obrigatório à contratada, atividades habilitadas, ASO, treinamentos e EPIs
           </p>
         </div>
 
@@ -228,10 +291,29 @@ export const EmployeesView: React.FC = () => {
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
           >
             <Plus size={16} />
-            + ADICIONAR COLABORADOR
+            Adicionar Terceirizado
           </button>
         )}
       </div>
+
+      {feedback && (
+        <div
+          className={`rounded-xl border px-4 py-3 text-xs flex items-center justify-between gap-3 ${
+            feedback.type === 'error'
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+          }`}
+        >
+          <span>{feedback.message}</span>
+          <button
+            type="button"
+            onClick={() => setFeedback(null)}
+            className="text-slate-400 hover:text-white"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* Search & Filters (Section 6 Requirement: nome, CPF, matrícula, empresa, cargo e setor) */}
       <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between bg-slate-900 p-4 rounded-xl border border-slate-800">
@@ -345,6 +427,26 @@ export const EmployeesView: React.FC = () => {
                     <span className="text-slate-400">Integração:</span>
                     <span className="text-slate-200">{formatDateBR(emp.dataIntegracao)}</span>
                   </div>
+                  {(emp.atividadesHabilitadasIds || []).length > 0 && (
+                    <div className="pt-1.5 flex flex-wrap gap-1">
+                      {(emp.atividadesHabilitadasIds || []).slice(0, 3).map((actId) => {
+                        const act = activityProfiles.find((a) => a.id === actId);
+                        return (
+                          <span
+                            key={actId}
+                            className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-blue-300"
+                          >
+                            {act ? act.codigo : actId}
+                          </span>
+                        );
+                      })}
+                      {(emp.atividadesHabilitadasIds || []).length > 3 && (
+                        <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-400">
+                          +{(emp.atividadesHabilitadasIds || []).length - 3}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -369,7 +471,7 @@ export const EmployeesView: React.FC = () => {
                         <Edit2 size={14} />
                       </button>
                       <button
-                        onClick={() => handleDelete(emp.id, emp.nomeCompleto)}
+                        onClick={() => setPendingDeleteEmployee(emp)}
                         className="p-1.5 text-slate-400 hover:text-red-400 rounded hover:bg-slate-800 transition-colors"
                         title="Excluir colaborador"
                       >
@@ -636,6 +738,51 @@ export const EmployeesView: React.FC = () => {
                 </div>
               </div>
 
+              {/* Atividades Críticas Habilitadas */}
+              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-white flex items-center gap-1.5">
+                    <Layers size={14} className="text-blue-400" />
+                    Atividades Críticas Habilitadas (Matriz EHS)
+                  </label>
+                  <span className="text-[11px] text-slate-400">
+                    {(formData.atividadesHabilitadasIds || []).length} selecionada(s)
+                  </span>
+                </div>
+                {activeActivities.length === 0 ? (
+                  <p className="text-[11px] text-slate-400">
+                    Nenhuma atividade crítica ativa cadastrada na Matriz EHS.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {activeActivities.map((act) => {
+                      const checked = (formData.atividadesHabilitadasIds || []).includes(act.id);
+                      return (
+                        <label
+                          key={act.id}
+                          className={`flex items-start gap-2 p-2 rounded-lg border cursor-pointer text-xs transition-colors ${
+                            checked
+                              ? 'bg-blue-500/15 border-blue-500/40 text-white'
+                              : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleEnabledActivity(act.id)}
+                            className="mt-0.5 rounded bg-slate-950 border-slate-700 text-blue-600"
+                          />
+                          <div className="min-w-0">
+                            <span className="font-semibold block truncate">{act.nome}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">{act.codigo}</span>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">Atividade Executada Detalhada</label>
                 <textarea
@@ -643,7 +790,7 @@ export const EmployeesView: React.FC = () => {
                   value={formData.atividadeExecutada}
                   onChange={(e) => setFormData({ ...formData, atividadeExecutada: e.target.value })}
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                  placeholder="Descreva as tarefas e operações executadas pelo colaborador..."
+                  placeholder="Descreva as tarefas e operações executadas pelo colaborador terceirizado..."
                 />
               </div>
 
@@ -651,7 +798,7 @@ export const EmployeesView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-750 text-xs text-slate-300"
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
                 >
                   Cancelar
                 </button>
@@ -663,6 +810,43 @@ export const EmployeesView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Inline Delete Confirmation Modal */}
+      {pendingDeleteEmployee && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-rose-500/15 text-rose-400">
+                <Trash2 size={18} />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Confirmar Exclusão</h3>
+                <p className="text-xs text-slate-400">Remover cadastro do colaborador terceirizado.</p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-300">
+              Confirma a exclusão de{' '}
+              <span className="font-semibold text-white">{pendingDeleteEmployee.nomeCompleto}</span>?
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteEmployee(null)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteEmployee}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white"
+              >
+                Excluir
+              </button>
+            </div>
           </div>
         </div>
       )}

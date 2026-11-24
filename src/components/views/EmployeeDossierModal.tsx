@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   X,
   FileDown,
   User,
   Building2,
-  Calendar,
   Briefcase,
   ShieldCheck,
   HeartPulse,
@@ -12,18 +11,15 @@ import {
   HardHat,
   FileText,
   History,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  XCircle,
-  Phone,
-  Mail,
-  MapPin,
+  Layers,
 } from 'lucide-react';
 import { Employee } from '../../types/sst';
 import { useSST } from '../../context/SSTContext';
 import { formatCPF, formatDateBR, getTrafficLightStatus } from '../../utils/trafficLight';
 import { generateIndividualEmployeePDF } from '../../utils/exportUtils';
+import { evaluateActivityCompliance } from '../../utils/activityComplianceEngine';
+import { ComplianceChecklistPanel } from './ComplianceChecklistPanel';
+import { ProtectedDocumentButton } from '../common/ProtectedDocumentButton';
 
 interface EmployeeDossierModalProps {
   employee: Employee;
@@ -34,11 +30,36 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
   employee,
   onClose,
 }) => {
-  const { companies, documents, trainings, exams, epiDeliveries, auditLogs } = useSST();
+  const {
+    companies,
+    employees,
+    documents,
+    trainings,
+    exams,
+    epiDeliveries,
+    safetyPermits,
+    activityProfiles,
+    activityDocumentRequirements,
+    smartDocs,
+    auditLogs,
+  } = useSST();
 
   const [activeTab, setActiveTab] = useState<
-    'visao_geral' | 'exames' | 'treinamentos' | 'documentos' | 'epi' | 'historico'
+    'visao_geral' | 'conformidade_atividade' | 'exames' | 'treinamentos' | 'documentos' | 'epi' | 'historico'
   >('visao_geral');
+
+  const activeActivities = useMemo(
+    () => activityProfiles.filter((a) => a.ativo),
+    [activityProfiles]
+  );
+
+  const [selectedActivityIds, setSelectedActivityIds] = useState<string[]>(() => {
+    const enabled = (employee.atividadesHabilitadasIds || []).filter((id) =>
+      activityProfiles.some((a) => a.id === id && a.ativo)
+    );
+    if (enabled.length > 0) return enabled;
+    return activeActivities.slice(0, 1).map((a) => a.id);
+  });
 
   // Filter linked items
   const linkedCompany = companies.find((c) => c.id === employee.empresaId);
@@ -49,6 +70,43 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
   const empLogs = auditLogs.filter(
     (l) => l.entidadeId === employee.id || l.detalhes.includes(employee.nomeCompleto)
   );
+
+  const employeeActivityCompliance = useMemo(() => {
+    if (!linkedCompany || selectedActivityIds.length === 0) return null;
+    return evaluateActivityCompliance({
+      company: linkedCompany,
+      atividadeIds: selectedActivityIds,
+      colaboradorIds: [employee.id],
+      activityProfiles,
+      requirements: activityDocumentRequirements,
+      employees,
+      documents,
+      trainings,
+      exams,
+      epiDeliveries,
+      safetyPermits,
+      smartDocs,
+    });
+  }, [
+    linkedCompany,
+    selectedActivityIds,
+    employee.id,
+    activityProfiles,
+    activityDocumentRequirements,
+    employees,
+    documents,
+    trainings,
+    exams,
+    epiDeliveries,
+    safetyPermits,
+    smartDocs,
+  ]);
+
+  const toggleEvalActivity = (actId: string) => {
+    setSelectedActivityIds((prev) =>
+      prev.includes(actId) ? prev.filter((id) => id !== actId) : [...prev, actId]
+    );
+  };
 
   // Farol counts for this employee
   let validCount = 0;
@@ -210,6 +268,16 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
             }`}
           >
             Visão Geral e Dados
+          </button>
+          <button
+            onClick={() => setActiveTab('conformidade_atividade')}
+            className={`py-3 px-3 font-medium border-b-2 transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+              activeTab === 'conformidade_atividade'
+                ? 'border-blue-500 text-blue-400 font-bold'
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            <Layers size={14} /> Conformidade por Atividade
           </button>
           <button
             onClick={() => setActiveTab('exames')}
@@ -381,6 +449,60 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
             </div>
           )}
 
+          {/* TAB: CONFORMIDADE POR ATIVIDADE (MOTOR OFICIAL) */}
+          {activeTab === 'conformidade_atividade' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-bold text-white text-xs">
+                      Simulação de Conformidade por Atividade Crítica
+                    </h4>
+                    <p className="text-[11px] text-slate-400">
+                      Verifica ASO com aptidões específicas, treinamentos, certificados, EPIs e regras por cargo ({employee.cargo}).
+                    </p>
+                  </div>
+                  <span className="text-[11px] text-slate-400">
+                    {selectedActivityIds.length} atividade(s) selecionada(s)
+                  </span>
+                </div>
+                {activeActivities.length === 0 ? (
+                  <p className="text-[11px] text-slate-400">
+                    Nenhuma atividade crítica ativa cadastrada na Matriz EHS.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {activeActivities.map((act) => {
+                      const active = selectedActivityIds.includes(act.id);
+                      return (
+                        <button
+                          key={act.id}
+                          type="button"
+                          onClick={() => toggleEvalActivity(act.id)}
+                          className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
+                            active
+                              ? 'bg-blue-600/20 border-blue-500/50 text-blue-200'
+                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                          }`}
+                        >
+                          {act.nome} ({act.codigo})
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <ComplianceChecklistPanel
+                compliance={employeeActivityCompliance}
+                activityProfiles={activityProfiles}
+                sourceLabel="preview"
+                defaultTab="colaborador"
+                compact
+              />
+            </div>
+          )}
+
           {/* TAB 2: EXAMES E ASO */}
           {activeTab === 'exames' && (
             <div className="space-y-3">
@@ -418,6 +540,18 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                           Realização: {formatDateBR(ex.dataRealizacao)} | Validade:{' '}
                           {ex.semValidade ? 'Sem Vencimento' : formatDateBR(ex.dataValidade)}
                         </p>
+                        {(ex.aptidoesEspecificas || []).length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-1">
+                            {(ex.aptidoesEspecificas || []).map((apt) => (
+                              <span
+                                key={apt}
+                                className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-[10px] font-semibold"
+                              >
+                                Aptidão: {apt.replace(/_/g, ' ')}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3">
@@ -425,14 +559,13 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                           {farol.label}
                         </span>
                         {ex.anexoUrl && (
-                          <a
-                            href={ex.anexoUrl}
-                            target="_blank"
-                            rel="noreferrer"
+                          <ProtectedDocumentButton
+                            url={ex.anexoUrl}
+                            fileName={ex.anexoNome || `${ex.tipoExame} - ${employee.nomeCompleto}`}
+                            title="Visualizar ASO"
+                            label="Ver ASO"
                             className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-medium"
-                          >
-                            Ver ASO
-                          </a>
+                          />
                         )}
                       </div>
                     </div>
@@ -477,14 +610,13 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                           {farol.label}
                         </span>
                         {tr.certificadoUrl && (
-                          <a
-                            href={tr.certificadoUrl}
-                            target="_blank"
-                            rel="noreferrer"
+                          <ProtectedDocumentButton
+                            url={tr.certificadoUrl}
+                            fileName={tr.certificadoNome || `${tr.nomeTreinamento} - ${employee.nomeCompleto}`}
+                            title="Visualizar Certificado"
+                            label="Certificado"
                             className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-medium"
-                          >
-                            Certificado
-                          </a>
+                          />
                         )}
                       </div>
                     </div>
@@ -536,14 +668,13 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                           {farol.label}
                         </span>
                         {doc.arquivoUrl && (
-                          <a
-                            href={doc.arquivoUrl}
-                            target="_blank"
-                            rel="noreferrer"
+                          <ProtectedDocumentButton
+                            url={doc.arquivoUrl}
+                            fileName={doc.arquivoNome || doc.nomeDocumento}
+                            title={`Abrir ${doc.nomeDocumento}`}
+                            label="Abrir Documento"
                             className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-medium"
-                          >
-                            Abrir Documento
-                          </a>
+                          />
                         )}
                       </div>
                     </div>
@@ -582,9 +713,20 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                       </p>
                     </div>
 
-                    <span className="px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-semibold">
-                      Entregue
-                    </span>
+                    <div className="flex items-center gap-2.5">
+                      <span className="px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-semibold">
+                        Entregue
+                      </span>
+                      {epi.assinaturaUrl && (
+                        <ProtectedDocumentButton
+                          url={epi.assinaturaUrl}
+                          fileName={`Ficha EPI - ${epi.nomeEpi} - ${employee.nomeCompleto}`}
+                          title="Visualizar Ficha de EPI"
+                          label="Ver Ficha"
+                          className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-medium"
+                        />
+                      )}
+                    </div>
                   </div>
                 ))
               )}

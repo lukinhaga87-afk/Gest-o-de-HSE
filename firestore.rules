@@ -17,6 +17,190 @@ service cloud.firestore {
       return id == 'user-452.066.308-37' || id == 'user-543.066.308-37';
     }
 
+    // Path ID hardening guard
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_.\\-]+$');
+    }
+
+    // Verified Admin EHS profile lookup against userProfiles collection
+    function isAdminProfileId(userId) {
+      return userId is string
+        && userId.size() > 0
+        && userId.size() <= 128
+        && (
+          isMasterAdminId(userId)
+          || (
+            exists(/databases/$(database)/documents/userProfiles/$(userId))
+            && get(/databases/$(database)/documents/userProfiles/$(userId)).data.role == 'admin'
+          )
+        );
+    }
+
+    // Verified Solicitante profile lookup against userProfiles collection
+    function isSolicitanteProfileId(userId) {
+      return userId is string
+        && userId.size() > 0
+        && userId.size() <= 128
+        && exists(/databases/$(database)/documents/userProfiles/$(userId))
+        && get(/databases/$(database)/documents/userProfiles/$(userId)).data.role == 'solicitante';
+    }
+
+    // Bounded array guard for string lists
+    function isValidStringList(val, maxLen) {
+      return val is list
+        && val.size() <= maxLen
+        && (val.size() == 0 || val[0] is string);
+    }
+
+    // Validation blueprint: ActivityProfile (Gestão de Terceiros)
+    function isValidActivityProfile(data) {
+      return data.keys().hasAll([
+          'codigo',
+          'nome',
+          'nivelRisco',
+          'riscosAssociados',
+          'normasAplicaveis',
+          'exigeAPR',
+          'exigePT',
+          'exigeLOTO',
+          'ativo',
+          'criadoPorId'
+        ])
+        && data.keys().hasOnly([
+          'codigo',
+          'nome',
+          'descricao',
+          'nivelRisco',
+          'riscosAssociados',
+          'normasAplicaveis',
+          'exigeAPR',
+          'exigePT',
+          'exigeLOTO',
+          'exigePET',
+          'templateOrigem',
+          'ativo',
+          'criadoPorId',
+          'criadoPorNome',
+          'atualizadoPorId',
+          'atualizadoPorNome',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.codigo is string && data.codigo.size() >= 2 && data.codigo.size() <= 80
+        && data.nome is string && data.nome.size() >= 2 && data.nome.size() <= 180
+        && (!('descricao' in data) || (data.descricao is string && data.descricao.size() <= 1000))
+        && data.nivelRisco in ['baixo', 'medio', 'alto', 'critico']
+        && isValidStringList(data.riscosAssociados, 50)
+        && isValidStringList(data.normasAplicaveis, 30)
+        && data.exigeAPR is bool
+        && data.exigePT is bool
+        && data.exigeLOTO is bool
+        && (!('exigePET' in data) || data.exigePET is bool)
+        && (!('templateOrigem' in data) || (data.templateOrigem is string && data.templateOrigem.size() <= 100))
+        && data.ativo is bool
+        && data.criadoPorId is string && data.criadoPorId.size() >= 1 && data.criadoPorId.size() <= 128
+        && (!('criadoPorNome' in data) || (data.criadoPorNome is string && data.criadoPorNome.size() <= 150))
+        && (!('atualizadoPorId' in data) || (data.atualizadoPorId is string && data.atualizadoPorId.size() <= 128))
+        && (!('atualizadoPorNome' in data) || (data.atualizadoPorNome is string && data.atualizadoPorNome.size() <= 150))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 40))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 40));
+    }
+
+    // Validation blueprint: ActivityDocumentRequirement (Matriz Obrigatória por Atividade)
+    function isValidActivityDocumentRequirement(data) {
+      return data.keys().hasAll([
+          'activityId',
+          'nomeExibicao',
+          'documentoCodigoCanonico',
+          'palavrasChaveMatch',
+          'escopo',
+          'origemColecao',
+          'funcoesAplicaveis',
+          'obrigatorioParaLiberacao',
+          'ativo',
+          'criadoPorId'
+        ])
+        && data.keys().hasOnly([
+          'activityId',
+          'activityCodigo',
+          'nomeExibicao',
+          'descricao',
+          'documentoCodigoCanonico',
+          'palavrasChaveMatch',
+          'escopo',
+          'origemColecao',
+          'funcoesAplicaveis',
+          'exigeAptoASO',
+          'aptidaoEspecifica',
+          'validadePadraoMeses',
+          'obrigatorioParaLiberacao',
+          'baseLegal',
+          'ordemExibicao',
+          'templateOrigem',
+          'ativo',
+          'criadoPorId',
+          'criadoPorNome',
+          'atualizadoPorId',
+          'atualizadoPorNome',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.activityId is string && data.activityId.size() >= 1 && data.activityId.size() <= 128
+        && (!('activityCodigo' in data) || (data.activityCodigo is string && data.activityCodigo.size() <= 80))
+        && data.nomeExibicao is string && data.nomeExibicao.size() >= 2 && data.nomeExibicao.size() <= 200
+        && (!('descricao' in data) || (data.descricao is string && data.descricao.size() <= 1000))
+        && data.documentoCodigoCanonico is string && data.documentoCodigoCanonico.size() >= 2 && data.documentoCodigoCanonico.size() <= 100
+        && isValidStringList(data.palavrasChaveMatch, 40)
+        && data.escopo in ['empresa', 'colaborador', 'atividade_pt']
+        && data.origemColecao in ['documents', 'trainings', 'exams', 'epiDeliveries', 'safetyPermits']
+        && isValidStringList(data.funcoesAplicaveis, 50)
+        && (!('exigeAptoASO' in data) || data.exigeAptoASO is bool)
+        && (!('aptidaoEspecifica' in data) || (data.aptidaoEspecifica is string && data.aptidaoEspecifica.size() <= 100))
+        && (!('validadePadraoMeses' in data) || (data.validadePadraoMeses is number && data.validadePadraoMeses >= 0 && data.validadePadraoMeses <= 240))
+        && data.obrigatorioParaLiberacao is bool
+        && (!('baseLegal' in data) || (data.baseLegal is string && data.baseLegal.size() <= 200))
+        && (!('ordemExibicao' in data) || (data.ordemExibicao is number && data.ordemExibicao >= 0 && data.ordemExibicao <= 999))
+        && (!('templateOrigem' in data) || (data.templateOrigem is string && data.templateOrigem.size() <= 100))
+        && data.ativo is bool
+        && data.criadoPorId is string && data.criadoPorId.size() >= 1 && data.criadoPorId.size() <= 128
+        && (!('criadoPorNome' in data) || (data.criadoPorNome is string && data.criadoPorNome.size() <= 150))
+        && (!('atualizadoPorId' in data) || (data.atualizadoPorId is string && data.atualizadoPorId.size() <= 128))
+        && (!('atualizadoPorNome' in data) || (data.atualizadoPorNome is string && data.atualizadoPorNome.size() <= 150))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 40))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 40));
+    }
+
+    // Anti-self-approval and compliance gate for SafetyPermits
+    function isValidSafetyPermitApproval(data, isCreate) {
+      let isApprovalStatus = data.status in ['aprovado', 'liberado', 'em_execucao'];
+      let hasAprovador = ('aprovadoPorId' in data) && data.aprovadoPorId is string && data.aprovadoPorId.size() > 0;
+      let hasLiberador = ('liberadoPorId' in data) && data.liberadoPorId is string && data.liberadoPorId.size() > 0;
+      let hasSolicitanteActor =
+        (('solicitadoPorRole' in data) && data.solicitadoPorRole == 'solicitante')
+        || (('solicitadoPorId' in data) && isSolicitanteProfileId(data.solicitadoPorId));
+      let hasStructuredActivities = ('atividadeIds' in data) && data.atividadeIds is list && data.atividadeIds.size() > 0;
+      let aprovadorIsValidAdmin = !hasAprovador || isAdminProfileId(data.aprovadoPorId);
+      let liberadorIsValidAdmin = !hasLiberador || isAdminProfileId(data.liberadoPorId);
+      let hasRequiredAdminDecision =
+        (data.status == 'aprovado' && ((hasAprovador && isAdminProfileId(data.aprovadoPorId)) || (hasLiberador && isAdminProfileId(data.liberadoPorId))))
+        || ((data.status in ['liberado', 'em_execucao']) && hasLiberador && isAdminProfileId(data.liberadoPorId));
+      let notSelfApprovedBySolicitante = !hasSolicitanteActor || !isApprovalStatus || (
+        !isCreate
+        && hasRequiredAdminDecision
+        && (!hasAprovador || !('solicitadoPorId' in data) || data.aprovadoPorId != data.solicitadoPorId)
+        && (!hasLiberador || !('solicitadoPorId' in data) || data.liberadoPorId != data.solicitadoPorId)
+      );
+      let structuredActivityRequiresAdminAndCompliance = !hasStructuredActivities || !isApprovalStatus || (
+        hasRequiredAdminDecision
+        && (!('statusConformidade' in data) || data.statusConformidade != 'bloqueado')
+        && (!('pendenciasObrigatoriasCount' in data) || data.pendenciasObrigatoriasCount == 0)
+      );
+      return aprovadorIsValidAdmin
+        && liberadorIsValidAdmin
+        && notSelfApprovedBySolicitante
+        && structuredActivityRequiresAdminAndCompliance;
+    }
+
     // User Profiles Collection
     match /userProfiles/{userId} {
       // Allow reading user profiles for authentication and platform operations
@@ -46,11 +230,12 @@ service cloud.firestore {
                             && request.resource.data.razaoSocial is string && request.resource.data.razaoSocial.size() <= 250
                             && request.resource.data.cnpj is string && request.resource.data.cnpj.size() <= 30
                             && request.resource.data.situacao in ['ativa', 'inativa']
-                            && (!('contrato_indeterminado' in request.resource.data) || request.resource.data.contrato_indeterminado is bool);
+                            && (!('contrato_indeterminado' in request.resource.data) || request.resource.data.contrato_indeterminado is bool)
+                            && (!('atividadesAutorizadasIds' in request.resource.data) || isValidStringList(request.resource.data.atividadesAutorizadasIds, 50));
       allow delete: if true;
     }
 
-    // Employees Collection
+    // Employees Collection (Colaboradores Terceirizados)
     match /employees/{employeeId} {
       allow read: if true;
       allow create, update: if request.resource.data.keys().hasAll(['nomeCompleto', 'cpf', 'empresaId', 'cargo', 'situacaoCadastral'])
@@ -58,7 +243,8 @@ service cloud.firestore {
                             && request.resource.data.cpf is string && request.resource.data.cpf.size() <= 25
                             && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150
                             && request.resource.data.cargo is string && request.resource.data.cargo.size() <= 150
-                            && request.resource.data.situacaoCadastral in ['ativo', 'afastado', 'ferias', 'demitido'];
+                            && request.resource.data.situacaoCadastral in ['ativo', 'afastado', 'ferias', 'demitido']
+                            && (!('atividadesHabilitadasIds' in request.resource.data) || isValidStringList(request.resource.data.atividadesHabilitadasIds, 50));
       allow delete: if true;
     }
 
@@ -69,7 +255,8 @@ service cloud.firestore {
                             && request.resource.data.nomeDocumento is string && request.resource.data.nomeDocumento.size() <= 250
                             && request.resource.data.categoria is string && request.resource.data.categoria.size() <= 150
                             && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150
-                            && request.resource.data.situacao in ['pendente', 'aprovado', 'reprovado', 'vencido'];
+                            && request.resource.data.situacao in ['pendente', 'aprovado', 'reprovado', 'vencido']
+                            && (!('tipoDocumentoCanonico' in request.resource.data) || (request.resource.data.tipoDocumentoCanonico is string && request.resource.data.tipoDocumentoCanonico.size() <= 100));
       allow delete: if true;
     }
 
@@ -79,7 +266,8 @@ service cloud.firestore {
       allow create, update: if request.resource.data.keys().hasAll(['nomeTreinamento', 'colaboradorId', 'empresaId', 'dataRealizacao'])
                             && request.resource.data.nomeTreinamento is string && request.resource.data.nomeTreinamento.size() <= 250
                             && request.resource.data.colaboradorId is string && request.resource.data.colaboradorId.size() <= 150
-                            && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150;
+                            && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150
+                            && (!('tipoDocumentoCanonico' in request.resource.data) || (request.resource.data.tipoDocumentoCanonico is string && request.resource.data.tipoDocumentoCanonico.size() <= 100));
       allow delete: if true;
     }
 
@@ -90,7 +278,9 @@ service cloud.firestore {
                             && request.resource.data.tipoExame is string && request.resource.data.tipoExame.size() <= 150
                             && request.resource.data.colaboradorId is string && request.resource.data.colaboradorId.size() <= 150
                             && request.resource.data.empresaId is string && request.resource.data.empresaId.size() <= 150
-                            && request.resource.data.conclusao in ['apto', 'inapto', 'apto_com_restricoes'];
+                            && request.resource.data.conclusao in ['apto', 'inapto', 'apto_com_restricoes']
+                            && (!('tipoDocumentoCanonico' in request.resource.data) || (request.resource.data.tipoDocumentoCanonico is string && request.resource.data.tipoDocumentoCanonico.size() <= 100))
+                            && (!('aptidoesEspecificas' in request.resource.data) || isValidStringList(request.resource.data.aptidoesEspecificas, 30));
       allow delete: if true;
     }
 
@@ -103,13 +293,33 @@ service cloud.firestore {
       allow delete: if true;
     }
 
-    // Safety Permits (APR, PT, LOTO)
+    // Safety Permits (APR, PT, LOTO & Liberação de Atividades de Terceiros)
     match /safetyPermits/{permitId} {
       allow read: if true;
-      allow create, update: if request.resource.data.keys().hasAll(['tipo', 'titulo', 'empresaId', 'localTrabalho', 'status'])
-                            && request.resource.data.tipo in ['APR', 'PT', 'LOTO']
-                            && request.resource.data.titulo is string && request.resource.data.titulo.size() <= 250;
-      allow delete: if true;
+      allow create: if request.resource.data.keys().hasAll(['tipo', 'titulo', 'empresaId', 'localTrabalho', 'status'])
+                    && request.resource.data.tipo in ['APR', 'PT', 'LOTO']
+                    && request.resource.data.titulo is string && request.resource.data.titulo.size() <= 250
+                    && request.resource.data.status in ['elaboracao', 'pendente_liberacao', 'em_analise', 'pendente_documentacao', 'pendente_correcao', 'aprovado', 'liberado', 'em_execucao', 'reprovado', 'cancelado', 'encerrado']
+                    && (!('atividadeIds' in request.resource.data) || isValidStringList(request.resource.data.atividadeIds, 20))
+                    && (!('colaboradorIds' in request.resource.data) || isValidStringList(request.resource.data.colaboradorIds, 100))
+                    && (!('statusConformidade' in request.resource.data) || request.resource.data.statusConformidade in ['conforme', 'atencao', 'bloqueado'])
+                    && (!('pendenciasObrigatoriasCount' in request.resource.data) || (request.resource.data.pendenciasObrigatoriasCount is number && request.resource.data.pendenciasObrigatoriasCount >= 0))
+                    && (!('solicitadoPorRole' in request.resource.data) || request.resource.data.solicitadoPorRole in ['admin', 'solicitante', 'auditor'])
+                    && (!('liberadoPorRole' in request.resource.data) || request.resource.data.liberadoPorRole == 'admin')
+                    && isValidSafetyPermitApproval(request.resource.data, true);
+      allow update: if request.resource.data.keys().hasAll(['tipo', 'titulo', 'empresaId', 'localTrabalho', 'status'])
+                    && request.resource.data.tipo in ['APR', 'PT', 'LOTO']
+                    && request.resource.data.titulo is string && request.resource.data.titulo.size() <= 250
+                    && request.resource.data.status in ['elaboracao', 'pendente_liberacao', 'em_analise', 'pendente_documentacao', 'pendente_correcao', 'aprovado', 'liberado', 'em_execucao', 'reprovado', 'cancelado', 'encerrado']
+                    && (!('atividadeIds' in request.resource.data) || isValidStringList(request.resource.data.atividadeIds, 20))
+                    && (!('colaboradorIds' in request.resource.data) || isValidStringList(request.resource.data.colaboradorIds, 100))
+                    && (!('statusConformidade' in request.resource.data) || request.resource.data.statusConformidade in ['conforme', 'atencao', 'bloqueado'])
+                    && (!('pendenciasObrigatoriasCount' in request.resource.data) || (request.resource.data.pendenciasObrigatoriasCount is number && request.resource.data.pendenciasObrigatoriasCount >= 0))
+                    && (!('solicitadoPorRole' in request.resource.data) || request.resource.data.solicitadoPorRole in ['admin', 'solicitante', 'auditor'])
+                    && (!('liberadoPorRole' in request.resource.data) || request.resource.data.liberadoPorRole == 'admin')
+                    && isValidSafetyPermitApproval(request.resource.data, false);
+      // Preserva integridade histórica de auditoria: utilize cancelamento oficial via workflow
+      allow delete: if false;
     }
 
     // Action Plans (5W2H)
@@ -227,5 +437,119 @@ service cloud.firestore {
                             && request.resource.data.windowStart is number;
       allow delete: if true;
     }
+
+    // Gestão de Terceiros — Catálogo Configurável de Atividades Críticas (Escrita exclusiva Admin EHS)
+    match /activityProfiles/{activityId} {
+      allow read: if true;
+      allow create: if isValidId(activityId)
+                    && isValidActivityProfile(request.resource.data)
+                    && isAdminProfileId(request.resource.data.criadoPorId);
+      allow update: if isValidId(activityId)
+                    && isValidActivityProfile(request.resource.data)
+                    && request.resource.data.criadoPorId == resource.data.criadoPorId
+                    && ('atualizadoPorId' in request.resource.data)
+                    && isAdminProfileId(request.resource.data.atualizadoPorId);
+      // Preserva integridade histórica de auditoria: Admin EHS desativa via ativo=false
+      allow delete: if false;
+    }
+
+    // Gestão de Terceiros — Matriz Configurável de Documentos Obrigatórios por Atividade (Escrita exclusiva Admin EHS)
+    match /activityDocumentRequirements/{requirementId} {
+      allow read: if true;
+      allow create: if isValidId(requirementId)
+                    && isValidActivityDocumentRequirement(request.resource.data)
+                    && isAdminProfileId(request.resource.data.criadoPorId);
+      allow update: if isValidId(requirementId)
+                    && isValidActivityDocumentRequirement(request.resource.data)
+                    && request.resource.data.criadoPorId == resource.data.criadoPorId
+                    && ('atualizadoPorId' in request.resource.data)
+                    && isAdminProfileId(request.resource.data.atualizadoPorId);
+      // Preserva integridade histórica de auditoria: Admin EHS desativa via ativo=false
+      allow delete: if false;
+    }
+
+    // Central de Integração de Terceiros — Helpers de validação de domínio e contrato (referência canônica)
+    function isValidIntegrationStatus(status) {
+      return status in [
+        'RASCUNHO',
+        'PENDENTE_DOCUMENTACAO',
+        'EM_ENVIO',
+        'ENVIADA',
+        'AGUARDANDO_ANALISE',
+        'EM_ANALISE',
+        'PENDENTE_CORRECAO',
+        'REENVIADA',
+        'APROVADA',
+        'REPROVADA',
+        'ENCERRADA'
+      ];
+    }
+
+    function isValidContractorIntegration(data) {
+      return data.keys().hasAll([
+          'codigoProtocolo',
+          'tipo',
+          'status',
+          'empresaNome',
+          'empresaCnpj',
+          'solicitadoPorId',
+          'solicitadoPorRole',
+          'versaoConcorrencia'
+        ])
+        && data.tipo in ['INTEGRACAO_INICIAL', 'ATUALIZACAO_DOCUMENTAL']
+        && isValidIntegrationStatus(data.status)
+        && data.solicitadoPorRole in ['admin', 'solicitante', 'auditor']
+        && data.versaoConcorrencia is number
+        && data.versaoConcorrencia >= 1;
+    }
+
+    function isValidContractorIntegrationItem(data) {
+      return data.keys().hasAll([
+          'integrationId',
+          'empresaNome',
+          'categoria',
+          'documentoCodigoCanonico',
+          'nomeExibicao',
+          'origemColecao',
+          'obrigatorio',
+          'status',
+          'versaoAtual'
+        ])
+        && data.categoria in ['empresa', 'colaborador', 'atividade_critica']
+        && data.origemColecao in ['documents', 'trainings', 'exams', 'epiDeliveries']
+        && data.status in [
+          'PENDENTE_ENVIO',
+          'ENVIADO',
+          'EM_ANALISE',
+          'APROVADO',
+          'REPROVADO',
+          'SUBSTITUIDO'
+        ]
+        && data.obrigatorio is bool
+        && data.versaoAtual is number
+        && (!('arquivoUrl' in data) || !(data.arquivoUrl is string) || !data.arquivoUrl.matches('^data:.*'));
+    }
+
+    // Central de Integração de Terceiros — Processo de Integração / Atualização Documental
+    // Acesso direto pelo Client Web SDK BLOQUEADO (zero leitura pública / zero escrita direta).
+    // Toda leitura e escrita ocorre exclusivamente via backend autenticado (/api/integrations/*) com Firebase Admin SDK,
+    // que impõe JWT, RBAC, isolamento por empresa e ocultação de rascunhos/PENDENTE_DOCUMENTACAO para o Admin EHS.
+    match /contractorIntegrations/{integrationId} {
+      allow read: if false;
+      allow create: if false && isValidId(integrationId) && isValidContractorIntegration(request.resource.data);
+      allow update: if false && isValidId(integrationId) && isValidContractorIntegration(request.resource.data);
+      allow delete: if false;
+    }
+
+    // Central de Integração de Terceiros — Itens Documentais Versionados
+    // Acesso direto pelo Client Web SDK BLOQUEADO (zero leitura pública / zero escrita direta / zero Base64 no Firestore).
+    // Toda leitura e escrita ocorre exclusivamente via backend autenticado (/api/integrations/*) com Firebase Admin SDK.
+    match /contractorIntegrationItems/{itemId} {
+      allow read: if false;
+      allow create: if false && isValidId(itemId) && isValidContractorIntegrationItem(request.resource.data);
+      allow update: if false && isValidId(itemId) && isValidContractorIntegrationItem(request.resource.data);
+      allow delete: if false;
+    }
   }
 }
+

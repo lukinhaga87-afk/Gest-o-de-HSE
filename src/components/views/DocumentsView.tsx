@@ -22,6 +22,7 @@ import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
 import { DocumentSST, DocumentCategory, DocumentStatus } from '../../types/sst';
 import { formatDateBR, getTrafficLightStatus } from '../../utils/trafficLight';
+import { ProtectedDocumentButton } from '../common/ProtectedDocumentButton';
 
 const CATEGORIES: DocumentCategory[] = [
   'Documento Empresarial',
@@ -426,17 +427,15 @@ export const DocumentsView: React.FC = () => {
                       </td>
                       <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {/* File Preview */}
+                          {/* File Preview (Authenticated) */}
                           {docItem.arquivoUrl && (
-                            <a
-                              href={docItem.arquivoUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                            <ProtectedDocumentButton
+                              url={docItem.arquivoUrl}
+                              fileName={docItem.arquivoNome || docItem.nomeDocumento}
                               title="Visualizar Arquivo"
-                            >
-                              <FileText size={15} />
-                            </a>
+                              className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                              icon={<FileText size={15} />}
+                            />
                           )}
 
                           {/* Version History Button */}
@@ -840,6 +839,19 @@ export const DocumentsView: React.FC = () => {
                     {v.motivoReprovacao && (
                       <div className="p-2 rounded bg-red-950/40 border border-red-500/30 text-red-300 text-[11px] mt-1">
                         <strong>Justificativa da Reprovação:</strong> {v.motivoReprovacao}
+                      </div>
+                    )}
+
+                    {v.arquivoUrl && (
+                      <div className="pt-1.5">
+                        <ProtectedDocumentButton
+                          url={v.arquivoUrl}
+                          fileName={v.arquivoNome || `${viewingHistoryDoc.nomeDocumento}-v${v.versao}`}
+                          title={`Visualizar Versão ${v.versao}`}
+                          label={`Visualizar Versão ${v.versao}`}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 hover:text-white text-[11px] font-medium"
+                          icon={<FileText size={12} />}
+                        />
                       </div>
                     )}
                   </div>

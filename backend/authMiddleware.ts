@@ -1,8 +1,11 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import type { Request, Response, NextFunction } from 'express';
-import { collection, doc, getDoc, getDocs, setDoc } from 'firebase/firestore';
-import { db } from './notificationEngine';
+import {
+  serverGetDoc,
+  serverListCollection,
+  serverSetDoc,
+} from './firestoreServer';
 import {
   MASTER_ADMIN_USER_ID,
   LEGACY_MASTER_ADMIN_USER_ID,
@@ -13,6 +16,9 @@ import type { UserProfile, UserRole } from '../src/types/sst';
 const BCRYPT_SALT_ROUNDS = 12;
 const MIN_SECRET_LENGTH = 32;
 const TOKEN_TTL_SECONDS = 24 * 60 * 60; // 24 hours
+const DEFAULT_FILE_TICKET_TTL_SECONDS = 60;
+const MIN_FILE_TICKET_TTL_SECONDS = 10;
+const MAX_FILE_TICKET_TTL_SECONDS = 300;
 
 // SHA-256 digests of forbidden legacy/default passwords (never stored in plaintext)
 const FORBIDDEN_DEFAULT_PASSWORD_DIGESTS = new Set([
@@ -51,6 +57,19 @@ export interface AuthTokenPayload {
   nome: string;
   role: UserRole;
   ver?: number;
+  iat: number;
+  exp: number;
+}
+
+export interface FileAccessTicketPayload {
+  typ: 'EHS_FILE_TICKET';
+  sub: string;
+  role: UserRole;
+  ver: number;
+  empresaId?: string;
+  integrationId: string;
+  itemId: string;
+  version?: number;
   iat: number;
   exp: number;
 }
@@ -348,6 +367,153 @@ export function verifyAuthToken(token: string): AuthTokenPayload | null {
   }
 }
 
+export function getFileAccessTicketTtlSeconds(requestedTtlSeconds?: number): number {
+  const envRaw = Number(process.env.INTEGRATION_FILE_SIGNING_TTL_SECONDS);
+  const base =
+    typeof requestedTtlSeconds === 'number' && Number.isFinite(requestedTtlSeconds)
+      ? Math.floor(requestedTtlSeconds)
+      : Number.isFinite(envRaw) && envRaw > 0
+      ? Math.floor(envRaw)
+      : DEFAULT_FILE_TICKET_TTL_SECONDS;
+  return Math.max(MIN_FILE_TICKET_TTL_SECONDS, Math.min(MAX_FILE_TICKET_TTL_SECONDS, base));
+}
+
+/**
+ * Issues a short-lived, scope-bound, revocable HMAC-SHA256 access ticket for a specific
+ * protected integration document item/version. Bound to user tokenVersion so password/role
+ * changes or account deletion immediately revoke active tickets.
+ */
+export function signFileAccessTicket(params: {
+  userId: string;
+  role: UserRole;
+  tokenVersion?: number;
+  empresaId?: string;
+  integrationId: string;
+  itemId: string;
+  version?: number;
+  ttlSeconds?: number;
+  nowMs?: number;
+}): { ticket: string; expiresAt: number; ttlSeconds: number } {
+  const secret = getValidatedApiAuthSecret();
+  if (!secret) {
+    throw new AuthConfigError('API_AUTH_SECRET não configurado ou inválido no servidor.');
+  }
+  if (!params.userId || !isValidRole(params.role) || !params.integrationId || !params.itemId) {
+    throw new Error('Parâmetros inválidos para emissão de ticket de acesso documental.');
+  }
+
+  const ttlSeconds = getFileAccessTicketTtlSeconds(params.ttlSeconds);
+  const nowSec = Math.floor((params.nowMs ?? Date.now()) / 1000);
+  const expSec = nowSec + ttlSeconds;
+  const ver =
+    typeof params.tokenVersion === 'number' && params.tokenVersion > 0 ? params.tokenVersion : 1;
+
+  const header = base64UrlEncode(JSON.stringify({ alg: 'HS256', typ: 'EHS_FILE_TICKET' }));
+  const payloadObj: FileAccessTicketPayload = {
+    typ: 'EHS_FILE_TICKET',
+    sub: params.userId,
+    role: params.role,
+    ver,
+    ...(params.empresaId ? { empresaId: params.empresaId } : {}),
+    integrationId: params.integrationId,
+    itemId: params.itemId,
+    ...(typeof params.version === 'number' && Number.isInteger(params.version) && params.version > 0
+      ? { version: params.version }
+      : {}),
+    iat: nowSec,
+    exp: expSec,
+  };
+  const payload = base64UrlEncode(JSON.stringify(payloadObj));
+  const signature = base64UrlEncode(
+    crypto.createHmac('sha256', secret).update(`file-ticket:${header}.${payload}`).digest()
+  );
+
+  return {
+    ticket: `${header}.${payload}.${signature}`,
+    expiresAt: expSec * 1000,
+    ttlSeconds,
+  };
+}
+
+export function verifyFileAccessTicket(
+  ticket: string,
+  expectedScope?: {
+    integrationId?: string;
+    itemId?: string;
+    version?: number;
+    nowMs?: number;
+  }
+): FileAccessTicketPayload | null {
+  try {
+    const secret = getValidatedApiAuthSecret();
+    if (!secret) return null;
+    if (typeof ticket !== 'string' || !ticket.trim()) return null;
+
+    const parts = ticket.trim().split('.');
+    if (parts.length !== 3) return null;
+
+    const [headerB64, payloadB64, sigB64] = parts;
+    if (!headerB64 || !payloadB64 || !sigB64) return null;
+
+    const headerObj = JSON.parse(base64UrlDecode(headerB64)) as { alg?: unknown; typ?: unknown };
+    if (!headerObj || headerObj.alg !== 'HS256' || headerObj.typ !== 'EHS_FILE_TICKET') {
+      return null;
+    }
+
+    const expectedSig = base64UrlEncode(
+      crypto.createHmac('sha256', secret).update(`file-ticket:${headerB64}.${payloadB64}`).digest()
+    );
+    const sigBuf = Buffer.from(sigB64);
+    const expectedBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+      return null;
+    }
+
+    const decoded = JSON.parse(base64UrlDecode(payloadB64)) as Partial<FileAccessTicketPayload>;
+    if (
+      !decoded ||
+      decoded.typ !== 'EHS_FILE_TICKET' ||
+      typeof decoded.sub !== 'string' ||
+      !decoded.sub.trim() ||
+      !isValidRole(decoded.role) ||
+      typeof decoded.ver !== 'number' ||
+      typeof decoded.integrationId !== 'string' ||
+      !decoded.integrationId.trim() ||
+      typeof decoded.itemId !== 'string' ||
+      !decoded.itemId.trim() ||
+      typeof decoded.iat !== 'number' ||
+      typeof decoded.exp !== 'number' ||
+      !Number.isFinite(decoded.iat) ||
+      !Number.isFinite(decoded.exp)
+    ) {
+      return null;
+    }
+
+    const nowSec = Math.floor((expectedScope?.nowMs ?? Date.now()) / 1000);
+    if (decoded.exp <= decoded.iat || decoded.exp <= nowSec || decoded.iat > nowSec + 60) {
+      return null;
+    }
+
+    if (expectedScope?.integrationId && decoded.integrationId !== expectedScope.integrationId) {
+      return null;
+    }
+    if (expectedScope?.itemId && decoded.itemId !== expectedScope.itemId) {
+      return null;
+    }
+    if (
+      typeof decoded.version === 'number' &&
+      typeof expectedScope?.version === 'number' &&
+      decoded.version !== expectedScope.version
+    ) {
+      return null;
+    }
+
+    return decoded as FileAccessTicketPayload;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Verifies user credentials exclusively with plaintext password + bcrypt hash stored in Firestore.
  * Rejects fixed/default passwords, rejects passwordHash-based login, and fails closed if Firestore is unavailable.
@@ -368,17 +534,17 @@ export async function authenticateUserCredentials(params: {
     return null;
   }
 
-  let snap;
+  let userDocs: Array<{ id: string; data: UserProfile }>;
   try {
-    snap = await getDocs(collection(db, 'userProfiles'));
+    userDocs = await serverListCollection<UserProfile>('userProfiles');
   } catch (err) {
     console.error('[AuthMiddleware] Falha ao consultar Firestore userProfiles:', err);
     throw new AuthServiceUnavailableError('Serviço de autenticação indisponível no momento.');
   }
 
   let matchedDoc: { id: string; data: UserProfile } | null = null;
-  for (const docSnap of snap.docs) {
-    const u = docSnap.data() as UserProfile;
+  for (const docSnap of userDocs) {
+    const u = docSnap.data;
     const uDigits = (u.cpf || u.username || '').replace(/\D/g, '');
     const matchCpf = cleanDigits.length > 0 && uDigits === cleanDigits;
     const matchIdentifier =
@@ -421,8 +587,9 @@ export async function authenticateUserCredentials(params: {
     const rotatedHash = await hashPasswordBcrypt(password);
     const updatedAt = new Date().toISOString();
     try {
-      await setDoc(
-        doc(db, 'userProfiles', id),
+      await serverSetDoc(
+        'userProfiles',
+        id,
         {
           passwordHash: rotatedHash,
           hashAlgorithm: 'bcrypt',
@@ -464,16 +631,16 @@ export async function findUserProfileByCpfDigits(
     return null;
   }
 
-  let snap;
+  let userDocs: Array<{ id: string; data: UserProfile }>;
   try {
-    snap = await getDocs(collection(db, 'userProfiles'));
+    userDocs = await serverListCollection<UserProfile>('userProfiles');
   } catch (err) {
     console.error('[AuthMiddleware] Falha ao consultar Firestore userProfiles:', err);
     throw new AuthServiceUnavailableError('Serviço de autenticação indisponível no momento.');
   }
 
-  for (const docSnap of snap.docs) {
-    const u = docSnap.data() as UserProfile;
+  for (const docSnap of userDocs) {
+    const u = docSnap.data;
     const uDigits = (u.cpf || u.username || '').replace(/\D/g, '');
     if (uDigits === cleanDigits) {
       return { id: docSnap.id, data: u };
@@ -483,111 +650,133 @@ export async function findUserProfileByCpfDigits(
   return null;
 }
 
+export type AuthoritativeUserLookup = (
+  userId: string
+) => Promise<{ id: string; data: UserProfile } | null>;
+
 /**
  * Queries official user profile and role in Firestore (fail-closed if Firebase is unavailable).
+ * Used for both JWT Bearer sessions and revocable short-lived file access tickets.
  */
-async function resolveAuthoritativeUser(
-  payload: AuthTokenPayload
+export async function resolveAuthoritativeUserByClaim(
+  claim: { sub: string; role: UserRole; ver?: number; iat: number },
+  customLookup?: AuthoritativeUserLookup
 ): Promise<{ profile: SanitizedUserProfile; roleDiverged: boolean; sessionRevoked: boolean } | null> {
-  let userDoc;
+  let userDoc: { id: string; data: UserProfile } | null;
   try {
-    userDoc = await getDoc(doc(db, 'userProfiles', payload.sub));
+    userDoc = customLookup
+      ? await customLookup(claim.sub)
+      : await serverGetDoc<UserProfile>('userProfiles', claim.sub);
   } catch (err) {
     console.error('[AuthMiddleware] Firestore indisponível ao validar perfil oficial:', err);
     throw new AuthServiceUnavailableError('Banco de dados de usuários indisponível.');
   }
 
-  if (!userDoc.exists()) {
+  if (!userDoc) {
     return null;
   }
 
-  const data = userDoc.data() as UserProfile;
+  const data = userDoc.data;
   if (!isValidRole(data.role)) {
     return null;
   }
 
   const officialProfile = sanitizeUserProfile(userDoc.id, data);
-  const roleDiverged = officialProfile.role !== payload.role;
+  const roleDiverged = officialProfile.role !== claim.role;
 
   const officialVersion = typeof data.tokenVersion === 'number' ? data.tokenVersion : 1;
-  const payloadVersion = typeof payload.ver === 'number' ? payload.ver : 1;
+  const payloadVersion = typeof claim.ver === 'number' ? claim.ver : 1;
   const changedAtMs = data.passwordChangedAt ? Date.parse(data.passwordChangedAt) : NaN;
   const issuedBeforePasswordChange =
-    Number.isFinite(changedAtMs) && payload.iat * 1000 < changedAtMs - 1000;
+    Number.isFinite(changedAtMs) && claim.iat * 1000 < changedAtMs - 1000;
   const sessionRevoked = payloadVersion !== officialVersion || issuedBeforePasswordChange;
 
   return { profile: officialProfile, roleDiverged, sessionRevoked };
 }
 
-export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  if (!getValidatedApiAuthSecret()) {
-    return res.status(503).json({
-      success: false,
-      message: 'Autenticação indisponível: variável API_AUTH_SECRET não configurada corretamente no servidor.',
-    });
-  }
+async function resolveAuthoritativeUser(
+  payload: AuthTokenPayload
+): Promise<{ profile: SanitizedUserProfile; roleDiverged: boolean; sessionRevoked: boolean } | null> {
+  return resolveAuthoritativeUserByClaim(payload);
+}
 
-  const authHeader = req.headers.authorization || '';
-  if (!authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({
-      success: false,
-      message: 'Autenticação obrigatória. Token Bearer não informado.',
-    });
-  }
-
-  const token = authHeader.slice(7).trim();
-  const payload = verifyAuthToken(token);
-  if (!payload) {
-    return res.status(401).json({
-      success: false,
-      message: 'Sessão inválida ou expirada. Faça login novamente.',
-    });
-  }
-
-  try {
-    const resolved = await resolveAuthoritativeUser(payload);
-    if (!resolved) {
-      return res.status(401).json({
-        success: false,
-        message: 'Usuário não encontrado ou acesso revogado.',
-      });
-    }
-
-    if (resolved.sessionRevoked) {
-      return res.status(401).json({
-        success: false,
-        message: 'Sessão encerrada após alteração ou redefinição de senha. Faça login novamente.',
-      });
-    }
-
-    // Never trust payload.role: always overwrite authUser with official Firestore values
-    req.officialProfile = resolved.profile;
-    req.tokenRoleDiverged = resolved.roleDiverged;
-    req.authUser = {
-      sub: resolved.profile.id,
-      cpf: resolved.profile.cpf,
-      email: resolved.profile.email,
-      nome: resolved.profile.nome,
-      role: resolved.profile.role,
-      ver: resolved.profile.tokenVersion,
-      iat: payload.iat,
-      exp: payload.exp,
-    };
-
-    next();
-  } catch (err) {
-    if (err instanceof AuthServiceUnavailableError) {
+export function createRequireAuth(customLookup?: AuthoritativeUserLookup) {
+  return async function requireAuthHandler(
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ) {
+    if (!getValidatedApiAuthSecret()) {
       return res.status(503).json({
         success: false,
-        message: 'Serviço de autenticação temporariamente indisponível. Operação negada por segurança.',
+        message: 'Autenticação indisponível: variável API_AUTH_SECRET não configurada corretamente no servidor.',
       });
     }
-    return res.status(500).json({
-      success: false,
-      message: 'Erro interno ao validar autenticação.',
-    });
-  }
+
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Autenticação obrigatória. Token Bearer não informado.',
+      });
+    }
+
+    const token = authHeader.slice(7).trim();
+    const payload = verifyAuthToken(token);
+    if (!payload) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou expirada. Faça login novamente.',
+      });
+    }
+
+    try {
+      const resolved = await resolveAuthoritativeUserByClaim(payload, customLookup);
+      if (!resolved) {
+        return res.status(401).json({
+          success: false,
+          message: 'Usuário não encontrado ou acesso revogado.',
+        });
+      }
+
+      if (resolved.sessionRevoked) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão encerrada após alteração ou redefinição de senha. Faça login novamente.',
+        });
+      }
+
+      // Never trust payload.role: always overwrite authUser with official Firestore values
+      req.officialProfile = resolved.profile;
+      req.tokenRoleDiverged = resolved.roleDiverged;
+      req.authUser = {
+        sub: resolved.profile.id,
+        cpf: resolved.profile.cpf,
+        email: resolved.profile.email,
+        nome: resolved.profile.nome,
+        role: resolved.profile.role,
+        ver: resolved.profile.tokenVersion,
+        iat: payload.iat,
+        exp: payload.exp,
+      };
+
+      next();
+    } catch (err) {
+      if (err instanceof AuthServiceUnavailableError) {
+        return res.status(503).json({
+          success: false,
+          message: 'Serviço de autenticação temporariamente indisponível. Operação negada por segurança.',
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        message: 'Erro interno ao validar autenticação.',
+      });
+    }
+  };
 }
+
+export const requireAuth = createRequireAuth();
 
 export async function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   await requireAuth(req, res, () => {

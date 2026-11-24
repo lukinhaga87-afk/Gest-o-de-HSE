@@ -9,6 +9,7 @@ import {
   HardHat,
   FileWarning,
   ClipboardCheck,
+  ClipboardList,
   Target,
   TreePine,
   BarChart3,
@@ -18,12 +19,19 @@ import {
   Mail,
   FileSearch,
   KeyRound,
+  Layers,
+  Clock,
+  FolderCheck,
   X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useSST } from '../../context/SSTContext';
 
 export type NavItemKey =
   | 'dashboard'
+  | 'central_integracao'
+  | 'acompanhamento_integracoes'
+  | 'gestao_integracoes'
   | 'empresas'
   | 'colaboradores'
   | 'treinamentos'
@@ -32,6 +40,7 @@ export type NavItemKey =
   | 'exames'
   | 'epi'
   | 'apr_pt'
+  | 'matriz_atividades'
   | 'inspecoes'
   | 'planos_acao'
   | 'ambiental'
@@ -56,9 +65,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenPasswordModal,
 }) => {
   const { activeRole, activeEmpresaNome, isSolicitante, profile } = useAuth();
+  const { contractorIntegrations } = useSST();
 
-  const menuItems: { key: NavItemKey; label: string; icon: React.ReactNode; badge?: string }[] = [
+  const pendingIntegrationsForAdmin = contractorIntegrations.filter((i) =>
+    ['ENVIADA', 'AGUARDANDO_ANALISE', 'REENVIADA'].includes(i.status)
+  ).length;
+
+  const adminAndAuditorMenuItems: {
+    key: NavItemKey;
+    label: string;
+    icon: React.ReactNode;
+    badge?: string;
+  }[] = [
     { key: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
+    {
+      key: 'gestao_integracoes',
+      label: 'Gestão de Integrações',
+      icon: <FolderCheck size={18} />,
+      badge: pendingIntegrationsForAdmin > 0 ? String(pendingIntegrationsForAdmin) : undefined,
+    },
     { key: 'empresas', label: 'Empresas Contratadas', icon: <Building2 size={18} /> },
     { key: 'colaboradores', label: 'Colaboradores', icon: <Users size={18} /> },
     { key: 'treinamentos', label: 'Treinamentos', icon: <GraduationCap size={18} /> },
@@ -67,6 +92,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { key: 'exames', label: 'Exames e ASO', icon: <HeartPulse size={18} /> },
     { key: 'epi', label: 'Controle de EPI', icon: <HardHat size={18} /> },
     { key: 'apr_pt', label: 'APR e PT (LOTO)', icon: <FileWarning size={18} /> },
+    { key: 'matriz_atividades', label: 'Matriz de Atividades', icon: <ClipboardList size={18} /> },
     { key: 'inspecoes', label: 'Inspeções e Auditorias', icon: <ClipboardCheck size={18} /> },
     { key: 'planos_acao', label: 'Planos de Ação', icon: <Target size={18} /> },
     { key: 'ambiental', label: 'Gestão Ambiental', icon: <TreePine size={18} /> },
@@ -76,23 +102,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { key: 'configuracoes', label: 'Configurações e Carga', icon: <Settings size={18} /> },
   ];
 
-  // Authorized modules for Solicitante (Section 5 Requirement)
-  const SOLICITANTE_ALLOWED_KEYS: NavItemKey[] = [
-    'empresas',
-    'colaboradores',
-    'documentos',
-    'smartdocs',
-    'treinamentos',
-    'exames',
-    'epi',
-    'apr_pt',
-    'planos_acao',
-    'ambiental',
+  // Solicitante Menu (Section 9): Central de Integração replaces individual Colaboradores, Treinamentos, Documentos menus
+  const solicitanteMenuItems: {
+    key: NavItemKey;
+    label: string;
+    icon: React.ReactNode;
+    badge?: string;
+  }[] = [
+    { key: 'central_integracao', label: 'Central de Integração', icon: <Layers size={18} /> },
+    {
+      key: 'acompanhamento_integracoes',
+      label: 'Acompanhamento de Integrações',
+      icon: <Clock size={18} />,
+    },
+    { key: 'empresas', label: 'Minhas Empresas', icon: <Building2 size={18} /> },
+    { key: 'apr_pt', label: 'Permissões de Trabalho', icon: <FileWarning size={18} /> },
+    { key: 'smartdocs', label: 'EHS SMARTDOCS', icon: <FileSearch size={18} /> },
+    { key: 'exames', label: 'Exames e ASO', icon: <HeartPulse size={18} /> },
+    { key: 'epi', label: 'Controle de EPI', icon: <HardHat size={18} /> },
+    { key: 'planos_acao', label: 'Planos de Ação', icon: <Target size={18} /> },
+    { key: 'ambiental', label: 'Gestão Ambiental', icon: <TreePine size={18} /> },
   ];
 
-  const visibleMenuItems = isSolicitante
-    ? menuItems.filter((item) => SOLICITANTE_ALLOWED_KEYS.includes(item.key))
-    : menuItems;
+  const visibleMenuItems = isSolicitante ? solicitanteMenuItems : adminAndAuditorMenuItems;
 
   return (
     <>

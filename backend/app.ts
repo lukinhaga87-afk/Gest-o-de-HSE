@@ -25,10 +25,15 @@ import {
 import {
   authenticateUserCredentials,
   signAuthToken,
+  signFileAccessTicket,
+  verifyFileAccessTicket,
+  resolveAuthoritativeUserByClaim,
+  createRequireAuth,
   requireAuth,
   requireAdmin,
   requireAuthenticatedEditor,
   AuthenticatedRequest,
+  AuthoritativeUserLookup,
   getValidatedApiAuthSecret,
   hashPasswordBcrypt,
   sanitizeUserProfile,
@@ -86,6 +91,22 @@ import {
   updateSmartDocFields,
   validateUploadedFile,
 } from './smartDocsService';
+import {
+  PermitWorkflowActor,
+  PermitWorkflowError,
+  PermitWorkflowService,
+} from './permitWorkflowService';
+import {
+  IntegrationWorkflowActor,
+  IntegrationWorkflowError,
+  IntegrationWorkflowService,
+} from './integrationWorkflowService';
+import {
+  IntegrationFileIntegrityError,
+  IntegrationStorageUnavailableError,
+  sanitizeDownloadFileName,
+} from './integrationFileStorage';
+import { FirebaseAdminNotConfiguredError } from './firebaseAdmin';
 
 function removeUndefinedFields<T extends Record<string, any>>(obj: T): Partial<T> {
   const clean: Record<string, any> = {};
@@ -97,8 +118,20 @@ function removeUndefinedFields<T extends Record<string, any>>(obj: T): Partial<T
   return clean as Partial<T>;
 }
 
-export function createApiApp(options?: { smartDocAiInvoker?: SmartDocAiInvoker }) {
+export function createApiApp(options?: {
+  smartDocAiInvoker?: SmartDocAiInvoker;
+  permitWorkflowService?: PermitWorkflowService;
+  integrationWorkflowService?: IntegrationWorkflowService;
+  authoritativeUserLookup?: AuthoritativeUserLookup;
+}) {
   const app = express();
+  const permitService = options?.permitWorkflowService ?? new PermitWorkflowService();
+  const integrationService =
+    options?.integrationWorkflowService ?? new IntegrationWorkflowService();
+  const authoritativeUserLookup = options?.authoritativeUserLookup;
+  const requireIntegrationAuth = authoritativeUserLookup
+    ? createRequireAuth(authoritativeUserLookup)
+    : requireAuth;
 
   app.use(express.json({ limit: '25mb' }));
 
@@ -110,7 +143,9 @@ export function createApiApp(options?: { smartDocAiInvoker?: SmartDocAiInvoker }
     } else if (
       req.url.startsWith('/notifications/') ||
       req.url.startsWith('/auth/') ||
-      req.url.startsWith('/smartdocs')
+      req.url.startsWith('/smartdocs') ||
+      req.url.startsWith('/permits') ||
+      req.url.startsWith('/integrations')
     ) {
       req.url = `/api${req.url}`;
     }
@@ -2794,6 +2829,1068 @@ export function createApiApp(options?: { smartDocAiInvoker?: SmartDocAiInvoker }
       });
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // GESTÃO DE TERCEIROS — SOLICITAÇÃO, VALIDAÇÃO E LIBERAÇÃO DE ATIVIDADES (SERVER-SIDE)
+  // ---------------------------------------------------------------------------
+  const extractPermitActor = (req: AuthenticatedRequest): PermitWorkflowActor | null => {
+    if (!req.authUser || !req.officialProfile || req.tokenRoleDiverged) {
+      return null;
+    }
+    return {
+      id: req.authUser.sub,
+      nome: req.officialProfile.nome || req.authUser.nome,
+      email: req.officialProfile.email || req.authUser.email,
+      role: req.officialProfile.role,
+      empresaId: req.officialProfile.empresaId,
+    };
+  };
+
+  const handlePermitWorkflowError = (res: Response, err: unknown, fallbackMessage: string) => {
+    if (err instanceof PermitWorkflowError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+        ...(err.details || {}),
+      });
+    }
+    console.error('[API /api/permits Error]:', err);
+    return res.status(500).json({
+      success: false,
+      code: 'PERMIT_WORKFLOW_ERROR',
+      message: (err as any)?.message || fallbackMessage,
+    });
+  };
+
+  app.get('/api/permits', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const permits = await permitService.listPermits(actor);
+      return res.json({ success: true, permits });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao listar solicitações de atividades.');
+    }
+  });
+
+  app.post('/api/permits', requireAuthenticatedEditor, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.createPermitDraft(actor, req.body || {});
+      return res.status(201).json({
+        success: true,
+        message: 'Rascunho de solicitação criado e validado no servidor.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao criar solicitação de atividade.');
+    }
+  });
+
+  app.put('/api/permits/:id', requireAuthenticatedEditor, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.updatePermitDraft(actor, req.params.id, req.body || {});
+      return res.json({
+        success: true,
+        message: 'Solicitação atualizada com sucesso.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao atualizar solicitação de atividade.');
+    }
+  });
+
+  app.get('/api/permits/:id/compliance', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.evaluatePermit(actor, req.params.id);
+      return res.json({
+        success: true,
+        ...result,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao avaliar conformidade da solicitação.');
+    }
+  });
+
+  app.post('/api/permits/:id/submit', requireAuthenticatedEditor, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.submitPermit(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Solicitação enviada para análise do Administrador EHS.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao enviar solicitação para análise.');
+    }
+  });
+
+  app.post('/api/permits/:id/start-review', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.startReview(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Solicitação colocada em análise técnica pelo Admin EHS.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao iniciar análise da solicitação.');
+    }
+  });
+
+  app.post('/api/permits/:id/request-docs', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.requestDocumentation(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : '',
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Solicitação devolvida com pendência documental.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao solicitar documentação complementar.');
+    }
+  });
+
+  app.post('/api/permits/:id/request-correction', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.requestCorrection(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : '',
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Solicitação devolvida para correção pelo solicitante.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao solicitar correção da solicitação.');
+    }
+  });
+
+  app.post('/api/permits/:id/approve', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.approvePermit(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        expectedComplianceFingerprint:
+          typeof req.body?.expectedComplianceFingerprint === 'string'
+            ? req.body.expectedComplianceFingerprint
+            : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Solicitação aprovada tecnicamente após validação server-side.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao aprovar solicitação de atividade.');
+    }
+  });
+
+  app.post('/api/permits/:id/release', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await permitService.releasePermit(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        expectedComplianceFingerprint:
+          typeof req.body?.expectedComplianceFingerprint === 'string'
+            ? req.body.expectedComplianceFingerprint
+            : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Atividade LIBERADA oficialmente após revalidação server-side completa.',
+        permit: result.permit,
+        compliance: result.compliance,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao liberar execução da atividade.');
+    }
+  });
+
+  app.post('/api/permits/:id/reject', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const permit = await permitService.rejectPermit(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : '',
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Solicitação reprovada com justificativa registrada.',
+        permit,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao reprovar solicitação.');
+    }
+  });
+
+  app.post('/api/permits/:id/cancel', requireAuthenticatedEditor, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const permit = await permitService.cancelPermit(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : '',
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Solicitação cancelada com trilha de auditoria preservada.',
+        permit,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao cancelar solicitação.');
+    }
+  });
+
+  app.post('/api/permits/:id/close', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractPermitActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const permit = await permitService.closePermit(actor, req.params.id, {
+        justificativa: typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+        expectedVersion:
+          typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+      });
+      return res.json({
+        success: true,
+        message: 'Atividade encerrada com sucesso.',
+        permit,
+      });
+    } catch (err) {
+      return handlePermitWorkflowError(res, err, 'Erro ao encerrar atividade.');
+    }
+  });
+
+  app.delete('/api/permits/:id', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
+    return res.status(403).json({
+      success: false,
+      code: 'PHYSICAL_DELETE_FORBIDDEN',
+      message:
+        'A exclusão física de solicitações de atividades é proibida para preservar a integridade histórica de auditoria. Utilize o cancelamento com justificativa.',
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // CENTRAL DE INTEGRAÇÃO DE TERCEIROS (SERVER-SIDE WORKFLOW & RBAC)
+  // ---------------------------------------------------------------------------
+  const extractIntegrationActor = (req: AuthenticatedRequest): IntegrationWorkflowActor | null => {
+    if (!req.authUser || !req.officialProfile || req.tokenRoleDiverged) {
+      return null;
+    }
+    return {
+      id: req.authUser.sub,
+      nome: req.officialProfile.nome || req.authUser.nome,
+      email: req.officialProfile.email || req.authUser.email,
+      role: req.officialProfile.role,
+      empresaId: req.officialProfile.empresaId,
+    };
+  };
+
+  const handleIntegrationWorkflowError = (
+    res: Response,
+    err: unknown,
+    fallbackMessage: string
+  ) => {
+    if (err instanceof IntegrationWorkflowError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+        ...(err.details || {}),
+      });
+    }
+    if (err instanceof FirebaseAdminNotConfiguredError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+      });
+    }
+    if (err instanceof IntegrationStorageUnavailableError) {
+      return res.status(err.status).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+      });
+    }
+    if (err instanceof IntegrationFileIntegrityError) {
+      return res.status(500).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+      });
+    }
+    const rawCode = String((err as any)?.code || '').toLowerCase();
+    const rawMsg = String((err as any)?.message || '');
+    if (
+      rawCode === 'permission-denied' ||
+      rawCode === 'firestore/permission-denied' ||
+      rawMsg.toLowerCase().includes('missing or insufficient permissions') ||
+      rawMsg.toLowerCase().includes('permission_denied')
+    ) {
+      console.error('[API /api/integrations Firestore Permission Denied]:', err);
+      return res.status(503).json({
+        success: false,
+        code: 'FIRESTORE_RULES_NOT_PUBLISHED',
+        message:
+          'Infraestrutura Firestore pendente: o banco recusou acesso (permission-denied) às coleções da Central de Integração (activityProfiles, activityDocumentRequirements, contractorIntegrations ou contractorIntegrationItems). Publique o arquivo firestore.rules no Firebase e configure as credenciais do Firebase Admin SDK no backend.',
+      });
+    }
+    console.error('[API /api/integrations Error]:', err);
+    return res.status(500).json({
+      success: false,
+      code: 'INTEGRATION_WORKFLOW_ERROR',
+      message: rawMsg || fallbackMessage,
+    });
+  };
+
+  app.get('/api/integrations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractIntegrationActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const integrations = await integrationService.listIntegrations(actor);
+      return res.json({ success: true, integrations });
+    } catch (err) {
+      return handleIntegrationWorkflowError(res, err, 'Erro ao listar integrações de terceiros.');
+    }
+  });
+
+  app.post(
+    '/api/integrations/check-duplicates',
+    requireAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.checkDuplicates(actor, {
+          cnpj: typeof req.body?.cnpj === 'string' ? req.body.cnpj : undefined,
+          cpf: typeof req.body?.cpf === 'string' ? req.body.cpf : undefined,
+        });
+        return res.json({ success: true, ...result });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao verificar duplicidade cadastral.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations',
+    requireAuthenticatedEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.createIntegration(actor, req.body || {});
+        return res.status(201).json({
+          success: true,
+          message: 'Processo de integração criado com checklist dinâmico da Matriz de Atividades.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao criar processo de integração.');
+      }
+    }
+  );
+
+  app.get('/api/integrations/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractIntegrationActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const result = await integrationService.getIntegrationDetail(actor, req.params.id);
+      return res.json({ success: true, ...result });
+    } catch (err) {
+      return handleIntegrationWorkflowError(res, err, 'Erro ao consultar detalhes da integração.');
+    }
+  });
+
+  app.put(
+    '/api/integrations/:id',
+    requireAuthenticatedEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.updateIntegrationDraft(
+          actor,
+          req.params.id,
+          req.body || {}
+        );
+        return res.json({
+          success: true,
+          message: 'Rascunho de integração atualizado com sucesso.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao atualizar integração.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/documents/upload',
+    requireAuthenticatedEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.uploadSingleDocument(
+          actor,
+          req.params.id,
+          req.body || {}
+        );
+        return res.json({
+          success: true,
+          message: `Documento "${result.uploadedFile.arquivoNome}" enviado com sucesso.`,
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao enviar documento.');
+      }
+    }
+  );
+
+  // Issue short-lived, revocable, scope-bound signed file access ticket
+  app.post(
+    '/api/integrations/:id/items/:itemId/file-token',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor || !req.officialProfile) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const rawVersion =
+          typeof req.body?.version === 'number'
+            ? req.body.version
+            : typeof req.query?.version === 'string'
+            ? Number(req.query.version)
+            : undefined;
+        const requestedVersion =
+          typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion > 0
+            ? rawVersion
+            : undefined;
+
+        // Verify RBAC, company isolation, draft hiding, item ownership, and file existence before issuing ticket
+        const detail = await integrationService.getIntegrationDetail(actor, req.params.id);
+        const targetItem = detail.items.find((it) => it.id === req.params.itemId);
+        if (!targetItem) {
+          return res.status(404).json({
+            success: false,
+            code: 'ITEM_NOT_FOUND',
+            message: 'Item documental não encontrado nesta integração.',
+          });
+        }
+        if (requestedVersion !== undefined) {
+          const hasVersion = (targetItem.versoes || []).some((v) => v.versao === requestedVersion);
+          if (!hasVersion) {
+            return res.status(404).json({
+              success: false,
+              code: 'DOCUMENT_VERSION_NOT_FOUND',
+              message: `Versão v${requestedVersion} não encontrada para o documento "${targetItem.nomeExibicao}".`,
+            });
+          }
+        }
+
+        const issued = signFileAccessTicket({
+          userId: req.officialProfile.id,
+          role: req.officialProfile.role,
+          tokenVersion: req.officialProfile.tokenVersion,
+          empresaId: req.officialProfile.empresaId,
+          integrationId: req.params.id,
+          itemId: req.params.itemId,
+          version: requestedVersion,
+        });
+
+        const params = new URLSearchParams();
+        if (requestedVersion !== undefined) {
+          params.set('version', String(requestedVersion));
+        }
+        params.set('ticket', issued.ticket);
+
+        return res.json({
+          success: true,
+          ticket: issued.ticket,
+          expiresAt: issued.expiresAt,
+          ttlSeconds: issued.ttlSeconds,
+          signedUrl: `/api/integrations/${encodeURIComponent(req.params.id)}/items/${encodeURIComponent(req.params.itemId)}/file?${params.toString()}`,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao emitir acesso temporário para visualização documental.'
+        );
+      }
+    }
+  );
+
+  // Authenticated protected file download/preview (supports Bearer JWT or revocable short-lived ?ticket=)
+  app.get(
+    '/api/integrations/:id/items/:itemId/file',
+    async (req: AuthenticatedRequest, res: Response, next) => {
+      const authHeader = req.headers.authorization || '';
+      if (authHeader.startsWith('Bearer ')) {
+        return requireIntegrationAuth(req, res, next);
+      }
+
+      const ticketParam = typeof req.query?.ticket === 'string' ? req.query.ticket.trim() : '';
+      if (!ticketParam) {
+        return res.status(401).json({
+          success: false,
+          code: 'AUTH_REQUIRED',
+          message: 'Autenticação obrigatória para leitura de documento protegido.',
+        });
+      }
+
+      if (!getValidatedApiAuthSecret()) {
+        return res.status(503).json({
+          success: false,
+          message: 'Autenticação indisponível: API_AUTH_SECRET não configurado no servidor.',
+        });
+      }
+
+      const rawVersion =
+        typeof req.query?.version === 'string' ? Number(req.query.version) : undefined;
+      const requestedVersion =
+        typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion > 0
+          ? rawVersion
+          : undefined;
+
+      const ticketPayload = verifyFileAccessTicket(ticketParam, {
+        integrationId: req.params.id,
+        itemId: req.params.itemId,
+        version: requestedVersion,
+      });
+
+      if (!ticketPayload) {
+        return res.status(401).json({
+          success: false,
+          code: 'FILE_TICKET_INVALID_OR_EXPIRED',
+          message: 'Link temporário de acesso documental inválido, expirado ou fora de escopo.',
+        });
+      }
+
+      try {
+        const resolved = await resolveAuthoritativeUserByClaim(
+          {
+            sub: ticketPayload.sub,
+            role: ticketPayload.role,
+            ver: ticketPayload.ver,
+            iat: ticketPayload.iat,
+          },
+          authoritativeUserLookup
+        );
+
+        if (!resolved || resolved.sessionRevoked || resolved.roleDiverged) {
+          return res.status(401).json({
+            success: false,
+            code: 'FILE_TICKET_REVOKED',
+            message: 'Acesso documental revogado por alteração de sessão, senha ou perfil do usuário.',
+          });
+        }
+
+        req.officialProfile = resolved.profile;
+        req.tokenRoleDiverged = false;
+        req.authUser = {
+          sub: resolved.profile.id,
+          cpf: resolved.profile.cpf,
+          email: resolved.profile.email,
+          nome: resolved.profile.nome,
+          role: resolved.profile.role,
+          ver: resolved.profile.tokenVersion,
+          iat: ticketPayload.iat,
+          exp: ticketPayload.exp,
+        };
+        return next();
+      } catch (err) {
+        if (err instanceof AuthServiceUnavailableError) {
+          return res.status(503).json({
+            success: false,
+            message: 'Serviço de autenticação temporariamente indisponível. Operação negada por segurança.',
+          });
+        }
+        return res.status(500).json({
+          success: false,
+          message: 'Erro interno ao validar ticket de acesso documental.',
+        });
+      }
+    },
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const rawVersion = typeof req.query?.version === 'string' ? Number(req.query.version) : undefined;
+        const requestedVersion =
+          typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion > 0
+            ? rawVersion
+            : undefined;
+        const isDownload = req.query?.download === '1' || req.query?.download === 'true';
+
+        const file = await integrationService.getDocumentFile(
+          actor,
+          req.params.id,
+          req.params.itemId,
+          requestedVersion
+        );
+
+        const safeName = sanitizeDownloadFileName(file.fileName);
+        res.setHeader('Content-Type', file.mimeType);
+        res.setHeader('Content-Length', String(file.sizeBytes));
+        res.setHeader(
+          'Content-Disposition',
+          `${isDownload ? 'attachment' : 'inline'}; filename="${safeName}"`
+        );
+        res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        if (file.sha256) {
+          res.setHeader('X-File-Sha256', file.sha256);
+        }
+        return res.status(200).send(file.buffer);
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao recuperar arquivo documental protegido.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/documents/batch',
+    requireAuthenticatedEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.uploadBatchDocuments(
+          actor,
+          req.params.id,
+          req.body || {}
+        );
+        return res.json({
+          success: true,
+          message: `${result.uploadedCount} documento(s) anexado(s) em lote com sucesso.`,
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao enviar lote de documentos.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/items/:itemId/renew',
+    requireAuthenticatedEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.renewIntegrationItem(
+          actor,
+          req.params.id,
+          req.params.itemId,
+          req.body || {}
+        );
+        return res.json({
+          success: true,
+          message: 'Nova versão documental enviada para análise do Administrador EHS.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao enviar renovação documental.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/submit',
+    requireAuthenticatedEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.submitIntegration(actor, req.params.id, {
+          justificativa:
+            typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+          expectedVersion:
+            typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        });
+        return res.json({
+          success: true,
+          message: 'Integração enviada para análise do Administrador EHS.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao submeter integração.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/start-review',
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.startReview(actor, req.params.id, {
+          expectedVersion:
+            typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        });
+        return res.json({
+          success: true,
+          message: 'Análise técnica da integração iniciada.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao iniciar análise da integração.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/items/:itemId/review',
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.reviewDocumentItem(
+          actor,
+          req.params.id,
+          req.params.itemId,
+          req.body || {}
+        );
+        const reviewedItem = result.items.find((i) => i.id === req.params.itemId);
+        return res.json({
+          success: true,
+          message:
+            req.body?.decisao === 'APROVADO'
+              ? reviewedItem?.officialRecordId
+                ? 'Documento aprovado e integrado oficialmente à base SST.'
+                : 'Documento conferido e aprovado (preservado). A oficialização do cadastro inicial ocorrerá após aprovação completa de todos os obrigatórios.'
+              : 'Documento reprovado com justificativa registrada.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao revisar documento da integração.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/request-correction',
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.returnForCorrection(actor, req.params.id, {
+          justificativa:
+            typeof req.body?.justificativa === 'string' ? req.body.justificativa : '',
+          expectedVersion:
+            typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        });
+        return res.json({
+          success: true,
+          message:
+            'Pendências devolvidas ao solicitante. Todos os documentos já aprovados foram preservados.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao devolver integração para correção.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/approve',
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.approveIntegration(actor, req.params.id, {
+          justificativa:
+            typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+          expectedVersion:
+            typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        });
+        return res.json({
+          success: true,
+          message:
+            'Integração concluída e aprovada! A execução de atividades críticas permanece controlada via Permissão de Trabalho (PT/APR).',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao aprovar integração.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/reject',
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.rejectIntegration(actor, req.params.id, {
+          justificativa:
+            typeof req.body?.justificativa === 'string' ? req.body.justificativa : '',
+          expectedVersion:
+            typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        });
+        return res.json({
+          success: true,
+          message: 'Integração reprovada com justificativa registrada.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao reprovar integração.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/close',
+    requireAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.closeIntegration(actor, req.params.id, {
+          justificativa:
+            typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+          expectedVersion:
+            typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+        });
+        return res.json({
+          success: true,
+          message: 'Integração encerrada com histórico preservado.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(res, err, 'Erro ao encerrar integração.');
+      }
+    }
+  );
+
+  app.delete('/api/integrations/:id', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
+    return res.status(403).json({
+      success: false,
+      code: 'PHYSICAL_DELETE_FORBIDDEN',
+      message:
+        'A exclusão física de processos de integração é proibida para preservar a rastreabilidade e a auditoria documental.',
+    });
+  });
+
+  app.delete(
+    '/api/integrations/:id/items/:itemId',
+    requireAuth,
+    async (_req: AuthenticatedRequest, res: Response) => {
+      return res.status(403).json({
+        success: false,
+        code: 'PHYSICAL_DELETE_FORBIDDEN',
+        message:
+          'A exclusão física de documentos e versões da integração é proibida para preservar o histórico auditável.',
+      });
+    }
+  );
 
   return app;
 }

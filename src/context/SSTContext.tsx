@@ -30,8 +30,220 @@ import {
   NotificationLog,
   UserProfile,
   SmtpSessionConfig,
+  ActivityProfile,
+  ActivityDocumentRequirement,
+  ActivityComplianceResult,
+  SafetyPermitControlAttachment,
+  SafetyPermitOperationalControls,
+  SafetyPermitType,
+  SmartDocRecord,
+  ContractorIntegration,
+  ContractorIntegrationItem,
+  IntegrationType,
+  IntegrationItemCategory,
+  IntegrationDocumentGroupId,
+  IntegrationOfficialCollection,
+  IntegrationCompanyRequest,
+  IntegrationSubmissionReadiness,
+  ConclusaoAptidao,
 } from '../types/sst';
 import { INITIAL_COMPANIES, INITIAL_EMPLOYEES } from '../utils/initialData';
+import {
+  INITIAL_ACTIVITY_TEMPLATES,
+  buildActivityProfilePayloadFromTemplate,
+  buildRequirementsPayloadFromTemplate,
+} from '../utils/activityTemplates';
+
+export interface PermitServerDraftInput {
+  tipo?: SafetyPermitType;
+  titulo: string;
+  descricaoServico?: string;
+  empresaId: string;
+  localTrabalho: string;
+  dataInicio: string;
+  dataFim: string;
+  responsavelEmissao?: string;
+  responsavelAtividade?: string;
+  riscosIdentificados?: string;
+  medidasPreventivas?: string;
+  observacoes?: string;
+  anexoUrl?: string;
+  anexosControles?: SafetyPermitControlAttachment[];
+  atividadeIds: string[];
+  colaboradorIds: string[];
+  expectedVersion?: number;
+}
+
+export interface PermitServerActionInput {
+  justificativa?: string;
+  expectedVersion?: number;
+  expectedComplianceFingerprint?: string;
+}
+
+export interface PermitServerEvaluationResult {
+  permit: SafetyPermit;
+  compliance: ActivityComplianceResult;
+  complianceFingerprint: string;
+  versaoConcorrencia: number;
+  controlesOperacionais: SafetyPermitOperationalControls;
+  structuralErrors: string[];
+}
+
+export class PermitApiClientError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly compliance?: ActivityComplianceResult;
+  readonly motivosBloqueio?: string[];
+  readonly errors?: string[];
+
+  constructor(
+    message: string,
+    status: number,
+    details?: {
+      code?: string;
+      compliance?: ActivityComplianceResult;
+      motivosBloqueio?: string[];
+      errors?: string[];
+    }
+  ) {
+    super(message);
+    this.name = 'PermitApiClientError';
+    this.status = status;
+    this.code = details?.code;
+    this.compliance = details?.compliance;
+    this.motivosBloqueio = details?.motivosBloqueio;
+    this.errors = details?.errors;
+  }
+}
+
+export interface IntegrationServerDetailResult {
+  integration: ContractorIntegration;
+  items: ContractorIntegrationItem[];
+  compliancePreview: ActivityComplianceResult | null;
+  submissionReadiness?: IntegrationSubmissionReadiness;
+}
+
+export interface IntegrationDuplicateCheckResult {
+  cnpjDuplicado: boolean;
+  empresaExistente?: {
+    id: string;
+    razaoSocial: string;
+    nomeFantasia: string;
+    cnpj: string;
+    situacao: 'ativa' | 'inativa';
+  };
+  cpfDuplicado: boolean;
+  colaboradorExistente?: {
+    id: string;
+    nomeCompleto: string;
+    cpf: string;
+    cargo: string;
+    empresaId: string;
+    empresaNome: string;
+    mesmaEmpresa: boolean;
+    situacaoCadastral: Employee['situacaoCadastral'];
+  };
+}
+
+export interface IntegrationServerCreateInput {
+  tipo?: IntegrationType;
+  empresaId?: string;
+  solicitacaoNovaEmpresa?: Omit<IntegrationCompanyRequest, 'aprovadoCompanyId'>;
+  atividadeIds?: string[];
+  colaboradorIds?: string[];
+  novosColaboradores?: Array<{
+    colaboradorId?: string;
+    nomeCompleto?: string;
+    cpf?: string;
+    cargo?: string;
+    setor?: string;
+    telefone?: string;
+    email?: string;
+    atividadeExecutada?: string;
+    atividadesHabilitadasIds?: string[];
+  }>;
+  customItems?: Array<{
+    categoria: IntegrationItemCategory;
+    colaboradorId?: string;
+    colaboradorCandidateId?: string;
+    documentoCodigoCanonico: string;
+    nomeExibicao: string;
+    origemColecao?: IntegrationOfficialCollection;
+    obrigatorio?: boolean;
+    exigeAptoASO?: boolean;
+    aptidaoEspecifica?: string;
+    baseLegal?: string;
+    officialRecordId?: string;
+  }>;
+  observacoes?: string;
+}
+
+export interface IntegrationBatchFilePayload {
+  itemId?: string;
+  categoria?: IntegrationItemCategory;
+  categoriaOrganizacional?: IntegrationDocumentGroupId;
+  colaboradorId?: string;
+  colaboradorCandidateId?: string;
+  documentoCodigoCanonico?: string;
+  nomeExibicao?: string;
+  origemColecao?: IntegrationOfficialCollection;
+  obrigatorio?: boolean;
+  arquivoNome: string;
+  arquivoBase64: string;
+  dataEmissao?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  numeroDocumento?: string;
+  conclusaoAso?: ConclusaoAptidao;
+  aptidoesEspecificas?: string[];
+  observacoes?: string;
+  runSmartDocsAi?: boolean;
+}
+
+export interface IntegrationSingleUploadResult extends IntegrationServerDetailResult {
+  item: ContractorIntegrationItem;
+  uploadedFile: {
+    arquivoId: string;
+    arquivoNome: string;
+    arquivoMimeType: 'application/pdf' | 'image/jpeg' | 'image/png';
+    arquivoTamanhoBytes: number;
+    arquivoHashSha256: string;
+    versao: number;
+  };
+}
+
+export interface IntegrationFileBlobResult {
+  blob: Blob;
+  mimeType: 'application/pdf' | 'image/jpeg' | 'image/png';
+  fileName: string;
+}
+
+export interface IntegrationReviewItemPayload {
+  decisao: 'APROVADO' | 'REPROVADO';
+  motivo?: string;
+  dataEmissao?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  numeroDocumento?: string;
+  conclusaoAso?: ConclusaoAptidao;
+  aptidoesEspecificas?: string[];
+  observacoes?: string;
+  expectedVersion?: number;
+}
+
+export class IntegrationApiClientError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly details?: Record<string, any>;
+
+  constructor(message: string, status: number, code?: string, details?: Record<string, any>) {
+    super(message);
+    this.name = 'IntegrationApiClientError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
 
 interface SSTContextType {
   companies: Company[];
@@ -46,6 +258,12 @@ interface SSTContextType {
   environmentalDocs: EnvironmentalDoc[];
   auditLogs: AuditLog[];
   userProfiles: UserProfile[];
+  activityProfiles: ActivityProfile[];
+  activityDocumentRequirements: ActivityDocumentRequirement[];
+  smartDocs: SmartDocRecord[];
+  contractorIntegrations: ContractorIntegration[];
+  activityMatrixFirestoreError: string | null;
+  integrationFirestoreError: string | null;
   loading: boolean;
   // CRUD actions
   addCompany: (comp: Omit<Company, 'id'>) => Promise<string>;
@@ -112,13 +330,140 @@ interface SSTContextType {
   }) => Promise<{ success: boolean; message: string; error?: string; detalhes?: string }>;
   recalculateAlerts: (docId: string, docTitle: string, newExpirationDate: string, entityType: string) => Promise<void>;
 
+  // Activity Matrix & Mandatory Documents (Admin EHS write-protected)
+  addActivityProfile: (
+    activity: Omit<ActivityProfile, 'id' | 'criadoPorId' | 'criadoPorNome' | 'atualizadoPorId' | 'atualizadoPorNome' | 'createdAt' | 'updatedAt'>
+  ) => Promise<string>;
+  updateActivityProfile: (id: string, updates: Partial<ActivityProfile>) => Promise<void>;
+  deactivateActivityProfile: (id: string) => Promise<void>;
+  addActivityDocumentRequirement: (
+    req: Omit<ActivityDocumentRequirement, 'id' | 'criadoPorId' | 'criadoPorNome' | 'atualizadoPorId' | 'atualizadoPorNome' | 'createdAt' | 'updatedAt'>
+  ) => Promise<string>;
+  updateActivityDocumentRequirement: (id: string, updates: Partial<ActivityDocumentRequirement>) => Promise<void>;
+  deactivateActivityDocumentRequirement: (id: string) => Promise<void>;
+  seedInitialActivityTemplates: () => Promise<{
+    createdActivities: number;
+    skippedActivities: number;
+    createdRequirements: number;
+    skippedRequirements: number;
+  }>;
+
+  // Server-backed Activity Request & Release Workflow (Fail-Closed /api/permits/*)
+  createPermitDraftOnServer: (
+    payload: PermitServerDraftInput
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  updatePermitDraftOnServer: (
+    id: string,
+    payload: Partial<PermitServerDraftInput>
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  evaluatePermitOnServer: (id: string) => Promise<PermitServerEvaluationResult>;
+  submitPermitOnServer: (
+    id: string,
+    opts?: PermitServerActionInput
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  startPermitReviewOnServer: (
+    id: string,
+    opts?: PermitServerActionInput
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  requestPermitDocsOnServer: (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  requestPermitCorrectionOnServer: (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  approvePermitOnServer: (
+    id: string,
+    opts?: PermitServerActionInput
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  releasePermitOnServer: (
+    id: string,
+    opts?: PermitServerActionInput
+  ) => Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }>;
+  rejectPermitOnServer: (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ) => Promise<SafetyPermit>;
+  cancelPermitOnServer: (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ) => Promise<SafetyPermit>;
+  closePermitOnServer: (
+    id: string,
+    opts?: PermitServerActionInput
+  ) => Promise<SafetyPermit>;
+
+  // Server-backed Central de Integração de Terceiros (/api/integrations/*)
+  listIntegrationsOnServer: () => Promise<ContractorIntegration[]>;
+  getIntegrationDetailOnServer: (id: string) => Promise<IntegrationServerDetailResult>;
+  checkIntegrationDuplicatesOnServer: (input: {
+    cnpj?: string;
+    cpf?: string;
+  }) => Promise<IntegrationDuplicateCheckResult>;
+  createIntegrationOnServer: (
+    payload: IntegrationServerCreateInput
+  ) => Promise<IntegrationServerDetailResult>;
+  uploadIntegrationBatchOnServer: (
+    id: string,
+    payload: {
+      files: IntegrationBatchFilePayload[];
+      autoSubmit?: boolean;
+      expectedVersion?: number;
+    }
+  ) => Promise<IntegrationServerDetailResult & { uploadedCount: number }>;
+  uploadIntegrationDocumentOnServer: (
+    id: string,
+    payload: IntegrationBatchFilePayload,
+    onProgress?: (percent: number) => void
+  ) => Promise<IntegrationSingleUploadResult>;
+  fetchIntegrationItemFileBlobOnServer: (
+    integrationId: string,
+    itemId: string,
+    opts?: { version?: number; download?: boolean }
+  ) => Promise<IntegrationFileBlobResult>;
+  renewIntegrationItemOnServer: (
+    integrationId: string,
+    itemId: string,
+    payload: IntegrationBatchFilePayload
+  ) => Promise<IntegrationServerDetailResult>;
+  submitIntegrationOnServer: (
+    id: string,
+    opts?: { justificativa?: string; expectedVersion?: number }
+  ) => Promise<IntegrationServerDetailResult>;
+  startIntegrationReviewOnServer: (
+    id: string,
+    opts?: { expectedVersion?: number }
+  ) => Promise<IntegrationServerDetailResult>;
+  reviewIntegrationItemOnServer: (
+    integrationId: string,
+    itemId: string,
+    payload: IntegrationReviewItemPayload
+  ) => Promise<IntegrationServerDetailResult>;
+  requestIntegrationCorrectionOnServer: (
+    id: string,
+    opts: { justificativa: string; expectedVersion?: number }
+  ) => Promise<IntegrationServerDetailResult>;
+  approveIntegrationOnServer: (
+    id: string,
+    opts?: { justificativa?: string; expectedVersion?: number }
+  ) => Promise<IntegrationServerDetailResult>;
+  rejectIntegrationOnServer: (
+    id: string,
+    opts: { justificativa: string; expectedVersion?: number }
+  ) => Promise<IntegrationServerDetailResult>;
+  closeIntegrationOnServer: (
+    id: string,
+    opts?: { justificativa?: string; expectedVersion?: number }
+  ) => Promise<IntegrationServerDetailResult>;
+
   seedInitialBenchmarkData: () => Promise<void>;
 }
 
 const SSTContext = createContext<SSTContextType | undefined>(undefined);
 
 export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { profile, activeRole, activeEmpresaId, isAdmin, authorizedFetch } = useAuth();
+  const { profile, activeRole, activeEmpresaId, isAdmin, authorizedFetch, getAuthHeaders } = useAuth();
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -134,7 +479,25 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [userProfiles, setUserProfiles] = useState<UserProfile[]>([]);
   const [notificationConfigs, setNotificationConfigs] = useState<NotificationConfig[]>([]);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
+  const [activityProfiles, setActivityProfiles] = useState<ActivityProfile[]>([]);
+  const [activityDocumentRequirements, setActivityDocumentRequirements] = useState<ActivityDocumentRequirement[]>([]);
+  const [smartDocs, setSmartDocs] = useState<SmartDocRecord[]>([]);
+  const [contractorIntegrations, setContractorIntegrations] = useState<ContractorIntegration[]>([]);
+  const [activityMatrixFirestoreError, setActivityMatrixFirestoreError] = useState<string | null>(null);
+  const [integrationFirestoreError, setIntegrationFirestoreError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const upsertIntegrationInState = (integration: ContractorIntegration | undefined | null) => {
+    if (!integration || !integration.id) return;
+    setContractorIntegrations((prev) => {
+      const next = prev.some((item) => item.id === integration.id)
+        ? prev.map((item) => (item.id === integration.id ? integration : item))
+        : [integration, ...prev];
+      return [...next].sort((a, b) =>
+        (b.dataUltimaAtualizacao || '').localeCompare(a.dataUltimaAtualizacao || '')
+      );
+    });
+  };
 
   // Real-time synchronization with Firestore
   useEffect(() => {
@@ -310,6 +673,78 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (error) => handleFirestoreError(error, OperationType.GET, 'userProfiles')
       );
       unsubs.push(unsubUsers);
+
+      // 15. Activity Profiles (Catálogo Configurável de Atividades de Terceiros)
+      const unsubActivityProfiles = onSnapshot(
+        collection(db, 'activityProfiles'),
+        (snap) => {
+          const list: ActivityProfile[] = [];
+          snap.forEach((d) => list.push({ id: d.id, ...(d.data() as Omit<ActivityProfile, 'id'>) }));
+          list.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+          setActivityProfiles(list);
+          setActivityMatrixFirestoreError(null);
+        },
+        (error: any) => {
+          const code = String(error?.code || '').toLowerCase();
+          if (code === 'permission-denied' || String(error?.message || '').toLowerCase().includes('insufficient permissions')) {
+            setActivityMatrixFirestoreError(
+              'Acesso negado pelo Firestore (permission-denied) na coleção activityProfiles. Publique as regras atualizadas em firestore.rules no Firebase e conclua a migração para o Firebase Admin SDK.'
+            );
+          }
+          handleFirestoreError(error, OperationType.GET, 'activityProfiles');
+        }
+      );
+      unsubs.push(unsubActivityProfiles);
+
+      // 16. Activity Document Requirements (Matriz de Documentos Obrigatórios por Atividade)
+      const unsubActivityReqs = onSnapshot(
+        collection(db, 'activityDocumentRequirements'),
+        (snap) => {
+          const list: ActivityDocumentRequirement[] = [];
+          snap.forEach((d) =>
+            list.push({ id: d.id, ...(d.data() as Omit<ActivityDocumentRequirement, 'id'>) })
+          );
+          list.sort(
+            (a, b) =>
+              (a.ordemExibicao ?? 999) - (b.ordemExibicao ?? 999) ||
+              a.nomeExibicao.localeCompare(b.nomeExibicao, 'pt-BR')
+          );
+          setActivityDocumentRequirements(list);
+        },
+        (error: any) => {
+          const code = String(error?.code || '').toLowerCase();
+          if (code === 'permission-denied' || String(error?.message || '').toLowerCase().includes('insufficient permissions')) {
+            setActivityMatrixFirestoreError(
+              'Acesso negado pelo Firestore (permission-denied) na coleção activityDocumentRequirements. Publique as regras atualizadas em firestore.rules no Firebase e conclua a migração para o Firebase Admin SDK.'
+            );
+          }
+          handleFirestoreError(error, OperationType.GET, 'activityDocumentRequirements');
+        }
+      );
+      unsubs.push(unsubActivityReqs);
+
+      // 17. SmartDocs (metadados leves sem arquivoUrl para visibilidade de pendências no motor de conformidade)
+      const unsubSmartDocs = onSnapshot(
+        collection(db, 'smartDocs'),
+        (snap) => {
+          const list: SmartDocRecord[] = [];
+          snap.forEach((d) => {
+            const raw = d.data() as Omit<SmartDocRecord, 'id'>;
+            const { arquivoUrl: _omitted, ...safe } = raw;
+            list.push({ id: d.id, ...safe });
+          });
+          setSmartDocs(list);
+        },
+        (error) => {
+          console.warn('Não foi possível sincronizar metadados de SmartDocs:', error);
+        }
+      );
+      unsubs.push(unsubSmartDocs);
+
+      // 18. Contractor Integrations (Central de Integração de Terceiros):
+      // NÃO utilizar onSnapshot direto no Firestore para preservar RBAC, isolamento por empresa
+      // e ocultação de rascunhos/PENDENTE_DOCUMENTACAO para o Admin EHS.
+      // Os dados são hidratados exclusivamente via GET /api/integrations autenticado.
 
       setLoading(false);
     } catch (e) {
@@ -1057,6 +1492,945 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // ============================================================================
+  // MATRIZ DE ATIVIDADES E DOCUMENTOS OBRIGATÓRIOS (GESTÃO DE TERCEIROS)
+  // ============================================================================
+
+  const stripUndefinedFields = <T extends Record<string, unknown>>(obj: T): Record<string, unknown> => {
+    const cleaned: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (value !== undefined) {
+        cleaned[key] = value;
+      }
+    }
+    return cleaned;
+  };
+
+  const assertAdminActor = (): { id: string; nome: string } => {
+    if (!isAdmin || !profile?.id) {
+      throw new Error(
+        'Permissão negada: apenas o Administrador EHS pode cadastrar ou alterar a Matriz de Atividades e Documentos Obrigatórios.'
+      );
+    }
+    return {
+      id: profile.id,
+      nome: profile.nome || 'Administrador EHS',
+    };
+  };
+
+  const addActivityProfile = async (
+    activity: Omit<
+      ActivityProfile,
+      'id' | 'criadoPorId' | 'criadoPorNome' | 'atualizadoPorId' | 'atualizadoPorNome' | 'createdAt' | 'updatedAt'
+    >
+  ): Promise<string> => {
+    const adminActor = assertAdminActor();
+    const nowIso = new Date().toISOString();
+    const payload = stripUndefinedFields({
+      ...activity,
+      codigo: activity.codigo.trim().toUpperCase(),
+      nome: activity.nome.trim(),
+      criadoPorId: adminActor.id,
+      criadoPorNome: adminActor.nome,
+      atualizadoPorId: adminActor.id,
+      atualizadoPorNome: adminActor.nome,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    try {
+      const docRef = await addDoc(collection(db, 'activityProfiles'), payload);
+      await logAudit(
+        'Criação',
+        'Atividade Crítica',
+        docRef.id,
+        `Cadastrada atividade "${activity.nome}" (${activity.codigo.trim().toUpperCase()}).`
+      );
+      return docRef.id;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'activityProfiles');
+      throw error;
+    }
+  };
+
+  const updateActivityProfile = async (id: string, updates: Partial<ActivityProfile>): Promise<void> => {
+    const adminActor = assertAdminActor();
+    const {
+      id: _ignoredId,
+      criadoPorId: _ignoredCreatorId,
+      criadoPorNome: _ignoredCreatorName,
+      createdAt: _ignoredCreatedAt,
+      ...allowedUpdates
+    } = updates;
+
+    const payload = stripUndefinedFields({
+      ...allowedUpdates,
+      ...(allowedUpdates.codigo ? { codigo: allowedUpdates.codigo.trim().toUpperCase() } : {}),
+      ...(allowedUpdates.nome ? { nome: allowedUpdates.nome.trim() } : {}),
+      atualizadoPorId: adminActor.id,
+      atualizadoPorNome: adminActor.nome,
+      updatedAt: new Date().toISOString(),
+    });
+
+    try {
+      await updateDoc(doc(db, 'activityProfiles', id), payload);
+      await logAudit('Atualização', 'Atividade Crítica', id, `Atualizada atividade crítica (${id}).`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `activityProfiles/${id}`);
+      throw error;
+    }
+  };
+
+  const deactivateActivityProfile = async (id: string): Promise<void> => {
+    await updateActivityProfile(id, { ativo: false });
+  };
+
+  const addActivityDocumentRequirement = async (
+    reqData: Omit<
+      ActivityDocumentRequirement,
+      'id' | 'criadoPorId' | 'criadoPorNome' | 'atualizadoPorId' | 'atualizadoPorNome' | 'createdAt' | 'updatedAt'
+    >
+  ): Promise<string> => {
+    const adminActor = assertAdminActor();
+    const nowIso = new Date().toISOString();
+    const payload = stripUndefinedFields({
+      ...reqData,
+      nomeExibicao: reqData.nomeExibicao.trim(),
+      documentoCodigoCanonico: reqData.documentoCodigoCanonico.trim().toUpperCase(),
+      criadoPorId: adminActor.id,
+      criadoPorNome: adminActor.nome,
+      atualizadoPorId: adminActor.id,
+      atualizadoPorNome: adminActor.nome,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    try {
+      const docRef = await addDoc(collection(db, 'activityDocumentRequirements'), payload);
+      await logAudit(
+        'Criação',
+        'Requisito Documental',
+        docRef.id,
+        `Vinculado requisito "${reqData.nomeExibicao}" (${reqData.documentoCodigoCanonico}) à atividade ${reqData.activityId}.`
+      );
+      return docRef.id;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'activityDocumentRequirements');
+      throw error;
+    }
+  };
+
+  const updateActivityDocumentRequirement = async (
+    id: string,
+    updates: Partial<ActivityDocumentRequirement>
+  ): Promise<void> => {
+    const adminActor = assertAdminActor();
+    const {
+      id: _ignoredId,
+      criadoPorId: _ignoredCreatorId,
+      criadoPorNome: _ignoredCreatorName,
+      createdAt: _ignoredCreatedAt,
+      ...allowedUpdates
+    } = updates;
+
+    const payload = stripUndefinedFields({
+      ...allowedUpdates,
+      ...(allowedUpdates.nomeExibicao ? { nomeExibicao: allowedUpdates.nomeExibicao.trim() } : {}),
+      ...(allowedUpdates.documentoCodigoCanonico
+        ? { documentoCodigoCanonico: allowedUpdates.documentoCodigoCanonico.trim().toUpperCase() }
+        : {}),
+      atualizadoPorId: adminActor.id,
+      atualizadoPorNome: adminActor.nome,
+      updatedAt: new Date().toISOString(),
+    });
+
+    try {
+      await updateDoc(doc(db, 'activityDocumentRequirements', id), payload);
+      await logAudit(
+        'Atualização',
+        'Requisito Documental',
+        id,
+        `Atualizado requisito documental obrigatório (${id}).`
+      );
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `activityDocumentRequirements/${id}`);
+      throw error;
+    }
+  };
+
+  const deactivateActivityDocumentRequirement = async (id: string): Promise<void> => {
+    await updateActivityDocumentRequirement(id, { ativo: false });
+  };
+
+  /**
+   * Carrega de forma estritamente idempotente os 5 templates iniciais de atividades críticas
+   * e seus requisitos documentais obrigatórios, sem duplicar registros já existentes.
+   */
+  const seedInitialActivityTemplates = async (): Promise<{
+    createdActivities: number;
+    skippedActivities: number;
+    createdRequirements: number;
+    skippedRequirements: number;
+  }> => {
+    const adminActor = assertAdminActor();
+    const nowIso = new Date().toISOString();
+
+    let createdActivities = 0;
+    let skippedActivities = 0;
+    let createdRequirements = 0;
+    let skippedRequirements = 0;
+
+    try {
+      const [existingActivitiesSnap, existingReqsSnap] = await Promise.all([
+        getDocs(collection(db, 'activityProfiles')),
+        getDocs(collection(db, 'activityDocumentRequirements')),
+      ]);
+
+      const existingActivities: ActivityProfile[] = existingActivitiesSnap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<ActivityProfile, 'id'>),
+      }));
+
+      const existingReqs: ActivityDocumentRequirement[] = existingReqsSnap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<ActivityDocumentRequirement, 'id'>),
+      }));
+
+      const buildRequirementSignature = (
+        activityId: string,
+        req: Pick<
+          ActivityDocumentRequirement,
+          'escopo' | 'origemColecao' | 'documentoCodigoCanonico' | 'aptidaoEspecifica' | 'funcoesAplicaveis'
+        >
+      ) => {
+        const rolesKey = [...(req.funcoesAplicaveis || [])]
+          .map((r) => r.trim().toLowerCase())
+          .sort()
+          .join('|');
+        return `${activityId}::${req.escopo}::${req.origemColecao}::${req.documentoCodigoCanonico.trim().toUpperCase()}::${(req.aptidaoEspecifica || '').trim().toLowerCase()}::${rolesKey}`;
+      };
+
+      const existingReqTemplateKeys = new Set(
+        existingReqs
+          .filter((r) => Boolean(r.templateOrigem))
+          .map((r) => `${r.activityId}::${r.templateOrigem}`)
+      );
+      const existingReqSignatures = new Set(
+        existingReqs.map((r) => buildRequirementSignature(r.activityId, r))
+      );
+
+      for (const template of INITIAL_ACTIVITY_TEMPLATES) {
+        const existingActivity = existingActivities.find(
+          (a) =>
+            a.codigo.trim().toUpperCase() === template.codigo.trim().toUpperCase() ||
+            (a.templateOrigem && a.templateOrigem === template.templateKey)
+        );
+
+        let activityId: string;
+        if (existingActivity) {
+          activityId = existingActivity.id;
+          skippedActivities += 1;
+        } else {
+          const activityPayload = stripUndefinedFields(
+            buildActivityProfilePayloadFromTemplate(template, adminActor, nowIso)
+          );
+          const createdRef = await addDoc(collection(db, 'activityProfiles'), activityPayload);
+          activityId = createdRef.id;
+          existingActivities.push({
+            id: activityId,
+            ...(activityPayload as Omit<ActivityProfile, 'id'>),
+          });
+          createdActivities += 1;
+        }
+
+        const reqPayloads = buildRequirementsPayloadFromTemplate(
+          template,
+          activityId,
+          adminActor,
+          nowIso
+        );
+
+        for (const reqPayload of reqPayloads) {
+          const tplKey = reqPayload.templateOrigem
+            ? `${activityId}::${reqPayload.templateOrigem}`
+            : '';
+          const signature = buildRequirementSignature(activityId, reqPayload);
+
+          if ((tplKey && existingReqTemplateKeys.has(tplKey)) || existingReqSignatures.has(signature)) {
+            skippedRequirements += 1;
+            continue;
+          }
+
+          await addDoc(
+            collection(db, 'activityDocumentRequirements'),
+            stripUndefinedFields(reqPayload)
+          );
+          if (tplKey) existingReqTemplateKeys.add(tplKey);
+          existingReqSignatures.add(signature);
+          createdRequirements += 1;
+        }
+      }
+
+      await logAudit(
+        'Carga Inicial',
+        'Matriz de Atividades',
+        'templates_padrao',
+        `Templates iniciais processados (idempotente): ${createdActivities} atividades criadas (${skippedActivities} já existentes), ${createdRequirements} requisitos criados (${skippedRequirements} já existentes).`
+      );
+
+      return {
+        createdActivities,
+        skippedActivities,
+        createdRequirements,
+        skippedRequirements,
+      };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'activityProfiles');
+      throw error;
+    }
+  };
+
+  // ============================================================================
+  // FLUXO SERVER-SIDE DE SOLICITAÇÃO, APROVAÇÃO E LIBERAÇÃO DE ATIVIDADES
+  // (FAIL-CLOSED: NUNCA APROVA OU LIBERA DIRETAMENTE PELO CLIENTE)
+  // ============================================================================
+  const invokePermitApi = async <T,>(
+    path: string,
+    init: RequestInit = {}
+  ): Promise<T> => {
+    const resp = await authorizedFetch(path, init);
+    const data = await parseApiResponse(resp);
+    if (!resp.ok || data?.success === false) {
+      throw new PermitApiClientError(
+        data?.message || data?.error || `Falha HTTP ${resp.status} ao processar operação no servidor.`,
+        resp.status,
+        {
+          code: data?.code,
+          compliance: data?.compliance,
+          motivosBloqueio: data?.motivosBloqueio,
+          errors: data?.errors,
+        }
+      );
+    }
+    return data as T;
+  };
+
+  const createPermitDraftOnServer = async (
+    payload: PermitServerDraftInput
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>('/api/permits', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const updatePermitDraftOnServer = async (
+    id: string,
+    payload: Partial<PermitServerDraftInput>
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>(`/api/permits/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const evaluatePermitOnServer = async (
+    id: string
+  ): Promise<PermitServerEvaluationResult> => {
+    const res = await invokePermitApi<PermitServerEvaluationResult & { success: boolean }>(
+      `/api/permits/${encodeURIComponent(id)}/compliance`,
+      { method: 'GET' }
+    );
+    return {
+      permit: res.permit,
+      compliance: res.compliance,
+      complianceFingerprint: res.complianceFingerprint,
+      versaoConcorrencia: res.versaoConcorrencia,
+      controlesOperacionais: res.controlesOperacionais,
+      structuralErrors: res.structuralErrors || [],
+    };
+  };
+
+  const submitPermitOnServer = async (
+    id: string,
+    opts?: PermitServerActionInput
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>(`/api/permits/${encodeURIComponent(id)}/submit`, {
+      method: 'POST',
+      body: JSON.stringify(opts || {}),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const startPermitReviewOnServer = async (
+    id: string,
+    opts?: PermitServerActionInput
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>(`/api/permits/${encodeURIComponent(id)}/start-review`, {
+      method: 'POST',
+      body: JSON.stringify(opts || {}),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const requestPermitDocsOnServer = async (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>(`/api/permits/${encodeURIComponent(id)}/request-docs`, {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const requestPermitCorrectionOnServer = async (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>(`/api/permits/${encodeURIComponent(id)}/request-correction`, {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const approvePermitOnServer = async (
+    id: string,
+    opts?: PermitServerActionInput
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>(`/api/permits/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(opts || {}),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const releasePermitOnServer = async (
+    id: string,
+    opts?: PermitServerActionInput
+  ): Promise<{ permit: SafetyPermit; compliance: ActivityComplianceResult }> => {
+    const res = await invokePermitApi<{
+      permit: SafetyPermit;
+      compliance: ActivityComplianceResult;
+    }>(`/api/permits/${encodeURIComponent(id)}/release`, {
+      method: 'POST',
+      body: JSON.stringify(opts || {}),
+    });
+    return { permit: res.permit, compliance: res.compliance };
+  };
+
+  const rejectPermitOnServer = async (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ): Promise<SafetyPermit> => {
+    const res = await invokePermitApi<{ permit: SafetyPermit }>(
+      `/api/permits/${encodeURIComponent(id)}/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      }
+    );
+    return res.permit;
+  };
+
+  const cancelPermitOnServer = async (
+    id: string,
+    opts: PermitServerActionInput & { justificativa: string }
+  ): Promise<SafetyPermit> => {
+    const res = await invokePermitApi<{ permit: SafetyPermit }>(
+      `/api/permits/${encodeURIComponent(id)}/cancel`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      }
+    );
+    return res.permit;
+  };
+
+  const closePermitOnServer = async (
+    id: string,
+    opts?: PermitServerActionInput
+  ): Promise<SafetyPermit> => {
+    const res = await invokePermitApi<{ permit: SafetyPermit }>(
+      `/api/permits/${encodeURIComponent(id)}/close`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts || {}),
+      }
+    );
+    return res.permit;
+  };
+
+  // ============================================================================
+  // CENTRAL DE INTEGRAÇÃO DE TERCEIROS (SERVER-SIDE WORKFLOW /api/integrations/*)
+  // ============================================================================
+  const invokeIntegrationApi = async <T,>(
+    path: string,
+    init: RequestInit = {}
+  ): Promise<T> => {
+    const resp = await authorizedFetch(path, init);
+    const data = await parseApiResponse(resp);
+    if (!resp.ok || data?.success === false) {
+      throw new IntegrationApiClientError(
+        data?.message || data?.error || `Erro HTTP ${resp.status} ao comunicar com a Central de Integração.`,
+        resp.status,
+        data?.code,
+        data
+      );
+    }
+    return data as T;
+  };
+
+  const listIntegrationsOnServer = async (): Promise<ContractorIntegration[]> => {
+    const res = await invokeIntegrationApi<{ integrations: ContractorIntegration[] }>(
+      '/api/integrations',
+      { method: 'GET' }
+    );
+    const list = (res.integrations || []).slice().sort((a, b) =>
+      (b.dataUltimaAtualizacao || '').localeCompare(a.dataUltimaAtualizacao || '')
+    );
+    setContractorIntegrations(list);
+    setIntegrationFirestoreError(null);
+    return list;
+  };
+
+  const getIntegrationDetailOnServer = async (
+    id: string
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(id)}`,
+      { method: 'GET' }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const checkIntegrationDuplicatesOnServer = async (input: {
+    cnpj?: string;
+    cpf?: string;
+  }): Promise<IntegrationDuplicateCheckResult> => {
+    const res = await invokeIntegrationApi<IntegrationDuplicateCheckResult & { success: boolean }>(
+      '/api/integrations/check-duplicates',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    );
+    return {
+      cnpjDuplicado: Boolean(res.cnpjDuplicado),
+      empresaExistente: res.empresaExistente,
+      cpfDuplicado: Boolean(res.cpfDuplicado),
+      colaboradorExistente: res.colaboradorExistente,
+    };
+  };
+
+  const createIntegrationOnServer = async (
+    payload: IntegrationServerCreateInput
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      '/api/integrations',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const uploadIntegrationBatchOnServer = async (
+    id: string,
+    payload: {
+      files: IntegrationBatchFilePayload[];
+      autoSubmit?: boolean;
+      expectedVersion?: number;
+    }
+  ): Promise<IntegrationServerDetailResult & { uploadedCount: number }> => {
+    const res = await invokeIntegrationApi<
+      IntegrationServerDetailResult & { uploadedCount: number; success: boolean }
+    >(`/api/integrations/${encodeURIComponent(id)}/documents/batch`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+      uploadedCount: res.uploadedCount ?? payload.files.length,
+    };
+  };
+
+  const uploadIntegrationDocumentOnServer = async (
+    id: string,
+    payload: IntegrationBatchFilePayload,
+    onProgress?: (percent: number) => void
+  ): Promise<IntegrationSingleUploadResult> => {
+    const url = `/api/integrations/${encodeURIComponent(id)}/documents/upload`;
+    const authHeaders = getAuthHeaders();
+
+    if (typeof XMLHttpRequest === 'undefined') {
+      const res = await invokeIntegrationApi<IntegrationSingleUploadResult & { success: boolean }>(
+        url,
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }
+      );
+      onProgress?.(100);
+      upsertIntegrationInState(res.integration);
+      return {
+        integration: res.integration,
+        items: res.items || [],
+        item: res.item,
+        compliancePreview: res.compliancePreview ?? null,
+        submissionReadiness: res.submissionReadiness,
+        uploadedFile: res.uploadedFile,
+      };
+    }
+
+    return new Promise<IntegrationSingleUploadResult>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url, true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      for (const [k, v] of Object.entries(authHeaders)) {
+        if (v) xhr.setRequestHeader(k, v);
+      }
+
+      xhr.upload.onprogress = (evt) => {
+        if (evt.lengthComputable && evt.total > 0) {
+          // Reserve 90-100% for server validation & storage commit
+          const pct = Math.min(92, Math.max(5, Math.round((evt.loaded / evt.total) * 92)));
+          onProgress?.(pct);
+        }
+      };
+
+      xhr.onerror = () => {
+        reject(
+          new IntegrationApiClientError(
+            'Falha de conexão durante o envio do arquivo. Verifique a rede e tente reenviar.',
+            0,
+            'NETWORK_ERROR'
+          )
+        );
+      };
+
+      xhr.ontimeout = () => {
+        reject(
+          new IntegrationApiClientError(
+            'Tempo limite excedido ao enviar o arquivo. Tente reenviar este item.',
+            408,
+            'UPLOAD_TIMEOUT'
+          )
+        );
+      };
+
+      xhr.onload = () => {
+        let parsed: any = {};
+        try {
+          parsed = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+        } catch {
+          parsed = {};
+        }
+
+        if (xhr.status >= 200 && xhr.status < 300 && parsed?.success) {
+          onProgress?.(100);
+          upsertIntegrationInState(parsed.integration);
+          resolve({
+            integration: parsed.integration,
+            items: parsed.items || [],
+            item: parsed.item,
+            compliancePreview: parsed.compliancePreview ?? null,
+            submissionReadiness: parsed.submissionReadiness,
+            uploadedFile: parsed.uploadedFile,
+          });
+          return;
+        }
+
+        reject(
+          new IntegrationApiClientError(
+            parsed?.message || `Falha ao enviar "${payload.arquivoNome}" (HTTP ${xhr.status}).`,
+            xhr.status,
+            parsed?.code,
+            parsed
+          )
+        );
+      };
+
+      xhr.timeout = 90_000;
+      onProgress?.(5);
+      xhr.send(JSON.stringify(payload));
+    });
+  };
+
+  const fetchIntegrationItemFileBlobOnServer = async (
+    integrationId: string,
+    itemId: string,
+    opts?: { version?: number; download?: boolean }
+  ): Promise<IntegrationFileBlobResult> => {
+    const query = new URLSearchParams();
+    if (opts?.version && opts.version > 0) {
+      query.set('version', String(opts.version));
+    }
+    if (opts?.download) {
+      query.set('download', '1');
+    }
+    const qs = query.toString();
+    const url = `/api/integrations/${encodeURIComponent(integrationId)}/items/${encodeURIComponent(
+      itemId
+    )}/file${qs ? `?${qs}` : ''}`;
+
+    const resp = await authorizedFetch(url, { method: 'GET' });
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new IntegrationApiClientError(
+        errData?.message || `Não foi possível carregar o arquivo (HTTP ${resp.status}).`,
+        resp.status,
+        errData?.code,
+        errData
+      );
+    }
+
+    const blob = await resp.blob();
+    const contentType = (resp.headers.get('Content-Type') || blob.type || 'application/pdf').split(';')[0].trim();
+    const mimeType: 'application/pdf' | 'image/jpeg' | 'image/png' =
+      contentType === 'image/jpeg' || contentType === 'image/png' ? contentType : 'application/pdf';
+
+    const disp = resp.headers.get('Content-Disposition') || '';
+    const match = disp.match(/filename="([^"]+)"/i);
+    const fileName = match?.[1] || 'documento';
+
+    return { blob, mimeType, fileName };
+  };
+
+  const renewIntegrationItemOnServer = async (
+    integrationId: string,
+    itemId: string,
+    payload: IntegrationBatchFilePayload
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(integrationId)}/items/${encodeURIComponent(itemId)}/renew`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const submitIntegrationOnServer = async (
+    id: string,
+    opts?: { justificativa?: string; expectedVersion?: number }
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(id)}/submit`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts || {}),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const startIntegrationReviewOnServer = async (
+    id: string,
+    opts?: { expectedVersion?: number }
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(id)}/start-review`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts || {}),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const reviewIntegrationItemOnServer = async (
+    integrationId: string,
+    itemId: string,
+    payload: IntegrationReviewItemPayload
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(integrationId)}/items/${encodeURIComponent(itemId)}/review`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const requestIntegrationCorrectionOnServer = async (
+    id: string,
+    opts: { justificativa: string; expectedVersion?: number }
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(id)}/request-correction`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const approveIntegrationOnServer = async (
+    id: string,
+    opts?: { justificativa?: string; expectedVersion?: number }
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(id)}/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts || {}),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const rejectIntegrationOnServer = async (
+    id: string,
+    opts: { justificativa: string; expectedVersion?: number }
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(id)}/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const closeIntegrationOnServer = async (
+    id: string,
+    opts?: { justificativa?: string; expectedVersion?: number }
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(id)}/close`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts || {}),
+      }
+    );
+    upsertIntegrationInState(res.integration);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  // Hydrate contractorIntegrations strictly via authenticated backend API (never via direct Firestore listener)
+  useEffect(() => {
+    if (!profile?.id) {
+      setContractorIntegrations([]);
+      setIntegrationFirestoreError(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await listIntegrationsOnServer();
+        if (!cancelled) {
+          setContractorIntegrations(list);
+          setIntegrationFirestoreError(null);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          if (
+            err?.code === 'FIRESTORE_RULES_NOT_PUBLISHED' ||
+            err?.code === 'FIREBASE_ADMIN_NOT_CONFIGURED'
+          ) {
+            setIntegrationFirestoreError(err.message);
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [profile?.id, activeRole, activeEmpresaId]);
+
   // Run benchmark seed on start if database is empty
   useEffect(() => {
     const checkAndSeed = async () => {
@@ -1111,6 +2485,12 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         environmentalDocs,
         auditLogs,
         userProfiles,
+        activityProfiles,
+        activityDocumentRequirements,
+        smartDocs,
+        contractorIntegrations,
+        activityMatrixFirestoreError,
+        integrationFirestoreError,
         notificationConfigs,
         notificationLogs,
         loading,
@@ -1152,6 +2532,40 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendTestNotificationEmail,
         sendCustomNotificationEmail,
         recalculateAlerts,
+        addActivityProfile,
+        updateActivityProfile,
+        deactivateActivityProfile,
+        addActivityDocumentRequirement,
+        updateActivityDocumentRequirement,
+        deactivateActivityDocumentRequirement,
+        seedInitialActivityTemplates,
+        createPermitDraftOnServer,
+        updatePermitDraftOnServer,
+        evaluatePermitOnServer,
+        submitPermitOnServer,
+        startPermitReviewOnServer,
+        requestPermitDocsOnServer,
+        requestPermitCorrectionOnServer,
+        approvePermitOnServer,
+        releasePermitOnServer,
+        rejectPermitOnServer,
+        cancelPermitOnServer,
+        closePermitOnServer,
+        listIntegrationsOnServer,
+        getIntegrationDetailOnServer,
+        checkIntegrationDuplicatesOnServer,
+        createIntegrationOnServer,
+        uploadIntegrationBatchOnServer,
+        uploadIntegrationDocumentOnServer,
+        fetchIntegrationItemFileBlobOnServer,
+        renewIntegrationItemOnServer,
+        submitIntegrationOnServer,
+        startIntegrationReviewOnServer,
+        reviewIntegrationItemOnServer,
+        requestIntegrationCorrectionOnServer,
+        approveIntegrationOnServer,
+        rejectIntegrationOnServer,
+        closeIntegrationOnServer,
         seedInitialBenchmarkData,
       }}
     >

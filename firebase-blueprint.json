@@ -16,6 +16,7 @@
         "endereco": { "type": "string", "maxLength": 300 },
         "unidadeAtendimento": { "type": "string", "maxLength": 100 },
         "atividadeContratada": { "type": "string", "maxLength": 250 },
+        "atividadesAutorizadasIds": { "type": "array", "description": "IDs das atividades críticas vinculadas à contratada" },
         "dataInicioContrato": { "type": "string", "maxLength": 15 },
         "dataTerminoContrato": { "type": "string", "maxLength": 15 },
         "contrato_indeterminado": { "type": "boolean" },
@@ -43,6 +44,7 @@
         "cargo": { "type": "string", "maxLength": 100 },
         "setor": { "type": "string", "maxLength": 100 },
         "atividadeExecutada": { "type": "string", "maxLength": 250 },
+        "atividadesHabilitadasIds": { "type": "array", "description": "IDs das atividades vinculadas ao colaborador terceirizado" },
         "unidadeAlocacao": { "type": "string", "maxLength": 100 },
         "dataAdmissao": { "type": "string", "maxLength": 15 },
         "dataIntegracao": { "type": "string", "maxLength": 15 },
@@ -61,6 +63,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "nomeDocumento": { "type": "string", "maxLength": 200 },
+        "tipoDocumentoCanonico": { "type": "string", "maxLength": 100 },
         "categoria": { "type": "string", "maxLength": 100 },
         "empresaId": { "type": "string", "maxLength": 128 },
         "empresaNome": { "type": "string", "maxLength": 200 },
@@ -91,6 +94,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "nomeTreinamento": { "type": "string", "maxLength": 200 },
+        "tipoDocumentoCanonico": { "type": "string", "maxLength": 100 },
         "colaboradorId": { "type": "string", "maxLength": 128 },
         "colaboradorNome": { "type": "string", "maxLength": 200 },
         "empresaId": { "type": "string", "maxLength": 128 },
@@ -118,6 +122,8 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "tipoExame": { "type": "string", "maxLength": 100 },
+        "tipoDocumentoCanonico": { "type": "string", "maxLength": 100 },
+        "aptidoesEspecificas": { "type": "array", "description": "Aptidões específicas declaradas no ASO do colaborador terceirizado" },
         "colaboradorId": { "type": "string", "maxLength": 128 },
         "colaboradorNome": { "type": "string", "maxLength": 200 },
         "empresaId": { "type": "string", "maxLength": 128 },
@@ -162,22 +168,66 @@
     },
     "safetyPermit": {
       "title": "APR e Permissão de Trabalho (PT)",
-      "description": "Análise Preliminar de Risco e Permissão de Trabalho Seguro",
+      "description": "Análise Preliminar de Risco, Permissão de Trabalho Seguro e Fluxo de Liberação de Atividades de Terceiros",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "tipo": { "type": "string", "enum": ["APR", "PT", "LOTO"] },
         "titulo": { "type": "string", "maxLength": 200 },
+        "descricaoServico": { "type": "string", "maxLength": 2000 },
         "empresaId": { "type": "string", "maxLength": 128 },
         "empresaNome": { "type": "string", "maxLength": 200 },
         "localTrabalho": { "type": "string", "maxLength": 200 },
         "dataInicio": { "type": "string", "maxLength": 20 },
         "dataFim": { "type": "string", "maxLength": 20 },
         "responsavelEmissao": { "type": "string", "maxLength": 150 },
+        "responsavelAtividade": { "type": "string", "maxLength": 150 },
         "riscosIdentificados": { "type": "string", "maxLength": 2000 },
         "medidasPreventivas": { "type": "string", "maxLength": 2000 },
-        "status": { "type": "string", "enum": ["elaboracao", "aprovado", "em_execucao", "encerrado", "cancelado"] },
+        "observacoes": { "type": "string", "maxLength": 2000 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "elaboracao",
+            "pendente_liberacao",
+            "em_analise",
+            "pendente_documentacao",
+            "pendente_correcao",
+            "aprovado",
+            "liberado",
+            "em_execucao",
+            "reprovado",
+            "cancelado",
+            "encerrado"
+          ]
+        },
         "anexoUrl": { "type": "string", "maxLength": 500000 },
+        "controlesOperacionais": { "type": "object" },
+        "anexosControles": { "type": "array" },
+        "atividadeIds": { "type": "array", "description": "IDs das atividades críticas vinculadas à solicitação/liberação" },
+        "atividadeNomes": { "type": "array" },
+        "colaboradorIds": { "type": "array", "description": "IDs dos colaboradores terceirizados executantes" },
+        "statusConformidade": { "type": "string", "enum": ["conforme", "atencao", "bloqueado"] },
+        "pendenciasObrigatoriasCount": { "type": "number" },
+        "pendenciasAlertaCount": { "type": "number" },
+        "solicitadoPorId": { "type": "string", "maxLength": 128 },
+        "solicitadoPorNome": { "type": "string", "maxLength": 150 },
+        "solicitadoPorRole": { "type": "string", "enum": ["admin", "solicitante", "auditor"] },
+        "dataSolicitacao": { "type": "string", "maxLength": 40 },
+        "aprovadoPorId": { "type": "string", "maxLength": 128 },
+        "aprovadoPorNome": { "type": "string", "maxLength": 150 },
+        "dataAprovacao": { "type": "string", "maxLength": 40 },
+        "liberadoPorId": { "type": "string", "maxLength": 128 },
+        "liberadoPorNome": { "type": "string", "maxLength": 150 },
+        "liberadoPorRole": { "type": "string", "enum": ["admin"] },
+        "dataLiberacao": { "type": "string", "maxLength": 40 },
+        "motivoBloqueioOuRejeicao": { "type": "string", "maxLength": 1000 },
+        "motivoCorrecao": { "type": "string", "maxLength": 1000 },
+        "justificativaDecisao": { "type": "string", "maxLength": 1000 },
+        "versaoConcorrencia": { "type": "number" },
+        "complianceFingerprint": { "type": "string", "maxLength": 128 },
+        "validadoServerSide": { "type": "boolean" },
+        "historicoWorkflow": { "type": "array" },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
@@ -425,6 +475,141 @@
         "updatedAt": { "type": "string", "maxLength": 40 }
       },
       "required": ["key", "attempts", "windowStart"]
+    },
+    "activityProfile": {
+      "title": "Perfil de Atividade Crítica (Terceiros)",
+      "description": "Catálogo configurável de atividades críticas executadas por empresas contratadas e terceirizados",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "codigo": { "type": "string", "maxLength": 80 },
+        "nome": { "type": "string", "maxLength": 180 },
+        "descricao": { "type": "string", "maxLength": 1000 },
+        "nivelRisco": { "type": "string", "enum": ["baixo", "medio", "alto", "critico"] },
+        "riscosAssociados": { "type": "array" },
+        "normasAplicaveis": { "type": "array" },
+        "exigeAPR": { "type": "boolean" },
+        "exigePT": { "type": "boolean" },
+        "exigeLOTO": { "type": "boolean" },
+        "exigePET": { "type": "boolean" },
+        "templateOrigem": { "type": "string", "maxLength": 100 },
+        "ativo": { "type": "boolean" },
+        "criadoPorId": { "type": "string", "maxLength": 128 },
+        "criadoPorNome": { "type": "string", "maxLength": 150 },
+        "atualizadoPorId": { "type": "string", "maxLength": 128 },
+        "atualizadoPorNome": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["codigo", "nome", "nivelRisco", "riscosAssociados", "normasAplicaveis", "exigeAPR", "exigePT", "exigeLOTO", "ativo", "criadoPorId"]
+    },
+    "activityDocumentRequirement": {
+      "title": "Requisito Documental Obrigatório por Atividade",
+      "description": "Regra configurável que vincula documentos obrigatórios, riscos e funções aplicáveis a uma atividade de terceiros",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "activityId": { "type": "string", "maxLength": 128 },
+        "activityCodigo": { "type": "string", "maxLength": 80 },
+        "nomeExibicao": { "type": "string", "maxLength": 200 },
+        "descricao": { "type": "string", "maxLength": 1000 },
+        "documentoCodigoCanonico": { "type": "string", "maxLength": 100 },
+        "palavrasChaveMatch": { "type": "array" },
+        "escopo": { "type": "string", "enum": ["empresa", "colaborador", "atividade_pt"] },
+        "origemColecao": { "type": "string", "enum": ["documents", "trainings", "exams", "epiDeliveries", "safetyPermits"] },
+        "funcoesAplicaveis": { "type": "array" },
+        "exigeAptoASO": { "type": "boolean" },
+        "aptidaoEspecifica": { "type": "string", "maxLength": 100 },
+        "validadePadraoMeses": { "type": "number" },
+        "obrigatorioParaLiberacao": { "type": "boolean" },
+        "baseLegal": { "type": "string", "maxLength": 200 },
+        "ordemExibicao": { "type": "number" },
+        "templateOrigem": { "type": "string", "maxLength": 100 },
+        "ativo": { "type": "boolean" },
+        "criadoPorId": { "type": "string", "maxLength": 128 },
+        "criadoPorNome": { "type": "string", "maxLength": 150 },
+        "atualizadoPorId": { "type": "string", "maxLength": 128 },
+        "atualizadoPorNome": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["activityId", "nomeExibicao", "documentoCodigoCanonico", "palavrasChaveMatch", "escopo", "origemColecao", "funcoesAplicaveis", "obrigatorioParaLiberacao", "ativo", "criadoPorId"]
+    },
+    "contractorIntegration": {
+      "title": "Processo de Integração de Terceiros",
+      "description": "Registro centralizado de integração inicial ou atualização documental de empresa contratada e seus colaboradores terceirizados",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "codigoProtocolo": { "type": "string", "maxLength": 60 },
+        "tipo": { "type": "string", "enum": ["INTEGRACAO_INICIAL", "ATUALIZACAO_DOCUMENTAL"] },
+        "status": {
+          "type": "string",
+          "enum": [
+            "RASCUNHO",
+            "PENDENTE_DOCUMENTACAO",
+            "EM_ENVIO",
+            "ENVIADA",
+            "AGUARDANDO_ANALISE",
+            "EM_ANALISE",
+            "PENDENTE_CORRECAO",
+            "REENVIADA",
+            "APROVADA",
+            "REPROVADA",
+            "ENCERRADA"
+          ]
+        },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "empresaCnpj": { "type": "string", "maxLength": 30 },
+        "atividadeIds": { "type": "array" },
+        "colaboradorIds": { "type": "array" },
+        "solicitadoPorId": { "type": "string", "maxLength": 128 },
+        "solicitadoPorNome": { "type": "string", "maxLength": 150 },
+        "solicitadoPorRole": { "type": "string", "enum": ["admin", "solicitante", "auditor"] },
+        "aprovadoPorId": { "type": "string", "maxLength": 128 },
+        "versaoConcorrencia": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["codigoProtocolo", "tipo", "status", "empresaNome", "empresaCnpj", "solicitadoPorId", "solicitadoPorRole", "versaoConcorrencia"]
+    },
+    "contractorIntegrationItem": {
+      "title": "Item Documental da Integração de Terceiros",
+      "description": "Item documental normalizado e versionado vinculado à empresa, colaborador e requisito da Matriz de Atividades (sem Base64 no Firestore)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "integrationId": { "type": "string", "maxLength": 128 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "colaboradorId": { "type": "string", "maxLength": 128 },
+        "colaboradorNome": { "type": "string", "maxLength": 200 },
+        "categoria": { "type": "string", "enum": ["empresa", "colaborador", "atividade_critica"] },
+        "categoriaOrganizacional": {
+          "type": "string",
+          "enum": ["trabalhista", "saude_ocupacional", "treinamentos_seguranca", "epi_documentos_complementares"]
+        },
+        "requirementId": { "type": "string", "maxLength": 128 },
+        "documentoCodigoCanonico": { "type": "string", "maxLength": 100 },
+        "nomeExibicao": { "type": "string", "maxLength": 200 },
+        "origemColecao": { "type": "string", "enum": ["documents", "trainings", "exams", "epiDeliveries"] },
+        "obrigatorio": { "type": "boolean" },
+        "status": {
+          "type": "string",
+          "enum": ["PENDENTE_ENVIO", "ENVIADO", "EM_ANALISE", "APROVADO", "REPROVADO", "SUBSTITUIDO"]
+        },
+        "versaoAtual": { "type": "number" },
+        "arquivoId": { "type": "string", "maxLength": 128 },
+        "storageProvider": { "type": "string", "enum": ["local_private", "firebase_storage", "gcs", "azure_blob", "s3"] },
+        "hasStoredFile": { "type": "boolean" },
+        "arquivoHashSha256": { "type": "string", "maxLength": 128 },
+        "officialCollection": { "type": "string", "enum": ["documents", "trainings", "exams", "epiDeliveries"] },
+        "officialRecordId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["integrationId", "empresaNome", "categoria", "documentoCodigoCanonico", "nomeExibicao", "origemColecao", "obrigatorio", "status", "versaoAtual"]
     }
   },
   "firestore": {
@@ -503,6 +688,23 @@
     "/passwordRecoveryRateLimits/{rateKey}": {
       "schema": "passwordRecoveryRateLimit",
       "description": "Controle de limite de tentativas contra ataques automatizados na recuperação"
+    },
+    "/activityProfiles/{activityId}": {
+      "schema": "activityProfile",
+      "description": "Catálogo configurável de atividades críticas executadas por empresas contratadas e terceirizados"
+    },
+    "/activityDocumentRequirements/{requirementId}": {
+      "schema": "activityDocumentRequirement",
+      "description": "Matriz configurável de documentos obrigatórios por atividade, risco e função do trabalhador terceirizado"
+    },
+    "/contractorIntegrations/{integrationId}": {
+      "schema": "contractorIntegration",
+      "description": "Processos da Central de Integração e Atualização Documental de Terceiros"
+    },
+    "/contractorIntegrationItems/{itemId}": {
+      "schema": "contractorIntegrationItem",
+      "description": "Itens documentais versionados e auditáveis da Central de Integração de Terceiros"
     }
   }
 }
+

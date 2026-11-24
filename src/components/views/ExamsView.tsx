@@ -22,6 +22,7 @@ import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
 import { OccupationalExam, TipoExame, ConclusaoAptidao } from '../../types/sst';
 import { formatDateBR, getTrafficLightStatus } from '../../utils/trafficLight';
+import { ProtectedDocumentButton } from '../common/ProtectedDocumentButton';
 
 const TIPOS_EXAME: TipoExame[] = [
   'ASO Admissional',
@@ -38,6 +39,14 @@ const TIPOS_EXAME: TipoExame[] = [
   'Exame Complementar - Toxicológico / Laboratorial',
 ];
 
+const ASO_APTIDAO_OPTIONS = [
+  { key: 'trabalho_altura', label: 'Trabalho em Altura (NR-35)' },
+  { key: 'espaco_confinado', label: 'Espaço Confinado (NR-33)' },
+  { key: 'eletricidade', label: 'Serviços Elétricos (NR-10)' },
+  { key: 'trabalho_quente', label: 'Trabalho a Quente' },
+  { key: 'escavacao', label: 'Escavação / Obra Civil' },
+];
+
 export const ExamsView: React.FC = () => {
   const { exams, employees, companies, addExam, updateExam, deleteExam } = useSST();
   const { isAdmin, isSolicitante, activeEmpresaId } = useAuth();
@@ -49,6 +58,10 @@ export const ExamsView: React.FC = () => {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingExam, setEditingExam] = useState<OccupationalExam | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(
+    null
+  );
+  const [pendingDeleteExam, setPendingDeleteExam] = useState<OccupationalExam | null>(null);
 
   // Intelligent Search for Empresa in Modal
   const [companySearchQuery, setCompanySearchQuery] = useState('');
@@ -57,6 +70,8 @@ export const ExamsView: React.FC = () => {
   // Form states
   const [formData, setFormData] = useState<Omit<OccupationalExam, 'id'>>({
     tipoExame: 'ASO Periódico',
+    tipoDocumentoCanonico: 'ASO',
+    aptidoesEspecificas: [],
     colaboradorId: '',
     colaboradorNome: '',
     empresaId: '',
@@ -120,6 +135,7 @@ export const ExamsView: React.FC = () => {
   }, [companies, companySearchQuery, isSolicitante, activeEmpresaId]);
 
   const handleOpenAddModal = () => {
+    setFeedback(null);
     setEditingExam(null);
     setCompanySearchQuery('');
     setIsCompanyDropdownOpen(false);
@@ -135,6 +151,8 @@ export const ExamsView: React.FC = () => {
 
     setFormData({
       tipoExame: 'ASO Periódico',
+      tipoDocumentoCanonico: 'ASO',
+      aptidoesEspecificas: [],
       colaboradorId: defaultColab?.id || '',
       colaboradorNome: defaultColab?.nomeCompleto || '',
       empresaId: defaultEmp?.id || '',
@@ -154,11 +172,14 @@ export const ExamsView: React.FC = () => {
   };
 
   const handleOpenEditModal = (ex: OccupationalExam) => {
+    setFeedback(null);
     setEditingExam(ex);
     setCompanySearchQuery('');
     setIsCompanyDropdownOpen(false);
     setFormData({
       tipoExame: ex.tipoExame,
+      tipoDocumentoCanonico: ex.tipoDocumentoCanonico || (ex.tipoExame.toUpperCase().includes('ASO') ? 'ASO' : ''),
+      aptidoesEspecificas: [...(ex.aptidoesEspecificas || [])],
       colaboradorId: ex.colaboradorId,
       colaboradorNome: ex.colaboradorNome,
       empresaId: ex.empresaId,
@@ -175,6 +196,18 @@ export const ExamsView: React.FC = () => {
       situacao: ex.situacao,
     });
     setIsModalOpen(true);
+  };
+
+  const toggleAptidao = (key: string) => {
+    setFormData((prev) => {
+      const current = prev.aptidoesEspecificas || [];
+      return {
+        ...prev,
+        aptidoesEspecificas: current.includes(key)
+          ? current.filter((k) => k !== key)
+          : [...current, key],
+      };
+    });
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -196,8 +229,12 @@ export const ExamsView: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFeedback(null);
     if (!formData.colaboradorId || !formData.empresaId || !formData.dataRealizacao) {
-      alert('Colaborador, empresa e data de realização são obrigatórios.');
+      setFeedback({
+        type: 'error',
+        message: 'Colaborador, empresa contratada e data de realização são obrigatórios.',
+      });
       return;
     }
 
@@ -205,36 +242,50 @@ export const ExamsView: React.FC = () => {
       const colab = employees.find((em) => em.id === formData.colaboradorId);
       const comp = companies.find((c) => c.id === formData.empresaId);
 
-      const payload = {
+      const isAsoType = formData.tipoExame.toUpperCase().includes('ASO');
+      const payload: Omit<OccupationalExam, 'id'> = {
         ...formData,
+        tipoDocumentoCanonico: formData.tipoDocumentoCanonico?.trim() || (isAsoType ? 'ASO' : undefined),
+        aptidoesEspecificas: formData.aptidoesEspecificas || [],
         colaboradorNome: colab?.nomeCompleto || formData.colaboradorNome,
         empresaNome: comp?.razaoSocial || formData.empresaNome,
       };
 
       if (editingExam) {
         await updateExam(editingExam.id, payload);
+        setFeedback({ type: 'success', message: 'Registro de exame/ASO atualizado.' });
       } else {
         await addExam(payload);
+        setFeedback({ type: 'success', message: 'Exame ocupacional / ASO cadastrado.' });
       }
       setIsModalOpen(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Erro ao salvar exame.');
+      setFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao salvar exame ocupacional.',
+      });
     }
   };
 
-  const handleDelete = async (id: string, name: string) => {
+  const confirmDeleteExam = async () => {
+    if (!pendingDeleteExam) return;
     if (!isAdmin) {
-      alert('Apenas o Administrador SST tem autorização para excluir registros de exames.');
+      setFeedback({
+        type: 'error',
+        message: 'Apenas o Administrador EHS tem autorização para excluir registros de exames.',
+      });
+      setPendingDeleteExam(null);
       return;
     }
-    if (confirm(`Confirma a exclusão deste registro de exame (${name})?`)) {
-      try {
-        await deleteExam(id);
-      } catch (e) {
-        console.error(e);
-        alert('Erro ao excluir exame.');
-      }
+    try {
+      await deleteExam(pendingDeleteExam.id);
+      setFeedback({ type: 'success', message: 'Registro de exame excluído.' });
+    } catch (e: any) {
+      console.error(e);
+      setFeedback({ type: 'error', message: e?.message || 'Erro ao excluir exame.' });
+    } finally {
+      setPendingDeleteExam(null);
     }
   };
 
@@ -260,6 +311,25 @@ export const ExamsView: React.FC = () => {
           Cadastrar Exame / ASO
         </button>
       </div>
+
+      {feedback && (
+        <div
+          className={`rounded-xl border px-4 py-3 text-xs flex items-center justify-between gap-3 ${
+            feedback.type === 'error'
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+          }`}
+        >
+          <span>{feedback.message}</span>
+          <button
+            type="button"
+            onClick={() => setFeedback(null)}
+            className="text-slate-400 hover:text-white"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* LGPD Security Warning Box (Section 10 Requirement) */}
       <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex items-center gap-3 text-xs text-slate-300">
@@ -385,8 +455,20 @@ export const ExamsView: React.FC = () => {
                               : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
                           }`}
                         >
-                          {ex.conclusao}
+                          {ex.conclusao.replace(/_/g, ' ')}
                         </span>
+                        {(ex.aptidoesEspecificas || []).length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {(ex.aptidoesEspecificas || []).map((apt) => (
+                              <span
+                                key={apt}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-emerald-300"
+                              >
+                                {apt.replace(/_/g, ' ')}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3.5">
                         <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-bold ${farol.badgeClass}`}>
@@ -396,15 +478,13 @@ export const ExamsView: React.FC = () => {
                       <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           {ex.anexoUrl && (
-                            <a
-                              href={ex.anexoUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                            <ProtectedDocumentButton
+                              url={ex.anexoUrl}
+                              fileName={ex.anexoNome || `${ex.tipoExame} - ${ex.colaboradorNome}`}
                               title="Visualizar ASO Anexado"
-                            >
-                              <FileText size={15} />
-                            </a>
+                              className="p-1.5 text-blue-400 hover:text-white rounded hover:bg-slate-800"
+                              icon={<FileText size={15} />}
+                            />
                           )}
 
                           {isAdmin && (
@@ -417,7 +497,7 @@ export const ExamsView: React.FC = () => {
                                 <Edit2 size={15} />
                               </button>
                               <button
-                                onClick={() => handleDelete(ex.id, ex.tipoExame)}
+                                onClick={() => setPendingDeleteExam(ex)}
                                 className="p-1.5 text-slate-400 hover:text-red-400 rounded hover:bg-slate-800"
                                 title="Excluir Registro"
                               >
@@ -732,6 +812,39 @@ export const ExamsView: React.FC = () => {
                 </label>
               </div>
 
+              {/* Aptidões Específicas do ASO */}
+              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2">
+                <label className="block text-xs font-semibold text-white">
+                  Aptidões Específicas Declaradas no ASO (Validação para Atividades Críticas)
+                </label>
+                <p className="text-[11px] text-slate-400">
+                  Marque somente as aptidões expressamente liberadas pelo médico examinador no ASO.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                  {ASO_APTIDAO_OPTIONS.map((opt) => {
+                    const checked = (formData.aptidoesEspecificas || []).includes(opt.key);
+                    return (
+                      <label
+                        key={opt.key}
+                        className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border text-xs cursor-pointer transition-colors ${
+                          checked
+                            ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleAptidao(opt.key)}
+                          className="rounded bg-slate-950 border-slate-700 text-emerald-500"
+                        />
+                        <span>{opt.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
                   Observações Médicas e Restrições Ocupacionais
@@ -749,7 +862,7 @@ export const ExamsView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-750 text-xs text-slate-300"
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
                 >
                   Cancelar
                 </button>
@@ -761,6 +874,43 @@ export const ExamsView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Inline Delete Confirmation Modal */}
+      {pendingDeleteExam && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-rose-500/15 text-rose-400">
+                <Trash2 size={18} />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Confirmar Exclusão</h3>
+                <p className="text-xs text-slate-400">Remover registro de exame ocupacional / ASO.</p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-300">
+              Confirma a exclusão de <span className="font-semibold text-white">{pendingDeleteExam.tipoExame}</span>{' '}
+              de <span className="font-semibold text-white">{pendingDeleteExam.colaboradorNome}</span>?
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteExam(null)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteExam}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white"
+              >
+                Excluir Registro
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -22,32 +22,37 @@ import { UsersPermissionsView } from './components/views/UsersPermissionsView';
 import { SettingsImportView } from './components/views/SettingsImportView';
 import { NotificationsView } from './components/views/NotificationsView';
 import { SmartDocsView } from './components/views/SmartDocsView';
+import { ActivityMatrixView } from './components/views/ActivityMatrixView';
+import { CentralIntegracaoView } from './components/views/CentralIntegracaoView';
+import { IntegrationsAdminView } from './components/views/IntegrationsAdminView';
 import { ShieldCheck, Loader2 } from 'lucide-react';
 
+// Solicitante authorized modules (Section 9): individual Colaboradores, Treinamentos, Documentos removed in favor of Central de Integração
 const SOLICITANTE_ALLOWED_TABS: NavItemKey[] = [
+  'central_integracao',
+  'acompanhamento_integracoes',
   'empresas',
-  'colaboradores',
-  'documentos',
+  'apr_pt',
   'smartdocs',
-  'treinamentos',
   'exames',
   'epi',
-  'apr_pt',
   'planos_acao',
   'ambiental',
 ];
 
 const MainAppContent: React.FC = () => {
   const { isAuthenticated, loading: authLoading, isSolicitante } = useAuth();
-  const [currentTab, setCurrentTab] = useState<NavItemKey>(() => (isSolicitante ? 'empresas' : 'dashboard'));
+  const [currentTab, setCurrentTab] = useState<NavItemKey>(() =>
+    isSolicitante ? 'central_integracao' : 'dashboard'
+  );
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const { loading: sstLoading } = useSST();
 
-  // Auto-redirect Solicitante away from unauthorized modules (Dashboard, Notificações, Usuários, Relatórios, etc.)
+  // Auto-redirect Solicitante away from unauthorized or replaced individual modules
   React.useEffect(() => {
     if (isSolicitante && !SOLICITANTE_ALLOWED_TABS.includes(currentTab)) {
-      setCurrentTab('empresas');
+      setCurrentTab('central_integracao');
     }
   }, [isSolicitante, currentTab]);
 
@@ -75,7 +80,7 @@ const MainAppContent: React.FC = () => {
 
   const handleSelectTab = (tab: NavItemKey) => {
     if (isSolicitante && !SOLICITANTE_ALLOWED_TABS.includes(tab)) {
-      setCurrentTab('empresas');
+      setCurrentTab('central_integracao');
     } else {
       setCurrentTab(tab);
     }
@@ -106,14 +111,20 @@ const MainAppContent: React.FC = () => {
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 custom-scrollbar">
           <div className="max-w-7xl mx-auto pb-12">
             {!isSolicitante && currentTab === 'dashboard' && <DashboardView onNavigate={handleSelectTab} />}
+            {currentTab === 'central_integracao' && <CentralIntegracaoView initialSection="nova" />}
+            {currentTab === 'acompanhamento_integracoes' && (
+              <CentralIntegracaoView initialSection="acompanhamento" />
+            )}
+            {!isSolicitante && currentTab === 'gestao_integracoes' && <IntegrationsAdminView />}
             {currentTab === 'empresas' && <CompaniesView />}
-            {currentTab === 'colaboradores' && <EmployeesView />}
-            {currentTab === 'treinamentos' && <TrainingsView />}
-            {currentTab === 'documentos' && <DocumentsView />}
+            {!isSolicitante && currentTab === 'colaboradores' && <EmployeesView />}
+            {!isSolicitante && currentTab === 'treinamentos' && <TrainingsView />}
+            {!isSolicitante && currentTab === 'documentos' && <DocumentsView />}
             {currentTab === 'smartdocs' && <SmartDocsView />}
             {currentTab === 'exames' && <ExamsView />}
             {currentTab === 'epi' && <EpiView />}
             {currentTab === 'apr_pt' && <PermitsView />}
+            {!isSolicitante && currentTab === 'matriz_atividades' && <ActivityMatrixView />}
             {!isSolicitante && currentTab === 'inspecoes' && <InspectionsView />}
             {currentTab === 'planos_acao' && <ActionPlansView />}
             {currentTab === 'ambiental' && <EnvironmentalView />}
