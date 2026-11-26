@@ -15,6 +15,8 @@ import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { useAuth } from './AuthContext';
 import {
   Company,
+  CompanyChangeRequest,
+  CompanyEditableFields,
   Employee,
   DocumentSST,
   Training,
@@ -39,6 +41,7 @@ import {
   SmartDocRecord,
   ContractorIntegration,
   ContractorIntegrationItem,
+  MirroredIntegrationDocumentItem,
   IntegrationType,
   IntegrationItemCategory,
   IntegrationDocumentGroupId,
@@ -262,6 +265,7 @@ interface SSTContextType {
   activityDocumentRequirements: ActivityDocumentRequirement[];
   smartDocs: SmartDocRecord[];
   contractorIntegrations: ContractorIntegration[];
+  contractorIntegrationItems: MirroredIntegrationDocumentItem[];
   activityMatrixFirestoreError: string | null;
   integrationFirestoreError: string | null;
   loading: boolean;
@@ -269,6 +273,13 @@ interface SSTContextType {
   addCompany: (comp: Omit<Company, 'id'>) => Promise<string>;
   updateCompany: (id: string, comp: Partial<Company>) => Promise<void>;
   deleteCompany: (id: string) => Promise<void>;
+  requestCompanyChange: (
+    companyId: string,
+    proposedChanges: Partial<CompanyEditableFields>,
+    justificativaSolicitante: string
+  ) => Promise<string>;
+  approveCompanyChange: (companyId: string, requestId: string, observacao?: string) => Promise<void>;
+  rejectCompanyChange: (companyId: string, requestId: string, justificativa: string) => Promise<void>;
 
   addEmployee: (emp: Omit<Employee, 'id'>) => Promise<string>;
   updateEmployee: (id: string, emp: Partial<Employee>) => Promise<void>;
@@ -288,6 +299,8 @@ interface SSTContextType {
 
   addExam: (exam: Omit<OccupationalExam, 'id'>) => Promise<string>;
   updateExam: (id: string, exam: Partial<OccupationalExam>) => Promise<void>;
+  approveExam: (id: string) => Promise<void>;
+  rejectExam: (id: string, motivo: string) => Promise<void>;
   deleteExam: (id: string) => Promise<void>;
 
   addEPIDelivery: (epi: Omit<EPIDelivery, 'id'>) => Promise<string>;
@@ -396,6 +409,7 @@ interface SSTContextType {
 
   // Server-backed Central de Integração de Terceiros (/api/integrations/*)
   listIntegrationsOnServer: () => Promise<ContractorIntegration[]>;
+  listIntegrationItemsOnServer: () => Promise<MirroredIntegrationDocumentItem[]>;
   getIntegrationDetailOnServer: (id: string) => Promise<IntegrationServerDetailResult>;
   checkIntegrationDuplicatesOnServer: (input: {
     cnpj?: string;
@@ -440,6 +454,16 @@ interface SSTContextType {
     itemId: string,
     payload: IntegrationReviewItemPayload
   ) => Promise<IntegrationServerDetailResult>;
+  updateIntegrationItemValidityOnServer: (
+    integrationId: string,
+    itemId: string,
+    payload: {
+      dataValidade?: string;
+      semValidade?: boolean;
+      observacoes?: string;
+      expectedVersion?: number;
+    }
+  ) => Promise<IntegrationServerDetailResult>;
   requestIntegrationCorrectionOnServer: (
     id: string,
     opts: { justificativa: string; expectedVersion?: number }
@@ -483,11 +507,37 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activityDocumentRequirements, setActivityDocumentRequirements] = useState<ActivityDocumentRequirement[]>([]);
   const [smartDocs, setSmartDocs] = useState<SmartDocRecord[]>([]);
   const [contractorIntegrations, setContractorIntegrations] = useState<ContractorIntegration[]>([]);
+  const [contractorIntegrationItems, setContractorIntegrationItems] = useState<
+    MirroredIntegrationDocumentItem[]
+  >([]);
   const [activityMatrixFirestoreError, setActivityMatrixFirestoreError] = useState<string | null>(null);
   const [integrationFirestoreError, setIntegrationFirestoreError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const upsertIntegrationInState = (integration: ContractorIntegration | undefined | null) => {
+  const upsertIntegrationInState = (
+    integration: ContractorIntegration | undefined | null,
+    items?: ContractorIntegrationItem[]
+  ) => {
+    if (integration && Array.isArray(items)) {
+      const mirroredForProtocol: MirroredIntegrationDocumentItem[] = items.map((it) => ({
+        ...it,
+        codigoProtocolo: integration.codigoProtocolo,
+        protocoloStatus: integration.status,
+        protocoloTipo: integration.tipo,
+        empresaCnpj: integration.empresaCnpj,
+        solicitadoPorNome: integration.solicitadoPorNome,
+        protocoloDataEnvio: integration.dataEnvio,
+        protocoloDataUltimaAtualizacao: integration.dataUltimaAtualizacao,
+      }));
+      setContractorIntegrationItems((prev) => {
+        const others = prev.filter((it) => it.integrationId !== integration.id);
+        return [...mirroredForProtocol, ...others].sort((a, b) =>
+          (b.updatedAt || b.dataEnvio || b.createdAt || '').localeCompare(
+            a.updatedAt || a.dataEnvio || a.createdAt || ''
+          )
+        );
+      });
+    }
     if (!integration || !integration.id) return;
     setContractorIntegrations((prev) => {
       const next = prev.some((item) => item.id === integration.id)
@@ -808,9 +858,205 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteCompany = async (id: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode excluir empresas.');
+    }
     const comp = companies.find((c) => c.id === id);
     await deleteDoc(doc(db, 'companies', id));
     await logAudit('Exclusão', 'Empresa', id, `Excluída empresa ${comp?.razaoSocial || id}`);
+  };
+
+  const requestCompanyChange = async (
+    companyId: string,
+    proposedChanges: Partial<CompanyEditableFields>,
+    justificativaSolicitante: string
+  ): Promise<string> => {
+    const company = companies.find((c) => c.id === companyId);
+    if (!company) {
+      throw new Error('Empresa não encontrada para solicitação de alteração cadastral.');
+    }
+    if (activeRole === 'solicitante' && activeEmpresaId && companyId !== activeEmpresaId) {
+      throw new Error('Permissão negada: você só pode solicitar alteração para sua própria empresa.');
+    }
+    const cleanReason = (justificativaSolicitante || '').trim();
+    if (!cleanReason) {
+      throw new Error('Informe a justificativa para solicitar a alteração cadastral.');
+    }
+
+    const editableKeys: (keyof CompanyEditableFields)[] = [
+      'razaoSocial',
+      'nomeFantasia',
+      'cnpj',
+      'responsavelLegal',
+      'responsavelSST',
+      'telefone',
+      'email',
+      'endereco',
+      'unidadeAtendimento',
+      'atividadeContratada',
+      'dataInicioContrato',
+      'dataTerminoContrato',
+      'contrato_indeterminado',
+    ];
+
+    const dadosAnteriores: Partial<CompanyEditableFields> = {};
+    const dadosSolicitados: Partial<CompanyEditableFields> = {};
+
+    for (const key of editableKeys) {
+      if (key in proposedChanges && proposedChanges[key] !== undefined) {
+        const oldVal = company[key];
+        const newVal = proposedChanges[key];
+        if (oldVal !== newVal) {
+          (dadosAnteriores as any)[key] = oldVal ?? '';
+          (dadosSolicitados as any)[key] = newVal;
+        }
+      }
+    }
+
+    if (Object.keys(dadosSolicitados).length === 0) {
+      throw new Error('Nenhuma alteração foi detectada em relação ao cadastro atual da empresa.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const requestId = `chg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const newReq: CompanyChangeRequest = {
+      id: requestId,
+      empresaId: companyId,
+      solicitadoPorId: profile?.id || 'solicitante',
+      solicitadoPorNome: profile?.nome || 'Solicitante',
+      solicitadoPorEmail: profile?.email || '',
+      dataSolicitacao: nowIso,
+      justificativaSolicitante: cleanReason,
+      dadosAnteriores,
+      dadosSolicitados,
+      status: 'pendente',
+    };
+
+    const existingList = company.solicitacoesAlteracao || [];
+    const docRef = doc(db, 'companies', companyId);
+    await updateDoc(docRef, {
+      solicitacoesAlteracao: [newReq, ...existingList],
+      updatedAt: nowIso,
+    });
+
+    await logAudit(
+      'Solicitação de Alteração Cadastral',
+      'Empresa',
+      companyId,
+      `Solicitação ${requestId} enviada por ${newReq.solicitadoPorNome} para "${company.razaoSocial}" (${Object.keys(dadosSolicitados).join(', ')}). Justificativa: ${cleanReason}`
+    );
+
+    return requestId;
+  };
+
+  const approveCompanyChange = async (
+    companyId: string,
+    requestId: string,
+    observacao?: string
+  ): Promise<void> => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar alterações cadastrais.');
+    }
+    const company = companies.find((c) => c.id === companyId);
+    if (!company) {
+      throw new Error('Empresa não encontrada.');
+    }
+    const existingList = company.solicitacoesAlteracao || [];
+    const targetReq = existingList.find((r) => r.id === requestId);
+    if (!targetReq) {
+      throw new Error('Solicitação de alteração cadastral não encontrada.');
+    }
+    if (targetReq.status !== 'pendente') {
+      throw new Error('Esta solicitação já foi analisada anteriormente.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const adminName = profile?.nome || 'Administrador EHS';
+    const updatedRequests: CompanyChangeRequest[] = existingList.map((r) =>
+      r.id === requestId
+        ? {
+            ...r,
+            status: 'aprovada',
+            analisadoPorId: profile?.id || 'admin',
+            analisadoPorNome: adminName,
+            dataAnalise: nowIso,
+            justificativaAnalise: (observacao || '').trim() || 'Alteração cadastral aprovada pelo Administrador EHS.',
+          }
+        : r
+    );
+
+    const appliedFields: Partial<CompanyEditableFields> = { ...targetReq.dadosSolicitados };
+    if (appliedFields.contrato_indeterminado) {
+      appliedFields.dataTerminoContrato = '';
+    }
+
+    const docRef = doc(db, 'companies', companyId);
+    await updateDoc(docRef, {
+      ...appliedFields,
+      solicitacoesAlteracao: updatedRequests,
+      updatedAt: nowIso,
+    });
+
+    await logAudit(
+      'Aprovação de Alteração Cadastral',
+      'Empresa',
+      companyId,
+      `Solicitação ${requestId} aprovada por ${adminName} para "${company.razaoSocial}". Campos atualizados: ${Object.keys(appliedFields).join(', ')}.`
+    );
+  };
+
+  const rejectCompanyChange = async (
+    companyId: string,
+    requestId: string,
+    justificativa: string
+  ): Promise<void> => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode recusar alterações cadastrais.');
+    }
+    const cleanReason = (justificativa || '').trim();
+    if (!cleanReason) {
+      throw new Error('A justificativa é obrigatória para recusar uma solicitação de alteração cadastral.');
+    }
+    const company = companies.find((c) => c.id === companyId);
+    if (!company) {
+      throw new Error('Empresa não encontrada.');
+    }
+    const existingList = company.solicitacoesAlteracao || [];
+    const targetReq = existingList.find((r) => r.id === requestId);
+    if (!targetReq) {
+      throw new Error('Solicitação de alteração cadastral não encontrada.');
+    }
+    if (targetReq.status !== 'pendente') {
+      throw new Error('Esta solicitação já foi analisada anteriormente.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const adminName = profile?.nome || 'Administrador EHS';
+    const updatedRequests: CompanyChangeRequest[] = existingList.map((r) =>
+      r.id === requestId
+        ? {
+            ...r,
+            status: 'recusada',
+            analisadoPorId: profile?.id || 'admin',
+            analisadoPorNome: adminName,
+            dataAnalise: nowIso,
+            justificativaAnalise: cleanReason,
+          }
+        : r
+    );
+
+    const docRef = doc(db, 'companies', companyId);
+    await updateDoc(docRef, {
+      solicitacoesAlteracao: updatedRequests,
+      updatedAt: nowIso,
+    });
+
+    await logAudit(
+      'Recusa de Alteração Cadastral',
+      'Empresa',
+      companyId,
+      `Solicitação ${requestId} recusada por ${adminName} para "${company.razaoSocial}". Justificativa: ${cleanReason}`
+    );
   };
 
   const addEmployee = async (emp: Omit<Employee, 'id'>) => {
@@ -912,6 +1158,9 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveDocument = async (id: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar documentos.');
+    }
     const current = documents.find((d) => d.id === id);
     const docRef = doc(db, 'documents', id);
     const dataAnalise = new Date().toISOString();
@@ -940,6 +1189,9 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const rejectDocument = async (id: string, motivo: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode recusar documentos.');
+    }
     if (!motivo || motivo.trim().length === 0) {
       throw new Error('O motivo da reprovação é obrigatório.');
     }
@@ -950,13 +1202,13 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const updatedVersions = (current?.historicoVersoes || []).map((v) =>
       v.versao === current?.versao
-        ? { ...v, situacao: 'reprovado' as DocumentStatus, motivoReprovacao: motivo, analisadoPor, dataAnalise }
+        ? { ...v, situacao: 'reprovado' as DocumentStatus, motivoReprovacao: motivo.trim(), analisadoPor, dataAnalise }
         : v
     );
 
     await updateDoc(docRef, {
       situacao: 'reprovado',
-      motivoReprovacao: motivo,
+      motivoReprovacao: motivo.trim(),
       analisadoPor,
       dataAnalise,
       historicoVersoes: updatedVersions,
@@ -966,11 +1218,14 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'Reprovação',
       'Documento',
       id,
-      `Documento "${current?.nomeDocumento}" reprovado por ${analisadoPor}. Justificativa: ${motivo}`
+      `Documento "${current?.nomeDocumento}" reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
     );
   };
 
   const deleteDocument = async (id: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode excluir documentos.');
+    }
     const current = documents.find((d) => d.id === id);
     await deleteDoc(doc(db, 'documents', id));
     await logAudit('Exclusão', 'Documento', id, `Excluído documento "${current?.nomeDocumento}"`);
@@ -1012,6 +1267,9 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveTraining = async (id: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar treinamentos.');
+    }
     const trn = trainings.find((t) => t.id === id);
     const docRef = doc(db, 'trainings', id);
     const dataAnalise = new Date().toISOString();
@@ -1027,6 +1285,9 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const rejectTraining = async (id: string, motivo: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode recusar treinamentos.');
+    }
     if (!motivo || motivo.trim().length === 0) {
       throw new Error('O motivo da reprovação é obrigatório.');
     }
@@ -1036,7 +1297,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const analisadoPor = profile?.nome || 'Administrador SST';
     await updateDoc(docRef, {
       situacao: 'reprovado',
-      motivoReprovacao: motivo,
+      motivoReprovacao: motivo.trim(),
       analisadoPor,
       dataAnalise,
       updatedAt: dataAnalise,
@@ -1045,11 +1306,14 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'Reprovação',
       'Treinamento',
       id,
-      `Treinamento "${trn?.nomeTreinamento}" reprovado por ${analisadoPor}. Justificativa: ${motivo}`
+      `Treinamento "${trn?.nomeTreinamento}" reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
     );
   };
 
   const deleteTraining = async (id: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode excluir treinamentos.');
+    }
     const trn = trainings.find((t) => t.id === id);
     await deleteDoc(doc(db, 'trainings', id));
     await logAudit('Exclusão', 'Treinamento', id, `Excluído treinamento "${trn?.nomeTreinamento}"`);
@@ -1090,7 +1354,54 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await logAudit('Atualização', 'Exame/ASO', id, `Atualizado registro médico de ${exam.colaboradorNome || id}`);
   };
 
+  const approveExam = async (id: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar exames e ASOs.');
+    }
+    const exam = exams.find((e) => e.id === id);
+    const docRef = doc(db, 'exams', id);
+    const dataAnalise = new Date().toISOString();
+    const analisadoPor = profile?.nome || 'Administrador SST';
+    await updateDoc(docRef, {
+      situacao: 'aprovado',
+      analisadoPor,
+      dataAnalise,
+      motivoReprovacao: '',
+      updatedAt: dataAnalise,
+    });
+    await logAudit('Aprovação', 'Exame/ASO', id, `${exam?.tipoExame || 'ASO'} de ${exam?.colaboradorNome || id} aprovado por ${analisadoPor}`);
+  };
+
+  const rejectExam = async (id: string, motivo: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode recusar exames e ASOs.');
+    }
+    if (!motivo || motivo.trim().length === 0) {
+      throw new Error('O motivo da reprovação é obrigatório.');
+    }
+    const exam = exams.find((e) => e.id === id);
+    const docRef = doc(db, 'exams', id);
+    const dataAnalise = new Date().toISOString();
+    const analisadoPor = profile?.nome || 'Administrador SST';
+    await updateDoc(docRef, {
+      situacao: 'reprovado',
+      motivoReprovacao: motivo.trim(),
+      analisadoPor,
+      dataAnalise,
+      updatedAt: dataAnalise,
+    });
+    await logAudit(
+      'Reprovação',
+      'Exame/ASO',
+      id,
+      `${exam?.tipoExame || 'ASO'} de ${exam?.colaboradorNome || id} reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
+    );
+  };
+
   const deleteExam = async (id: string) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode excluir exames e ASOs.');
+    }
     const exam = exams.find((e) => e.id === id);
     await deleteDoc(doc(db, 'exams', id));
     await logAudit('Exclusão', 'Exame/ASO', id, `Excluído ${exam?.tipoExame} de ${exam?.colaboradorNome}`);
@@ -2018,6 +2329,21 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return list;
   };
 
+  const listIntegrationItemsOnServer = async (): Promise<MirroredIntegrationDocumentItem[]> => {
+    const res = await invokeIntegrationApi<{ items: MirroredIntegrationDocumentItem[] }>(
+      '/api/integrations/items',
+      { method: 'GET' }
+    );
+    const list = (res.items || []).slice().sort((a, b) =>
+      (b.updatedAt || b.dataEnvio || b.createdAt || '').localeCompare(
+        a.updatedAt || a.dataEnvio || a.createdAt || ''
+      )
+    );
+    setContractorIntegrationItems(list);
+    setIntegrationFirestoreError(null);
+    return list;
+  };
+
   const getIntegrationDetailOnServer = async (
     id: string
   ): Promise<IntegrationServerDetailResult> => {
@@ -2025,7 +2351,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `/api/integrations/${encodeURIComponent(id)}`,
       { method: 'GET' }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2063,7 +2389,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(payload),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2086,7 +2412,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2170,7 +2496,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (xhr.status >= 200 && xhr.status < 300 && parsed?.success) {
           onProgress?.(100);
-          upsertIntegrationInState(parsed.integration);
+          upsertIntegrationInState(parsed.integration, parsed.items || []);
           resolve({
             integration: parsed.integration,
             items: parsed.items || [],
@@ -2250,7 +2576,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(payload),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2270,7 +2596,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(opts || {}),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2290,7 +2616,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(opts || {}),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2311,7 +2637,33 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(payload),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const updateIntegrationItemValidityOnServer = async (
+    integrationId: string,
+    itemId: string,
+    payload: {
+      dataValidade?: string;
+      semValidade?: boolean;
+      observacoes?: string;
+      expectedVersion?: number;
+    }
+  ): Promise<IntegrationServerDetailResult> => {
+    const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
+      `/api/integrations/${encodeURIComponent(integrationId)}/items/${encodeURIComponent(itemId)}/validity`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    );
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2331,7 +2683,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(opts),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2351,7 +2703,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(opts || {}),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2371,7 +2723,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(opts),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2391,7 +2743,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(opts || {}),
       }
     );
-    upsertIntegrationInState(res.integration);
+    upsertIntegrationInState(res.integration, res.items || []);
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2400,19 +2752,24 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  // Hydrate contractorIntegrations strictly via authenticated backend API (never via direct Firestore listener)
+  // Hydrate contractorIntegrations + mirrored contractorIntegrationItems strictly via authenticated backend API
   useEffect(() => {
     if (!profile?.id) {
       setContractorIntegrations([]);
+      setContractorIntegrationItems([]);
       setIntegrationFirestoreError(null);
       return;
     }
     let cancelled = false;
-    (async () => {
+    const syncMirrored = async () => {
       try {
-        const list = await listIntegrationsOnServer();
+        const [list, items] = await Promise.all([
+          listIntegrationsOnServer(),
+          listIntegrationItemsOnServer(),
+        ]);
         if (!cancelled) {
           setContractorIntegrations(list);
+          setContractorIntegrationItems(items);
           setIntegrationFirestoreError(null);
         }
       } catch (err: any) {
@@ -2425,9 +2782,20 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
       }
-    })();
+    };
+    syncMirrored();
+
+    const handleFocus = () => {
+      void syncMirrored();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleFocus);
+    }
     return () => {
       cancelled = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleFocus);
+      }
     };
   }, [profile?.id, activeRole, activeEmpresaId]);
 
@@ -2489,6 +2857,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activityDocumentRequirements,
         smartDocs,
         contractorIntegrations,
+        contractorIntegrationItems,
         activityMatrixFirestoreError,
         integrationFirestoreError,
         notificationConfigs,
@@ -2497,6 +2866,9 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addCompany,
         updateCompany,
         deleteCompany,
+        requestCompanyChange,
+        approveCompanyChange,
+        rejectCompanyChange,
         addEmployee,
         updateEmployee,
         deleteEmployee,
@@ -2512,6 +2884,8 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteTraining,
         addExam,
         updateExam,
+        approveExam,
+        rejectExam,
         deleteExam,
         addEPIDelivery,
         deleteEPIDelivery,
@@ -2552,6 +2926,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         cancelPermitOnServer,
         closePermitOnServer,
         listIntegrationsOnServer,
+        listIntegrationItemsOnServer,
         getIntegrationDetailOnServer,
         checkIntegrationDuplicatesOnServer,
         createIntegrationOnServer,
@@ -2562,6 +2937,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         submitIntegrationOnServer,
         startIntegrationReviewOnServer,
         reviewIntegrationItemOnServer,
+        updateIntegrationItemValidityOnServer,
         requestIntegrationCorrectionOnServer,
         approveIntegrationOnServer,
         rejectIntegrationOnServer,

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Building2,
   Plus,
@@ -9,22 +9,82 @@ import {
   ShieldCheck,
   AlertTriangle,
   FileText,
-  FileWarning,
   X,
   Users,
   Layers,
   CheckCircle2,
+  XCircle,
+  Upload,
+  History,
+  FileEdit,
   Clock,
+  RefreshCw,
+  Eye,
 } from 'lucide-react';
 import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
-import { Company } from '../../types/sst';
+import { Company, CompanyEditableFields, DocumentSST } from '../../types/sst';
 import { formatCNPJ, formatDateBR, getTrafficLightStatus } from '../../utils/trafficLight';
 import { evaluateActivityCompliance } from '../../utils/activityComplianceEngine';
 import { ComplianceChecklistPanel } from './ComplianceChecklistPanel';
 import { ProtectedDocumentButton } from '../common/ProtectedDocumentButton';
 
-export const CompaniesView: React.FC = () => {
+interface CompaniesViewProps {
+  initialCompanyId?: string | null;
+}
+
+const MAX_DIRECT_FILE_BYTES = 700 * 1024; // 700KB safe Firestore inline limit
+
+const CHANGE_FIELD_LABELS: Record<keyof CompanyEditableFields, string> = {
+  razaoSocial: 'Razão Social',
+  nomeFantasia: 'Nome Fantasia',
+  cnpj: 'CNPJ',
+  responsavelLegal: 'Responsável Legal',
+  responsavelSST: 'Responsável SST',
+  telefone: 'Telefone',
+  email: 'E-mail SST',
+  endereco: 'Endereço',
+  unidadeAtendimento: 'Unidade de Atendimento',
+  atividadeContratada: 'Atividade Contratada',
+  dataInicioContrato: 'Início do Contrato',
+  dataTerminoContrato: 'Término do Contrato',
+  contrato_indeterminado: 'Prazo Indeterminado',
+};
+
+const COMPANY_DOC_CATEGORIES = [
+  'PGR / PPRA',
+  'PCMSO',
+  'Contrato Social / CNPJ',
+  'Certidão Negativa / Regularidade',
+  'Alvará / Licença',
+  'Seguro / Apólice',
+  'LTCAT / Laudo Técnico',
+  'Outro Documento Empresarial',
+];
+
+function formatDateTimeBR(iso?: string): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatFieldValue(key: keyof CompanyEditableFields, value: unknown): string {
+  if (key === 'contrato_indeterminado') return value ? 'Sim' : 'Não';
+  if (key === 'dataInicioContrato' || key === 'dataTerminoContrato') {
+    return value ? formatDateBR(String(value)) : '—';
+  }
+  if (key === 'cnpj') return value ? formatCNPJ(String(value)) : '—';
+  return value ? String(value) : '—';
+}
+
+export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }) => {
   const {
     companies,
     employees,
@@ -36,26 +96,78 @@ export const CompaniesView: React.FC = () => {
     activityProfiles,
     activityDocumentRequirements,
     smartDocs,
+    auditLogs,
     addCompany,
     updateCompany,
     deleteCompany,
+    requestCompanyChange,
+    approveCompanyChange,
+    rejectCompanyChange,
+    addDocument,
+    updateDocument,
+    approveDocument,
+    rejectDocument,
   } = useSST();
-  const { isAdmin, isSolicitante, activeEmpresaId } = useAuth();
+  const { isAdmin, isSolicitante, activeEmpresaId, profile } = useAuth();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'todos' | 'ativa' | 'inativa'>('todos');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCompany, setEditingCompany] = useState<Company | null>(null);
-  const [selectedCompanyDetail, setSelectedCompanyDetail] = useState<Company | null>(null);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<
-    'dados' | 'conformidade' | 'documentos' | 'solicitacoes'
+    'dados' | 'documentos' | 'alteracoes' | 'conformidade' | 'historico'
   >('dados');
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(
     null
   );
   const [pendingDeleteCompany, setPendingDeleteCompany] = useState<Company | null>(null);
 
-  // Form states
+  // Solicitante: Request Change Modal
+  const [changeRequestCompany, setChangeRequestCompany] = useState<Company | null>(null);
+  const [changeForm, setChangeForm] = useState<Partial<CompanyEditableFields>>({});
+  const [changeJustification, setChangeJustification] = useState('');
+  const [submittingChange, setSubmittingChange] = useState(false);
+
+  // Direct Company Document Upload / Resubmit Modal
+  const [uploadCompany, setUploadCompany] = useState<Company | null>(null);
+  const [resubmitDoc, setResubmitDoc] = useState<DocumentSST | null>(null);
+  const [docForm, setDocForm] = useState({
+    nomeDocumento: '',
+    categoria: COMPANY_DOC_CATEGORIES[0],
+    numeroDocumento: '',
+    dataEmissao: new Date().toISOString().slice(0, 10),
+    dataValidade: '',
+    semValidade: false,
+    observacoes: '',
+    arquivoNome: '',
+    arquivoUrl: '',
+  });
+  const [submittingDoc, setSubmittingDoc] = useState(false);
+
+  // Admin: Reject justification modal (for Company Document OR Company Change Request)
+  const [rejectModal, setRejectModal] = useState<
+    | { kind: 'document'; doc: DocumentSST }
+    | { kind: 'change_request'; companyId: string; requestId: string; title: string }
+    | null
+  >(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [submittingDecision, setSubmittingDecision] = useState(false);
+
+  // Auto-open dossier when navigated with initialCompanyId
+  useEffect(() => {
+    if (initialCompanyId && companies.some((c) => c.id === initialCompanyId)) {
+      setSelectedCompanyId(initialCompanyId);
+      setDetailTab('dados');
+    }
+  }, [initialCompanyId, companies]);
+
+  const selectedCompanyDetail = useMemo(
+    () => (selectedCompanyId ? companies.find((c) => c.id === selectedCompanyId) || null : null),
+    [companies, selectedCompanyId]
+  );
+
+  // Form states (Admin create/edit or Solicitante initial registration)
   const [formData, setFormData] = useState<Omit<Company, 'id'>>({
     razaoSocial: '',
     nomeFantasia: '',
@@ -79,7 +191,6 @@ export const CompaniesView: React.FC = () => {
     [activityProfiles]
   );
 
-  // Compute consolidated compliance summary per company using the official compliance engine
   const companyComplianceMap = useMemo(() => {
     const map = new Map<string, ReturnType<typeof evaluateActivityCompliance> | null>();
     const activeActivityIds = activeActivities.map((a) => a.id);
@@ -124,11 +235,10 @@ export const CompaniesView: React.FC = () => {
     smartDocs,
   ]);
 
-  // Filter scoped list
   const filteredCompanies = useMemo(() => {
     let list = companies;
-    if (isSolicitante && activeEmpresaId) {
-      list = list.filter((c) => c.id === activeEmpresaId);
+    if (isSolicitante) {
+      list = activeEmpresaId ? list.filter((c) => c.id === activeEmpresaId) : [];
     }
     if (statusFilter !== 'todos') {
       list = list.filter((c) => c.situacao === statusFilter);
@@ -170,6 +280,7 @@ export const CompaniesView: React.FC = () => {
   };
 
   const handleOpenEditModal = (comp: Company) => {
+    if (!isAdmin) return;
     setFeedback(null);
     const isIndeterminate = Boolean(comp.contrato_indeterminado);
     setEditingCompany(comp);
@@ -191,6 +302,276 @@ export const CompaniesView: React.FC = () => {
       situacao: comp.situacao,
     });
     setIsModalOpen(true);
+  };
+
+  const handleOpenChangeRequestModal = (comp: Company) => {
+    setFeedback(null);
+    setChangeRequestCompany(comp);
+    setChangeForm({
+      razaoSocial: comp.razaoSocial,
+      nomeFantasia: comp.nomeFantasia,
+      cnpj: comp.cnpj,
+      responsavelLegal: comp.responsavelLegal,
+      responsavelSST: comp.responsavelSST,
+      telefone: comp.telefone,
+      email: comp.email,
+      endereco: comp.endereco,
+      unidadeAtendimento: comp.unidadeAtendimento,
+      atividadeContratada: comp.atividadeContratada,
+      dataInicioContrato: comp.dataInicioContrato || '',
+      dataTerminoContrato: comp.contrato_indeterminado ? '' : comp.dataTerminoContrato || '',
+      contrato_indeterminado: Boolean(comp.contrato_indeterminado),
+    });
+    setChangeJustification('');
+  };
+
+  const handleSubmitChangeRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!changeRequestCompany) return;
+    if (!changeJustification.trim()) {
+      setFeedback({
+        type: 'error',
+        message: 'Informe a justificativa da solicitação de alteração cadastral.',
+      });
+      return;
+    }
+
+    const diff: Partial<CompanyEditableFields> = {};
+    (Object.keys(CHANGE_FIELD_LABELS) as Array<keyof CompanyEditableFields>).forEach((key) => {
+      const prevVal = changeRequestCompany[key] ?? '';
+      const nextVal = changeForm[key] ?? '';
+      if (String(prevVal) !== String(nextVal)) {
+        (diff as any)[key] = changeForm[key];
+      }
+    });
+
+    if (Object.keys(diff).length === 0) {
+      setFeedback({
+        type: 'error',
+        message: 'Altere ao menos um campo antes de enviar a solicitação de alteração.',
+      });
+      return;
+    }
+
+    setSubmittingChange(true);
+    try {
+      await requestCompanyChange(changeRequestCompany.id, diff, changeJustification.trim());
+      setFeedback({
+        type: 'success',
+        message:
+          'Solicitação de alteração cadastral enviada ao Administrador EHS. Os dados oficiais serão atualizados após aprovação.',
+      });
+      setChangeRequestCompany(null);
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao enviar solicitação de alteração cadastral.',
+      });
+    } finally {
+      setSubmittingChange(false);
+    }
+  };
+
+  const handleOpenUploadDocModal = (comp: Company, existingDoc?: DocumentSST) => {
+    setFeedback(null);
+    setUploadCompany(comp);
+    if (existingDoc) {
+      setResubmitDoc(existingDoc);
+      setDocForm({
+        nomeDocumento: existingDoc.nomeDocumento,
+        categoria: existingDoc.categoria || COMPANY_DOC_CATEGORIES[0],
+        numeroDocumento: existingDoc.numeroDocumento || '',
+        dataEmissao: existingDoc.dataEmissao || new Date().toISOString().slice(0, 10),
+        dataValidade: existingDoc.semValidade ? '' : existingDoc.dataValidade || '',
+        semValidade: Boolean(existingDoc.semValidade),
+        observacoes: existingDoc.observacoes || '',
+        arquivoNome: existingDoc.arquivoNome || '',
+        arquivoUrl: existingDoc.arquivoUrl || '',
+      });
+    } else {
+      setResubmitDoc(null);
+      setDocForm({
+        nomeDocumento: '',
+        categoria: COMPANY_DOC_CATEGORIES[0],
+        numeroDocumento: '',
+        dataEmissao: new Date().toISOString().slice(0, 10),
+        dataValidade: '',
+        semValidade: false,
+        observacoes: '',
+        arquivoNome: '',
+        arquivoUrl: '',
+      });
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > MAX_DIRECT_FILE_BYTES) {
+      setFeedback({
+        type: 'error',
+        message:
+          'O arquivo excede o limite de 700 KB para envio direto no cadastro. Comprima o PDF/imagem ou utilize a Gestão de Integração (até 4 MB).',
+      });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (ev.target?.result) {
+        setDocForm((prev) => ({
+          ...prev,
+          arquivoNome: file.name,
+          arquivoUrl: String(ev.target?.result),
+        }));
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmitCompanyDoc = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!uploadCompany) return;
+    if (!docForm.nomeDocumento.trim()) {
+      setFeedback({ type: 'error', message: 'Informe o nome do documento.' });
+      return;
+    }
+    if (!docForm.semValidade && !docForm.dataValidade) {
+      setFeedback({
+        type: 'error',
+        message: 'Informe a data de validade ou marque "Documento sem validade".',
+      });
+      return;
+    }
+
+    setSubmittingDoc(true);
+    setFeedback(null);
+    try {
+      if (resubmitDoc) {
+        await updateDocument(resubmitDoc.id, {
+          nomeDocumento: docForm.nomeDocumento.trim(),
+          categoria: docForm.categoria,
+          numeroDocumento: docForm.numeroDocumento.trim(),
+          dataEmissao: docForm.dataEmissao,
+          dataValidade: docForm.semValidade ? '' : docForm.dataValidade,
+          semValidade: docForm.semValidade,
+          observacoes: docForm.observacoes.trim(),
+          arquivoNome: docForm.arquivoNome,
+          arquivoUrl: docForm.arquivoUrl,
+          situacao: isAdmin ? 'aprovado' : 'pendente',
+          motivoReprovacao: '',
+          origemEnvio: isAdmin ? 'admin' : 'empresa',
+        });
+        setFeedback({
+          type: 'success',
+          message: `Documento "${docForm.nomeDocumento}" reenviado para nova avaliação do Administrador EHS.`,
+        });
+      } else {
+        await addDocument({
+          empresaId: uploadCompany.id,
+          empresaNome: uploadCompany.razaoSocial,
+          nomeDocumento: docForm.nomeDocumento.trim(),
+          categoria: docForm.categoria,
+          numeroDocumento: docForm.numeroDocumento.trim(),
+          dataEmissao: docForm.dataEmissao,
+          dataValidade: docForm.semValidade ? '' : docForm.dataValidade,
+          semValidade: docForm.semValidade,
+          observacoes: docForm.observacoes.trim(),
+          arquivoNome: docForm.arquivoNome,
+          arquivoUrl: docForm.arquivoUrl,
+          responsavelEnvio: profile?.nome || 'Usuário',
+          versao: 1,
+          situacao: isAdmin ? 'aprovado' : 'pendente',
+          origemEnvio: isAdmin ? 'admin' : 'empresa',
+          solicitacaoCodigo: `EMP-${uploadCompany.cnpj.replace(/\D/g, '').slice(0, 6) || uploadCompany.id.slice(0, 6)}`,
+        });
+        setFeedback({
+          type: 'success',
+          message: isAdmin
+            ? `Documento "${docForm.nomeDocumento}" incluído no dossiê da empresa.`
+            : `Documento "${docForm.nomeDocumento}" enviado com sucesso e aguardando avaliação do Administrador EHS.`,
+        });
+      }
+      setUploadCompany(null);
+      setResubmitDoc(null);
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao salvar documento da empresa.',
+      });
+    } finally {
+      setSubmittingDoc(false);
+    }
+  };
+
+  const handleApproveDoc = async (doc: DocumentSST) => {
+    if (!isAdmin) return;
+    setSubmittingDecision(true);
+    try {
+      await approveDocument(doc.id);
+      setFeedback({
+        type: 'success',
+        message: `Documento "${doc.nomeDocumento}" aprovado e espelhado para a contratada.`,
+      });
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || 'Erro ao aprovar documento.' });
+    } finally {
+      setSubmittingDecision(false);
+    }
+  };
+
+  const handleApproveChangeReq = async (companyId: string, requestId: string) => {
+    if (!isAdmin) return;
+    setSubmittingDecision(true);
+    try {
+      await approveCompanyChange(companyId, requestId);
+      setFeedback({
+        type: 'success',
+        message: 'Alteração cadastral aprovada e aplicada ao cadastro oficial da empresa.',
+      });
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || 'Erro ao aprovar alteração cadastral.' });
+    } finally {
+      setSubmittingDecision(false);
+    }
+  };
+
+  const handleConfirmReject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectModal || !isAdmin) return;
+    if (!rejectReason.trim()) {
+      setFeedback({
+        type: 'error',
+        message: 'A justificativa é obrigatória para recusar.',
+      });
+      return;
+    }
+
+    setSubmittingDecision(true);
+    try {
+      if (rejectModal.kind === 'document') {
+        await rejectDocument(rejectModal.doc.id, rejectReason.trim());
+        setFeedback({
+          type: 'success',
+          message: `Documento "${rejectModal.doc.nomeDocumento}" recusado com justificativa visível para a contratada.`,
+        });
+      } else {
+        await rejectCompanyChange(
+          rejectModal.companyId,
+          rejectModal.requestId,
+          rejectReason.trim()
+        );
+        setFeedback({
+          type: 'success',
+          message: 'Solicitação de alteração cadastral recusada com justificativa registrada.',
+        });
+      }
+      setRejectModal(null);
+      setRejectReason('');
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err?.message || 'Erro ao registrar recusa.' });
+    } finally {
+      setSubmittingDecision(false);
+    }
   };
 
   const toggleAuthorizedActivity = (actId: string) => {
@@ -252,6 +633,9 @@ export const CompaniesView: React.FC = () => {
     }
     try {
       await deleteCompany(pendingDeleteCompany.id);
+      if (selectedCompanyId === pendingDeleteCompany.id) {
+        setSelectedCompanyId(null);
+      }
       setFeedback({
         type: 'success',
         message: `Empresa "${pendingDeleteCompany.razaoSocial}" removida do cadastro.`,
@@ -267,8 +651,11 @@ export const CompaniesView: React.FC = () => {
     }
   };
 
-  const openDetails = (company: Company, initialTab: 'dados' | 'conformidade' | 'documentos' | 'solicitacoes' = 'dados') => {
-    setSelectedCompanyDetail(company);
+  const openDetails = (
+    company: Company,
+    initialTab: 'dados' | 'documentos' | 'alteracoes' | 'conformidade' | 'historico' = 'dados'
+  ) => {
+    setSelectedCompanyId(company.id);
     setDetailTab(initialTab);
   };
 
@@ -276,20 +663,33 @@ export const CompaniesView: React.FC = () => {
     if (!selectedCompanyDetail) return [];
     return documents
       .filter((d) => d.empresaId === selectedCompanyDetail.id)
-      .sort((a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''));
+      .sort((a, b) =>
+        (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '')
+      );
   }, [documents, selectedCompanyDetail]);
 
-  const selectedCompanyPermits = useMemo(() => {
+  const selectedCompanyChangeRequests = useMemo(() => {
     if (!selectedCompanyDetail) return [];
-    return safetyPermits
-      .filter((p) => p.empresaId === selectedCompanyDetail.id)
-      .sort((a, b) => (b.updatedAt || b.createdAt || b.dataInicio || '').localeCompare(a.updatedAt || a.createdAt || a.dataInicio || ''));
-  }, [safetyPermits, selectedCompanyDetail]);
+    return [...(selectedCompanyDetail.solicitacoesAlteracao || [])].sort((a, b) =>
+      b.dataSolicitacao.localeCompare(a.dataSolicitacao)
+    );
+  }, [selectedCompanyDetail]);
+
+  const selectedCompanyLogs = useMemo(() => {
+    if (!selectedCompanyDetail) return [];
+    return auditLogs.filter(
+      (l) =>
+        l.entidadeId === selectedCompanyDetail.id ||
+        l.detalhes.includes(selectedCompanyDetail.razaoSocial)
+    );
+  }, [auditLogs, selectedCompanyDetail]);
 
   const selectedCompanyCompliance = useMemo(() => {
     if (!selectedCompanyDetail) return null;
     return companyComplianceMap.get(selectedCompanyDetail.id) || null;
   }, [selectedCompanyDetail, companyComplianceMap]);
+
+  const myCompany = isSolicitante ? filteredCompanies[0] || null : null;
 
   return (
     <div className="space-y-6">
@@ -298,22 +698,48 @@ export const CompaniesView: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Building2 className="text-blue-500" />
-            Empresas Contratadas e Prestadoras de Serviço
+            {isSolicitante ? 'Minha Empresa' : 'Empresas Contratadas'}
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Gestão de terceiras, contratos, atividades autorizadas, conformidade documental e histórico de liberações
+            {isSolicitante
+              ? 'Consulte seus dados cadastrais, envie documentos empresariais diretamente e solicite alterações cadastrais ao Administrador EHS.'
+              : 'Visualização em lista de empresas contratadas. Selecione uma empresa para abrir o cadastro, dossiê documental, solicitações de alteração e histórico.'}
           </p>
         </div>
 
-        {(isAdmin || isSolicitante) && (
-          <button
-            onClick={handleOpenAddModal}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
-          >
-            <Plus size={16} />
-            Adicionar Empresa Contratada
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {isSolicitante && myCompany && (
+            <>
+              <button
+                type="button"
+                onClick={() => handleOpenUploadDocModal(myCompany)}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
+              >
+                <Upload size={15} />
+                Enviar Documento da Empresa
+              </button>
+              <button
+                type="button"
+                onClick={() => handleOpenChangeRequestModal(myCompany)}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold transition-all"
+              >
+                <FileEdit size={15} />
+                Solicitar Alteração Cadastral
+              </button>
+            </>
+          )}
+
+          {(isAdmin || (isSolicitante && filteredCompanies.length === 0)) && (
+            <button
+              type="button"
+              onClick={handleOpenAddModal}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
+            >
+              <Plus size={16} />
+              {isSolicitante ? 'Cadastrar Minha Empresa' : 'Adicionar Empresa Contratada'}
+            </button>
+          )}
+        </div>
       </div>
 
       {feedback && (
@@ -335,222 +761,393 @@ export const CompaniesView: React.FC = () => {
         </div>
       )}
 
-      {/* Filters and Search Bar */}
-      <div className="flex flex-col sm:flex-row gap-3 items-center justify-between bg-slate-900 p-4 rounded-xl border border-slate-800">
-        <div className="relative w-full sm:w-80">
-          <Search size={16} className="absolute left-3 top-2.5 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Buscar por Razão, CNPJ ou Responsável..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
-          />
-        </div>
-
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          <span className="text-xs text-slate-400 whitespace-nowrap">Situação:</span>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as 'todos' | 'ativa' | 'inativa')}
-            className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-          >
-            <option value="todos">Todas as Situações</option>
-            <option value="ativa">Somente Ativas</option>
-            <option value="inativa">Somente Inativas</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Companies Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {filteredCompanies.length === 0 ? (
-          <div className="col-span-full py-12 text-center bg-slate-900 rounded-xl border border-slate-800">
-            <Building2 size={40} className="mx-auto text-slate-400 mb-2" />
-            <p className="text-sm font-semibold text-slate-300">Nenhuma empresa encontrada</p>
-            <p className="text-xs text-slate-400 mt-1">
-              Ajuste os filtros ou adicione uma nova empresa contratada.
-            </p>
+      {/* Filters and Search Bar (Admin / Auditor) */}
+      {!isSolicitante && (
+        <div className="flex flex-col sm:flex-row gap-3 items-center justify-between bg-slate-900 p-4 rounded-xl border border-slate-800">
+          <div className="relative w-full sm:w-96">
+            <Search size={16} className="absolute left-3 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Buscar por Razão Social, Nome Fantasia, CNPJ ou Responsável..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+            />
           </div>
-        ) : (
-          filteredCompanies.map((company) => {
-            const companyEmployeesCount = employees.filter((e) => e.empresaId === company.id).length;
-            const companyDocsCount = documents.filter((d) => d.empresaId === company.id).length;
-            const companyPermitsCount = safetyPermits.filter((p) => p.empresaId === company.id).length;
-            const compliance = companyComplianceMap.get(company.id) || null;
-            const authorizedNames = (company.atividadesAutorizadasIds || [])
-              .map((id) => activityProfiles.find((a) => a.id === id)?.nome)
-              .filter(Boolean) as string[];
 
-            return (
-              <div
-                key={company.id}
-                className="rounded-xl bg-slate-900 border border-slate-800 p-5 flex flex-col justify-between hover:border-slate-700 transition-all shadow-sm"
-              >
-                <div>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <span className="text-xs font-bold text-white block truncate">
-                        {company.nomeFantasia || company.razaoSocial}
-                      </span>
-                      <p className="text-[11px] text-slate-400 truncate max-w-[220px]">
-                        {company.razaoSocial}
-                      </p>
-                    </div>
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 ${
-                        company.situacao === 'ativa'
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                          : 'bg-red-500/10 text-red-400 border border-red-500/20'
-                      }`}
-                    >
-                      {company.situacao}
-                    </span>
-                  </div>
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <span className="text-xs text-slate-400 whitespace-nowrap">Situação:</span>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as 'todos' | 'ativa' | 'inativa')}
+              className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+            >
+              <option value="todos">Todas as Situações ({filteredCompanies.length})</option>
+              <option value="ativa">Somente Ativas</option>
+              <option value="inativa">Somente Inativas</option>
+            </select>
+          </div>
+        </div>
+      )}
 
-                  {/* Consolidated Compliance Indicator */}
-                  <div className="mt-3">
-                    {compliance ? (
-                      <button
-                        type="button"
-                        onClick={() => openDetails(company, 'conformidade')}
-                        className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-left transition-colors ${
-                          compliance.statusGeral === 'conforme'
-                            ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/15'
-                            : compliance.statusGeral === 'atencao'
-                            ? 'bg-amber-500/10 border-amber-500/25 text-amber-300 hover:bg-amber-500/15'
-                            : 'bg-rose-500/10 border-rose-500/25 text-rose-300 hover:bg-rose-500/15'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          {compliance.statusGeral === 'conforme' ? (
-                            <ShieldCheck size={15} className="shrink-0" />
-                          ) : compliance.statusGeral === 'atencao' ? (
-                            <AlertTriangle size={15} className="shrink-0" />
-                          ) : (
-                            <ShieldAlert size={15} className="shrink-0" />
-                          )}
-                          <span className="text-[11px] font-semibold truncate">
-                            {compliance.statusGeral === 'conforme'
-                              ? 'Conformidade Empresarial OK'
-                              : compliance.statusGeral === 'atencao'
-                              ? `Atenção: ${compliance.resumo.alertasAVencer} doc(s) a vencer`
-                              : `${compliance.resumo.bloqueiosObrigatorios} pendência(s) bloqueante(s)`}
-                          </span>
-                        </div>
-                        <span className="text-[10px] underline shrink-0">Ver</span>
-                      </button>
-                    ) : (
-                      <div className="px-3 py-2 rounded-lg border border-slate-800 bg-slate-950/60 text-[11px] text-slate-400">
-                        Configure atividades na Matriz EHS para apurar conformidade
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="mt-3.5 space-y-1.5 text-xs text-slate-300">
-                    <p className="flex items-center gap-2">
-                      <span className="text-slate-400 font-medium">CNPJ:</span>
-                      <span className="font-mono text-slate-200">{formatCNPJ(company.cnpj)}</span>
-                    </p>
-                    <p className="flex items-center gap-2">
-                      <span className="text-slate-400 font-medium">Resp. SST:</span>
-                      <span className="text-slate-200 truncate">
-                        {company.responsavelSST || 'Não informado'}
-                      </span>
-                    </p>
-                    <p className="flex items-center gap-2">
-                      <span className="text-slate-400 font-medium">Término Contrato:</span>
-                      <span
-                        className={
-                          company.contrato_indeterminado
-                            ? 'text-blue-300 font-medium'
-                            : 'text-slate-200'
-                        }
-                      >
-                        {company.contrato_indeterminado
-                          ? 'Prazo indeterminado'
-                          : formatDateBR(company.dataTerminoContrato)}
-                      </span>
-                    </p>
-                    <div className="pt-1">
-                      <span className="text-[11px] text-slate-400 font-medium block mb-1">
-                        Atividades Autorizadas ({authorizedNames.length}):
-                      </span>
-                      {authorizedNames.length > 0 ? (
-                        <div className="flex flex-wrap gap-1">
-                          {authorizedNames.slice(0, 3).map((name) => (
-                            <span
-                              key={name}
-                              className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-300"
-                            >
-                              {name}
-                            </span>
-                          ))}
-                          {authorizedNames.length > 3 && (
-                            <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-400">
-                              +{authorizedNames.length - 3}
-                            </span>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-[11px] text-slate-500">
-                          {company.atividadeContratada || 'Não vinculadas à matriz'}
-                        </span>
-                      )}
-                    </div>
-                  </div>
+      {/* SOLICITANTE: Dedicated Minha Empresa Summary + Direct Documents & Change Requests */}
+      {isSolicitante && myCompany ? (
+        <div className="space-y-6">
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-5 space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-3">
+                <div className="h-11 w-11 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 flex items-center justify-center shrink-0">
+                  <Building2 size={22} />
                 </div>
-
-                <div className="mt-4 pt-3.5 border-t border-slate-800 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-3 text-[11px] text-slate-400 tabular-nums">
-                    <span className="inline-flex items-center gap-1" title="Colaboradores terceirizados">
-                      <Users size={13} className="text-blue-400" />
-                      {companyEmployeesCount}
-                    </span>
-                    <span className="inline-flex items-center gap-1" title="Documentos vinculados">
-                      <FileText size={13} className="text-emerald-400" />
-                      {companyDocsCount}
-                    </span>
-                    <span className="inline-flex items-center gap-1" title="Solicitações / PTs">
-                      <FileWarning size={13} className="text-amber-400" />
-                      {companyPermitsCount}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => openDetails(company, 'dados')}
-                      className="px-2.5 py-1 text-xs text-blue-400 hover:text-white rounded hover:bg-slate-800 transition-colors"
-                      title="Ver dossiê completo da contratada"
-                    >
-                      Dossiê
-                    </button>
-
-                    {isAdmin && (
-                      <>
-                        <button
-                          onClick={() => handleOpenEditModal(company)}
-                          className="p-1.5 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition-colors"
-                          title="Editar cadastro"
-                        >
-                          <Edit2 size={14} />
-                        </button>
-                        <button
-                          onClick={() => setPendingDeleteCompany(company)}
-                          className="p-1.5 text-slate-400 hover:text-red-400 rounded hover:bg-slate-800 transition-colors"
-                          title="Excluir empresa"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </>
-                    )}
-                  </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">{myCompany.razaoSocial}</h3>
+                  <p className="text-xs text-slate-400">
+                    {myCompany.nomeFantasia ? `${myCompany.nomeFantasia} · ` : ''}
+                    <span className="font-mono text-slate-300">{formatCNPJ(myCompany.cnpj)}</span>
+                  </p>
                 </div>
               </div>
-            );
-          })
-        )}
-      </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`px-2.5 py-1 rounded text-[11px] font-bold uppercase ${
+                    myCompany.situacao === 'ativa'
+                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/25'
+                      : 'bg-rose-500/10 text-rose-400 border border-rose-500/25'
+                  }`}
+                >
+                  {myCompany.situacao}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => openDetails(myCompany, 'dados')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-blue-300"
+                >
+                  <Eye size={14} />
+                  Abrir Dossiê Completo
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Responsável Legal</span>
+                <strong className="text-slate-100">{myCompany.responsavelLegal || '—'}</strong>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Responsável SST</span>
+                <strong className="text-slate-100">{myCompany.responsavelSST || '—'}</strong>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Contato</span>
+                <strong className="text-slate-100">{myCompany.telefone || myCompany.email || '—'}</strong>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Vigência Contratual</span>
+                <strong className="text-slate-100">
+                  {myCompany.contrato_indeterminado
+                    ? 'Prazo indeterminado'
+                    : formatDateBR(myCompany.dataTerminoContrato)}
+                </strong>
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-blue-500/5 border border-blue-500/20 px-3.5 py-2.5 text-[11px] text-blue-200 flex items-center justify-between gap-2 flex-wrap">
+              <span>
+                Para alterar dados oficiais da empresa, envie uma <strong>Solicitação de Alteração Cadastral</strong> para validação do Administrador EHS.
+              </span>
+              {(myCompany.solicitacoesAlteracao || []).length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => openDetails(myCompany, 'alteracoes')}
+                  className="text-blue-300 hover:text-white underline font-semibold"
+                >
+                  Ver solicitações ({(myCompany.solicitacoesAlteracao || []).length})
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Direct Company Documents Section right inside Minha Empresa */}
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <FileText size={16} className="text-blue-400" />
+                  Documentos da Empresa
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Envie e acompanhe documentos empresariais diretamente aqui. O retorno de aprovação ou recusa do Administrador EHS aparece em tempo real.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleOpenUploadDocModal(myCompany)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shrink-0"
+              >
+                <Upload size={14} />
+                Enviar Documento
+              </button>
+            </div>
+
+            {(() => {
+              const myCompanyDocs = documents
+                .filter((d) => d.empresaId === myCompany.id && !d.colaboradorId)
+                .sort((a, b) =>
+                  (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '')
+                );
+
+              if (myCompanyDocs.length === 0) {
+                return (
+                  <div className="p-8 text-center text-xs text-slate-400">
+                    Nenhum documento empresarial enviado ainda. Clique em <strong>Enviar Documento</strong> para iniciar.
+                  </div>
+                );
+              }
+
+              return (
+                <div className="divide-y divide-slate-800">
+                  {myCompanyDocs.map((doc) => {
+                    const farol = getTrafficLightStatus(doc.dataValidade, doc.semValidade, doc.situacao);
+                    return (
+                      <div
+                        key={doc.id}
+                        className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 hover:bg-slate-800/30"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-bold text-white text-xs">{doc.nomeDocumento}</span>
+                            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">
+                              {doc.categoria}
+                            </span>
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${farol.badgeClass}`}>
+                              {doc.situacao === 'pendente'
+                                ? 'Aguardando Avaliação EHS'
+                                : doc.situacao === 'reprovado'
+                                ? 'Recusado — Reenvio Necessário'
+                                : farol.label}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Validade: {doc.semValidade ? 'Sem vencimento' : formatDateBR(doc.dataValidade)}
+                            {doc.analisadoPor ? ` · Avaliado por ${doc.analisadoPor} em ${formatDateTimeBR(doc.dataAnalise)}` : ''}
+                          </p>
+                          {doc.motivoReprovacao && (
+                            <p className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded px-2.5 py-1.5 mt-1">
+                              <strong>Motivo da recusa:</strong> {doc.motivoReprovacao}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {doc.arquivoUrl && (
+                            <ProtectedDocumentButton
+                              url={doc.arquivoUrl}
+                              fileName={doc.arquivoNome || doc.nomeDocumento}
+                              title={`Visualizar ${doc.nomeDocumento}`}
+                              label="Abrir"
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 font-medium"
+                            />
+                          )}
+                          {doc.situacao === 'reprovado' && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenUploadDocModal(myCompany, doc)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                            >
+                              <RefreshCw size={12} />
+                              Corrigir e Reenviar
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      ) : (
+        /* ADMIN / AUDITOR (or empty Solicitante): List View Table */
+        <div className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+          {filteredCompanies.length === 0 ? (
+            <div className="py-12 text-center">
+              <Building2 size={40} className="mx-auto text-slate-500 mb-2" />
+              <p className="text-sm font-semibold text-slate-300">Nenhuma empresa encontrada</p>
+              <p className="text-xs text-slate-400 mt-1">
+                {isSolicitante
+                  ? 'Clique em "Cadastrar Minha Empresa" para registrar os dados da sua contratada.'
+                  : 'Ajuste os filtros ou adicione uma nova empresa contratada.'}
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    <th className="py-3 px-4">Empresa Contratada</th>
+                    <th className="py-3 px-4">CNPJ</th>
+                    <th className="py-3 px-4">Situação</th>
+                    <th className="py-3 px-4">Equipe & Docs</th>
+                    <th className="py-3 px-4">Conformidade / Pendências</th>
+                    <th className="py-3 px-4 text-right">Ações</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800 text-xs">
+                  {filteredCompanies.map((company) => {
+                    const companyEmployeesCount = employees.filter(
+                      (e) => e.empresaId === company.id
+                    ).length;
+                    const companyDocs = documents.filter((d) => d.empresaId === company.id);
+                    const pendingDocsCount = companyDocs.filter(
+                      (d) => d.situacao === 'pendente'
+                    ).length;
+                    const pendingChangesCount = (company.solicitacoesAlteracao || []).filter(
+                      (r) => r.status === 'pendente'
+                    ).length;
+                    const compliance = companyComplianceMap.get(company.id) || null;
+
+                    return (
+                      <tr
+                        key={company.id}
+                        onClick={() => openDetails(company, 'dados')}
+                        className="hover:bg-slate-800/40 transition-colors cursor-pointer"
+                      >
+                        <td className="py-3.5 px-4">
+                          <div className="font-bold text-white">
+                            {company.nomeFantasia || company.razaoSocial}
+                          </div>
+                          <div className="text-[11px] text-slate-400 truncate max-w-xs">
+                            {company.razaoSocial}
+                          </div>
+                          {company.responsavelSST && (
+                            <div className="text-[10px] text-slate-500 mt-0.5">
+                              SST: {company.responsavelSST}
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4 font-mono text-slate-200 whitespace-nowrap">
+                          {formatCNPJ(company.cnpj)}
+                        </td>
+
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                              company.situacao === 'ativa'
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                            }`}
+                          >
+                            {company.situacao}
+                          </span>
+                        </td>
+
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <div className="flex items-center gap-3 text-slate-300 tabular-nums">
+                            <span className="inline-flex items-center gap-1" title="Colaboradores">
+                              <Users size={13} className="text-blue-400" />
+                              {companyEmployeesCount}
+                            </span>
+                            <span className="inline-flex items-center gap-1" title="Documentos">
+                              <FileText size={13} className="text-emerald-400" />
+                              {companyDocs.length}
+                            </span>
+                            {pendingDocsCount > 0 && (
+                              <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[10px] font-bold">
+                                {pendingDocsCount} p/ analisar
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {pendingChangesCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openDetails(company, 'alteracoes');
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/35 text-amber-300 text-[10px] font-bold hover:bg-amber-500/25"
+                              >
+                                <FileEdit size={11} />
+                                {pendingChangesCount} alteração(ões) pendente(s)
+                              </button>
+                            )}
+                            {compliance ? (
+                              <span
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                                  compliance.statusGeral === 'conforme'
+                                    ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
+                                    : compliance.statusGeral === 'atencao'
+                                    ? 'bg-amber-500/10 border-amber-500/25 text-amber-300'
+                                    : 'bg-rose-500/10 border-rose-500/25 text-rose-300'
+                                }`}
+                              >
+                                {compliance.statusGeral === 'conforme' ? (
+                                  <ShieldCheck size={12} />
+                                ) : compliance.statusGeral === 'atencao' ? (
+                                  <AlertTriangle size={12} />
+                                ) : (
+                                  <ShieldAlert size={12} />
+                                )}
+                                {compliance.statusGeral === 'conforme'
+                                  ? 'Conforme'
+                                  : compliance.statusGeral === 'atencao'
+                                  ? `${compliance.resumo.alertasAVencer} a vencer`
+                                  : `${compliance.resumo.bloqueiosObrigatorios} pendência(s)`}
+                              </span>
+                            ) : (
+                              <span className="text-[11px] text-slate-500">Sem matriz vinculada</span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td
+                          className="py-3.5 px-4 text-right whitespace-nowrap"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => openDetails(company, 'dados')}
+                              className="px-2.5 py-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600 text-blue-300 hover:text-white text-xs font-semibold transition-colors"
+                            >
+                              Abrir Dossiê
+                            </button>
+                            {isAdmin && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditModal(company)}
+                                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                                  title="Editar cadastro"
+                                >
+                                  <Edit2 size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setPendingDeleteCompany(company)}
+                                  className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-slate-800 transition-colors"
+                                  title="Excluir empresa"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Inline Delete Confirmation Modal */}
       {pendingDeleteCompany && (
@@ -590,7 +1187,7 @@ export const CompaniesView: React.FC = () => {
         </div>
       )}
 
-      {/* Add / Edit Company Modal */}
+      {/* Add / Edit Company Modal (Admin OR Solicitante initial registration) */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto">
           <div className="w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6 my-8 max-h-[92vh] overflow-y-auto custom-scrollbar">
@@ -600,6 +1197,7 @@ export const CompaniesView: React.FC = () => {
                 {editingCompany ? 'Editar Empresa Contratada' : 'Cadastrar Nova Empresa Contratada'}
               </h3>
               <button
+                type="button"
                 onClick={() => setIsModalOpen(false)}
                 className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
               >
@@ -675,46 +1273,40 @@ export const CompaniesView: React.FC = () => {
                     value={formData.responsavelLegal}
                     onChange={(e) => setFormData({ ...formData, responsavelLegal: e.target.value })}
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Nome completo do diretor/sócio"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Responsável Segurança do Trabalho (SST)
+                    Responsável SST
                   </label>
                   <input
                     type="text"
                     value={formData.responsavelSST}
                     onChange={(e) => setFormData({ ...formData, responsavelSST: e.target.value })}
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Engenheiro ou Técnico SST"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Telefone de Contato
-                  </label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Telefone</label>
                   <input
                     type="text"
                     value={formData.telefone}
                     onChange={(e) => setFormData({ ...formData, telefone: e.target.value })}
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="(00) 0000-0000"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
-                    E-mail de Contato SST
+                    E-mail SST
                   </label>
                   <input
                     type="email"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="sst@empresa.com.br"
                   />
                 </div>
 
@@ -729,7 +1321,6 @@ export const CompaniesView: React.FC = () => {
                       setFormData({ ...formData, unidadeAtendimento: e.target.value })
                     }
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Ex: Planta Industrial SP"
                   />
                 </div>
 
@@ -744,7 +1335,6 @@ export const CompaniesView: React.FC = () => {
                       setFormData({ ...formData, atividadeContratada: e.target.value })
                     }
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Ex: Montagem Mecânica, Manutenção Elétrica"
                   />
                 </div>
 
@@ -773,12 +1363,12 @@ export const CompaniesView: React.FC = () => {
                     onChange={(e) =>
                       setFormData({ ...formData, dataTerminoContrato: e.target.value })
                     }
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500 disabled:opacity-40"
                   />
                 </div>
 
                 <div className="md:col-span-2 -mt-1">
-                  <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={Boolean(formData.contrato_indeterminado)}
@@ -790,14 +1380,13 @@ export const CompaniesView: React.FC = () => {
                           dataTerminoContrato: checked ? '' : prev.dataTerminoContrato,
                         }));
                       }}
-                      className="rounded bg-slate-950 border-slate-700 text-blue-600 focus:ring-blue-500"
+                      className="rounded bg-slate-950 border-slate-700 text-blue-600"
                     />
                     <span>Prazo indeterminado</span>
                   </label>
                 </div>
               </div>
 
-              {/* Atividades Críticas Autorizadas */}
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-white flex items-center gap-1.5">
@@ -810,7 +1399,7 @@ export const CompaniesView: React.FC = () => {
                 </div>
                 {activeActivities.length === 0 ? (
                   <p className="text-[11px] text-slate-400">
-                    Nenhuma atividade ativa cadastrada na Matriz de Atividades.
+                    Nenhuma atividade ativa cadastrada na Matriz de EHS.
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -853,7 +1442,6 @@ export const CompaniesView: React.FC = () => {
                   value={formData.endereco}
                   onChange={(e) => setFormData({ ...formData, endereco: e.target.value })}
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                  placeholder="Rua, Número, Bairro, Cidade - UF, CEP"
                 />
               </div>
 
@@ -861,13 +1449,13 @@ export const CompaniesView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 transition-colors"
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white shadow-md shadow-blue-600/30 transition-all"
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white"
                 >
                   Salvar Empresa
                 </button>
@@ -877,10 +1465,329 @@ export const CompaniesView: React.FC = () => {
         </div>
       )}
 
+      {/* Solicitante: Request Company Change Modal */}
+      {changeRequestCompany && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto">
+          <form
+            onSubmit={handleSubmitChangeRequest}
+            className="w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6 my-8 max-h-[92vh] overflow-y-auto custom-scrollbar space-y-4"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <FileEdit size={18} className="text-amber-400" />
+                  Solicitar Alteração Cadastral
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  As alterações propostas serão enviadas para validação e aprovação do Administrador EHS antes de atualizar o cadastro oficial.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChangeRequestCompany(null)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 text-xs">
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Razão Social</label>
+                <input
+                  type="text"
+                  value={changeForm.razaoSocial || ''}
+                  onChange={(e) => setChangeForm({ ...changeForm, razaoSocial: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Nome Fantasia</label>
+                <input
+                  type="text"
+                  value={changeForm.nomeFantasia || ''}
+                  onChange={(e) => setChangeForm({ ...changeForm, nomeFantasia: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Responsável Legal</label>
+                <input
+                  type="text"
+                  value={changeForm.responsavelLegal || ''}
+                  onChange={(e) =>
+                    setChangeForm({ ...changeForm, responsavelLegal: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Responsável SST</label>
+                <input
+                  type="text"
+                  value={changeForm.responsavelSST || ''}
+                  onChange={(e) =>
+                    setChangeForm({ ...changeForm, responsavelSST: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Telefone</label>
+                <input
+                  type="text"
+                  value={changeForm.telefone || ''}
+                  onChange={(e) => setChangeForm({ ...changeForm, telefone: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">E-mail SST</label>
+                <input
+                  type="email"
+                  value={changeForm.email || ''}
+                  onChange={(e) => setChangeForm({ ...changeForm, email: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Unidade de Atendimento
+                </label>
+                <input
+                  type="text"
+                  value={changeForm.unidadeAtendimento || ''}
+                  onChange={(e) =>
+                    setChangeForm({ ...changeForm, unidadeAtendimento: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Atividade Contratada
+                </label>
+                <input
+                  type="text"
+                  value={changeForm.atividadeContratada || ''}
+                  onChange={(e) =>
+                    setChangeForm({ ...changeForm, atividadeContratada: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block font-medium text-slate-300 mb-1">Endereço Completo</label>
+                <input
+                  type="text"
+                  value={changeForm.endereco || ''}
+                  onChange={(e) => setChangeForm({ ...changeForm, endereco: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block font-semibold text-amber-300 mb-1">
+                  Justificativa da Alteração <span className="text-red-400">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={3}
+                  value={changeJustification}
+                  onChange={(e) => setChangeJustification(e.target.value)}
+                  placeholder="Explique o motivo da atualização cadastral (ex.: troca de responsável SST, atualização de endereço/contato)..."
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setChangeRequestCompany(null)}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={submittingChange}
+                className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-xs font-semibold text-white"
+              >
+                {submittingChange ? 'Enviando...' : 'Enviar Solicitação para EHS'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Direct Company Document Upload / Resubmit Modal */}
+      {uploadCompany && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto">
+          <form
+            onSubmit={handleSubmitCompanyDoc}
+            className="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6 my-8 space-y-4"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Upload size={18} className="text-blue-400" />
+                  {resubmitDoc ? 'Corrigir e Reenviar Documento' : 'Enviar Documento da Empresa'}
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">{uploadCompany.razaoSocial}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadCompany(null);
+                  setResubmitDoc(null);
+                }}
+                className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Nome do Documento <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={docForm.nomeDocumento}
+                  onChange={(e) => setDocForm({ ...docForm, nomeDocumento: e.target.value })}
+                  placeholder="Ex: PGR 2026, PCMSO, Contrato Social"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Categoria</label>
+                  <select
+                    value={docForm.categoria}
+                    onChange={(e) => setDocForm({ ...docForm, categoria: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    {COMPANY_DOC_CATEGORIES.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Número / Código</label>
+                  <input
+                    type="text"
+                    value={docForm.numeroDocumento}
+                    onChange={(e) => setDocForm({ ...docForm, numeroDocumento: e.target.value })}
+                    placeholder="Opcional"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Data de Emissão</label>
+                  <input
+                    type="date"
+                    value={docForm.dataEmissao}
+                    onChange={(e) => setDocForm({ ...docForm, dataEmissao: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Data de Validade</label>
+                  <input
+                    type="date"
+                    disabled={docForm.semValidade}
+                    required={!docForm.semValidade}
+                    value={docForm.semValidade ? '' : docForm.dataValidade}
+                    onChange={(e) => setDocForm({ ...docForm, dataValidade: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white disabled:opacity-40"
+                  />
+                </div>
+              </div>
+
+              <label className="inline-flex items-center gap-2 text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={docForm.semValidade}
+                  onChange={(e) =>
+                    setDocForm((prev) => ({
+                      ...prev,
+                      semValidade: e.target.checked,
+                      dataValidade: e.target.checked ? '' : prev.dataValidade,
+                    }))
+                  }
+                  className="rounded bg-slate-950 border-slate-700 text-blue-600"
+                />
+                <span>Documento sem data de validade</span>
+              </label>
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Anexo (PDF, JPG ou PNG — até 700 KB)
+                </label>
+                <input
+                  type="file"
+                  accept=".pdf,image/jpeg,image/png"
+                  onChange={handleFileChange}
+                  className="w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-slate-800 file:text-slate-200 hover:file:bg-slate-700"
+                />
+                {docForm.arquivoNome && (
+                  <p className="text-[11px] text-emerald-400 mt-1">
+                    Arquivo anexado: {docForm.arquivoNome}
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Observações</label>
+                <textarea
+                  rows={2}
+                  value={docForm.observacoes}
+                  onChange={(e) => setDocForm({ ...docForm, observacoes: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  placeholder="Informações complementares..."
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadCompany(null);
+                  setResubmitDoc(null);
+                }}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={submittingDoc}
+                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-xs font-semibold text-white"
+              >
+                {submittingDoc
+                  ? 'Enviando...'
+                  : resubmitDoc
+                  ? 'Reenviar para Avaliação'
+                  : 'Enviar Documento'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Evolved Tabbed Company Dossier Modal */}
       {selectedCompanyDetail && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm overflow-y-auto">
-          <div className="w-full max-w-4xl rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl flex flex-col max-h-[92vh] overflow-hidden">
+          <div className="w-full max-w-5xl rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl flex flex-col max-h-[92vh] overflow-hidden">
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/60">
               <div className="flex items-center gap-3 min-w-0">
@@ -889,7 +1796,7 @@ export const CompaniesView: React.FC = () => {
                 </div>
                 <div className="min-w-0">
                   <h3 className="text-base font-bold text-white truncate">
-                    {selectedCompanyDetail.razaoSocial}
+                    Dossiê da Empresa — {selectedCompanyDetail.razaoSocial}
                   </h3>
                   <p className="text-xs text-slate-400 font-mono">
                     CNPJ: {formatCNPJ(selectedCompanyDetail.cnpj)} •{' '}
@@ -905,27 +1812,39 @@ export const CompaniesView: React.FC = () => {
                   </p>
                 </div>
               </div>
-              <button
-                onClick={() => setSelectedCompanyDetail(null)}
-                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
-              >
-                <X size={18} />
-              </button>
+              <div className="flex items-center gap-2">
+                {isSolicitante && activeEmpresaId === selectedCompanyDetail.id && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenChangeRequestModal(selectedCompanyDetail)}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-200 text-xs font-semibold"
+                  >
+                    Solicitar Alteração
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCompanyId(null)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
+                >
+                  <X size={18} />
+                </button>
+              </div>
             </div>
 
             {/* Tabs */}
             <div className="flex items-center gap-1 px-6 border-b border-slate-800 bg-slate-900/60 overflow-x-auto text-xs">
               {[
                 { id: 'dados' as const, label: 'Dados & Contrato' },
-                { id: 'conformidade' as const, label: 'Conformidade Documental' },
+                { id: 'documentos' as const, label: `Documentos (${selectedCompanyDocs.length})` },
                 {
-                  id: 'documentos' as const,
-                  label: `Histórico de Documentos (${selectedCompanyDocs.length})`,
+                  id: 'alteracoes' as const,
+                  label: `Solicitações de Alteração (${
+                    selectedCompanyChangeRequests.filter((r) => r.status === 'pendente').length
+                  })`,
                 },
-                {
-                  id: 'solicitacoes' as const,
-                  label: `Solicitações e Atividades (${selectedCompanyPermits.length})`,
-                },
+                { id: 'conformidade' as const, label: 'Conformidade Matriz EHS' },
+                { id: 'historico' as const, label: `Histórico (${selectedCompanyLogs.length})` },
               ].map((t) => (
                 <button
                   key={t.id}
@@ -993,40 +1912,276 @@ export const CompaniesView: React.FC = () => {
                           : formatDateBR(selectedCompanyDetail.dataTerminoContrato)}
                       </span>
                     </div>
+                    <div className="md:col-span-2">
+                      <span className="text-slate-400 block text-[11px]">Atividade Contratada</span>
+                      <span className="text-slate-200">
+                        {selectedCompanyDetail.atividadeContratada || '—'}
+                      </span>
+                    </div>
+                    <div className="md:col-span-2">
+                      <span className="text-slate-400 block text-[11px]">Endereço Completo</span>
+                      <span className="text-slate-200">{selectedCompanyDetail.endereco || '—'}</span>
+                    </div>
                   </div>
+                </div>
+              )}
 
-                  <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-                    <span className="text-slate-400 block text-[11px]">Endereço</span>
-                    <span className="text-slate-200">
-                      {selectedCompanyDetail.endereco || 'Não informado'}
-                    </span>
-                  </div>
-
-                  <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-                    <span className="text-slate-400 block text-[11px]">
-                      Atividades Críticas Autorizadas
-                    </span>
-                    {(selectedCompanyDetail.atividadesAutorizadasIds || []).length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {(selectedCompanyDetail.atividadesAutorizadasIds || []).map((actId) => {
-                          const act = activityProfiles.find((a) => a.id === actId);
-                          return (
-                            <span
-                              key={actId}
-                              className="px-2.5 py-1 rounded-lg bg-blue-500/15 border border-blue-500/30 text-blue-300 text-[11px] font-semibold"
-                            >
-                              {act ? `${act.nome} (${act.codigo})` : actId}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <p className="text-slate-400">
-                        Nenhuma atividade específica vinculada — escopo livre:{' '}
-                        {selectedCompanyDetail.atividadeContratada || 'Não informado'}
-                      </p>
+              {detailTab === 'documentos' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-slate-400">
+                      Documentos vinculados à empresa, com abertura de arquivo e decisão de aprovação/recusa do Administrador EHS.
+                    </p>
+                    {(isAdmin || (isSolicitante && activeEmpresaId === selectedCompanyDetail.id)) && (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenUploadDocModal(selectedCompanyDetail)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shrink-0"
+                      >
+                        <Upload size={13} />
+                        Enviar Documento
+                      </button>
                     )}
                   </div>
+
+                  {selectedCompanyDocs.length === 0 ? (
+                    <div className="p-8 text-center rounded-xl bg-slate-950/60 border border-slate-800 text-slate-400">
+                      Nenhum documento cadastrado para esta empresa.
+                    </div>
+                  ) : (
+                    selectedCompanyDocs.map((doc) => {
+                      const farol = getTrafficLightStatus(
+                        doc.dataValidade,
+                        doc.semValidade,
+                        doc.situacao
+                      );
+                      return (
+                        <div
+                          key={doc.id}
+                          className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-bold text-white text-sm">
+                                {doc.nomeDocumento}
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">
+                                {doc.categoria}
+                              </span>
+                              {doc.colaboradorNome && (
+                                <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 text-[10px]">
+                                  Colaborador: {doc.colaboradorNome}
+                                </span>
+                              )}
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${farol.badgeClass}`}
+                              >
+                                {doc.situacao === 'pendente'
+                                  ? 'Aguardando Análise'
+                                  : doc.situacao === 'reprovado'
+                                  ? 'Recusado'
+                                  : farol.label}
+                              </span>
+                            </div>
+                            <p className="text-slate-400 text-[11px]">
+                              Emissão: {formatDateBR(doc.dataEmissao)} · Validade:{' '}
+                              {doc.semValidade ? 'Sem vencimento' : formatDateBR(doc.dataValidade)}
+                              {doc.analisadoPor
+                                ? ` · Avaliado por ${doc.analisadoPor} em ${formatDateTimeBR(
+                                    doc.dataAnalise
+                                  )}`
+                                : ''}
+                            </p>
+                            {doc.motivoReprovacao && (
+                              <p className="text-rose-300 text-[11px] bg-rose-500/10 border border-rose-500/25 rounded px-2.5 py-1.5 mt-1">
+                                <strong>Justificativa da recusa:</strong> {doc.motivoReprovacao}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            {doc.arquivoUrl && (
+                              <ProtectedDocumentButton
+                                url={doc.arquivoUrl}
+                                fileName={doc.arquivoNome || doc.nomeDocumento}
+                                title={`Visualizar ${doc.nomeDocumento}`}
+                                label="Abrir Arquivo"
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium"
+                              />
+                            )}
+                            {isAdmin && doc.situacao !== 'aprovado' && (
+                              <button
+                                type="button"
+                                disabled={submittingDecision}
+                                onClick={() => handleApproveDoc(doc)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
+                              >
+                                <CheckCircle2 size={13} />
+                                Aceitar
+                              </button>
+                            )}
+                            {isAdmin && doc.situacao !== 'reprovado' && (
+                              <button
+                                type="button"
+                                disabled={submittingDecision}
+                                onClick={() => {
+                                  setRejectModal({ kind: 'document', doc });
+                                  setRejectReason(doc.motivoReprovacao || '');
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold"
+                              >
+                                <XCircle size={13} />
+                                Recusar
+                              </button>
+                            )}
+                            {isSolicitante && doc.situacao === 'reprovado' && !doc.colaboradorId && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenUploadDocModal(selectedCompanyDetail, doc)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                              >
+                                <RefreshCw size={12} />
+                                Reenviar
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
+              {detailTab === 'alteracoes' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-slate-400">
+                      Solicitações de alteração cadastral enviadas pela contratada para validação do Administrador EHS.
+                    </p>
+                    {isSolicitante && activeEmpresaId === selectedCompanyDetail.id && (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenChangeRequestModal(selectedCompanyDetail)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                      >
+                        <FileEdit size={13} />
+                        Nova Solicitação
+                      </button>
+                    )}
+                  </div>
+
+                  {selectedCompanyChangeRequests.length === 0 ? (
+                    <div className="p-8 text-center rounded-xl bg-slate-950/60 border border-slate-800 text-slate-400">
+                      Nenhuma solicitação de alteração cadastral registrada para esta empresa.
+                    </div>
+                  ) : (
+                    selectedCompanyChangeRequests.map((req) => (
+                      <div
+                        key={req.id}
+                        className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                req.status === 'pendente'
+                                  ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                  : req.status === 'aprovada'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                              }`}
+                            >
+                              {req.status === 'pendente'
+                                ? 'Aguardando Avaliação EHS'
+                                : req.status === 'aprovada'
+                                ? 'Aprovada'
+                                : 'Recusada'}
+                            </span>
+                            <span className="text-slate-300 font-semibold">
+                              Solicitado por {req.solicitadoPorNome}
+                            </span>
+                          </div>
+                          <span className="text-[11px] font-mono text-slate-400">
+                            {formatDateTimeBR(req.dataSolicitacao)}
+                          </span>
+                        </div>
+
+                        <p className="text-slate-300 bg-slate-900 rounded-lg p-2.5 border border-slate-800">
+                          <strong className="text-slate-400">Justificativa da contratada:</strong>{' '}
+                          {req.justificativaSolicitante}
+                        </p>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {(
+                            Object.keys(req.dadosSolicitados) as Array<keyof CompanyEditableFields>
+                          ).map((key) => (
+                            <div
+                              key={key}
+                              className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800"
+                            >
+                              <span className="text-[10px] uppercase font-bold text-slate-400 block">
+                                {CHANGE_FIELD_LABELS[key] || key}
+                              </span>
+                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                <span className="text-slate-400 line-through">
+                                  {formatFieldValue(key, req.dadosAnteriores[key])}
+                                </span>
+                                <span className="text-slate-500">→</span>
+                                <span className="font-semibold text-blue-300">
+                                  {formatFieldValue(key, req.dadosSolicitados[key])}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {req.analisadoPorNome && (
+                          <div className="text-[11px] text-slate-400 pt-1">
+                            Avaliado por <strong className="text-slate-200">{req.analisadoPorNome}</strong> em{' '}
+                            {formatDateTimeBR(req.dataAnalise)}
+                            {req.justificativaAnalise && (
+                              <div className="mt-1 text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded px-2.5 py-1.5">
+                                <strong>Justificativa EHS:</strong> {req.justificativaAnalise}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {isAdmin && req.status === 'pendente' && (
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                            <button
+                              type="button"
+                              disabled={submittingDecision}
+                              onClick={() =>
+                                handleApproveChangeReq(selectedCompanyDetail.id, req.id)
+                              }
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
+                            >
+                              <CheckCircle2 size={13} />
+                              Aceitar Alteração
+                            </button>
+                            <button
+                              type="button"
+                              disabled={submittingDecision}
+                              onClick={() => {
+                                setRejectModal({
+                                  kind: 'change_request',
+                                  companyId: selectedCompanyDetail.id,
+                                  requestId: req.id,
+                                  title: `Solicitação de Alteração — ${selectedCompanyDetail.razaoSocial}`,
+                                });
+                                setRejectReason('');
+                              }}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold"
+                            >
+                              <XCircle size={13} />
+                              Recusar Alteração
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
                 </div>
               )}
 
@@ -1039,108 +2194,29 @@ export const CompaniesView: React.FC = () => {
                 />
               )}
 
-              {detailTab === 'documentos' && (
-                <div className="space-y-2.5">
-                  {selectedCompanyDocs.length === 0 ? (
-                    <div className="text-center py-8 text-slate-400 bg-slate-950/50 rounded-xl border border-slate-800">
-                      Nenhum documento cadastrado na coleção oficial para esta contratada.
+              {detailTab === 'historico' && (
+                <div className="space-y-2">
+                  {selectedCompanyLogs.length === 0 ? (
+                    <div className="p-8 text-center rounded-xl bg-slate-950/60 border border-slate-800 text-slate-400">
+                      <History size={28} className="mx-auto text-slate-500 mb-2" />
+                      Nenhum registro de auditoria ou alteração encontrado para esta empresa.
                     </div>
                   ) : (
-                    selectedCompanyDocs.map((docItem) => {
-                      const farol = getTrafficLightStatus(
-                        docItem.dataValidade,
-                        docItem.semValidade,
-                        docItem.situacao
-                      );
-                      return (
-                        <div
-                          key={docItem.id}
-                          className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                        >
-                          <div className="space-y-0.5">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-bold text-white">{docItem.nomeDocumento}</span>
-                              {docItem.tipoDocumentoCanonico && (
-                                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                                  {docItem.tipoDocumentoCanonico}
-                                </span>
-                              )}
-                              <span className="text-[10px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-300">
-                                {docItem.categoria}
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-slate-400">
-                              Emissão: {formatDateBR(docItem.dataEmissao)} • Validade:{' '}
-                              {docItem.semValidade
-                                ? 'Sem vencimento'
-                                : formatDateBR(docItem.dataValidade)}
-                              {docItem.colaboradorNome
-                                ? ` • Colaborador: ${docItem.colaboradorNome}`
-                                : ' • Escopo: Empresa'}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${farol.badgeClass}`}
-                            >
-                              {farol.label}
-                            </span>
-                            {docItem.arquivoUrl && (
-                              <ProtectedDocumentButton
-                                url={docItem.arquivoUrl}
-                                fileName={docItem.arquivoNome || docItem.nomeDocumento}
-                                title={`Abrir ${docItem.nomeDocumento}`}
-                                label="Abrir"
-                                className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px]"
-                              />
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              )}
-
-              {detailTab === 'solicitacoes' && (
-                <div className="space-y-2.5">
-                  {selectedCompanyPermits.length === 0 ? (
-                    <div className="text-center py-8 text-slate-400 bg-slate-950/50 rounded-xl border border-slate-800">
-                      Nenhuma solicitação de atividade ou permissão registrada para esta contratada.
-                    </div>
-                  ) : (
-                    selectedCompanyPermits.map((perm) => (
+                    selectedCompanyLogs.map((log) => (
                       <div
-                        key={perm.id}
-                        className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        key={log.id}
+                        className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 flex items-start justify-between gap-4"
                       >
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-bold">
-                              {perm.tipo}
-                            </span>
-                            <span className="font-bold text-white">{perm.titulo}</span>
-                          </div>
-                          <p className="text-[11px] text-slate-400">
-                            Local: {perm.localTrabalho} • Período: {formatDateBR(perm.dataInicio)} a{' '}
-                            {formatDateBR(perm.dataFim)}
+                        <div>
+                          <span className="font-semibold text-white">{log.acao}</span>
+                          <p className="text-slate-400 text-[11px] mt-0.5">{log.detalhes}</p>
+                          <p className="text-[10px] text-slate-500 mt-1">
+                            Responsável: {log.usuario} ({log.usuarioEmail})
                           </p>
-                          {(perm.atividadeNomes || []).length > 0 && (
-                            <p className="text-[11px] text-blue-300">
-                              Atividades: {(perm.atividadeNomes || []).join(', ')}
-                            </p>
-                          )}
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-[10px] font-bold uppercase text-slate-200">
-                            {perm.status === 'liberado' || perm.status === 'aprovado' ? (
-                              <CheckCircle2 size={12} className="text-emerald-400" />
-                            ) : (
-                              <Clock size={12} className="text-amber-400" />
-                            )}
-                            {perm.status.replace(/_/g, ' ')}
-                          </span>
-                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">
+                          {formatDateTimeBR(log.dataHora)}
+                        </span>
                       </div>
                     ))
                   )}
@@ -1150,13 +2226,72 @@ export const CompaniesView: React.FC = () => {
 
             <div className="px-6 py-3.5 border-t border-slate-800 bg-slate-950/60 flex justify-end">
               <button
-                onClick={() => setSelectedCompanyDetail(null)}
-                className="px-4 py-2 rounded-lg bg-slate-800 text-xs text-white hover:bg-slate-700"
+                type="button"
+                onClick={() => setSelectedCompanyId(null)}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white"
               >
                 Fechar Dossiê
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Admin: Mandatory Justification Reject Modal */}
+      {rejectModal && isAdmin && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
+          <form
+            onSubmit={handleConfirmReject}
+            className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6 space-y-4"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <XCircle size={16} className="text-rose-400" />
+                Justificativa Obrigatória da Recusa
+              </h3>
+              <button
+                type="button"
+                onClick={() => setRejectModal(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-xs text-slate-300">
+              {rejectModal.kind === 'document'
+                ? `Documento: ${rejectModal.doc.nomeDocumento}`
+                : rejectModal.title}
+            </p>
+            <div>
+              <label className="block text-xs font-semibold text-rose-300 mb-1.5">
+                Motivo da Recusa *
+              </label>
+              <textarea
+                required
+                rows={3}
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="Descreva claramente o motivo da recusa e o que deve ser corrigido pela contratada..."
+                className="w-full rounded-lg bg-slate-950 border border-slate-700 p-3 text-xs text-white focus:outline-none focus:border-rose-500"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setRejectModal(null)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={submittingDecision}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-xs font-semibold text-white"
+              >
+                {submittingDecision ? 'Salvando...' : 'Confirmar Recusa'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

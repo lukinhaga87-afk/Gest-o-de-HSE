@@ -28,6 +28,7 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   onToggleSidebar,
+  onOpenAlertsModal,
   isPasswordModalOpen: controlledPasswordModalOpen,
   onOpenPasswordModal,
   onClosePasswordModal,
@@ -44,7 +45,7 @@ export const Header: React.FC<HeaderProps> = ({
     changeOwnPassword,
   } = useAuth();
 
-  const { companies, documents, trainings } = useSST();
+  const { companies, contractorIntegrationItems } = useSST();
 
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
@@ -88,10 +89,10 @@ export const Header: React.FC<HeaderProps> = ({
     }
   }, [isPasswordModalOpen]);
 
-  // Compute pending approvals count
-  const pendingDocsCount = documents.filter((d) => d.situacao === 'pendente').length;
-  const pendingTrainingsCount = trainings.filter((t) => t.situacao === 'pendente').length;
-  const totalPending = pendingDocsCount + pendingTrainingsCount;
+  // Compute real pending integration documents awaiting EHS analysis
+  const totalPending = contractorIntegrationItems.filter(
+    (item) => item.status === 'ENVIADO' || item.status === 'EM_ANALISE'
+  ).length;
 
   const getRoleBadge = (role: UserRole) => {
     switch (role) {
@@ -258,14 +259,16 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Notifications / Pending indicator */}
         {totalPending > 0 && isAdmin && (
-          <div
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-medium cursor-pointer"
-            title={`${totalPending} itens pendentes de aprovação`}
+          <button
+            type="button"
+            onClick={() => onOpenAlertsModal?.()}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-medium cursor-pointer transition-colors"
+            title={`${totalPending} documento(s) aguardando análise EHS`}
           >
             <Bell size={14} className="animate-pulse text-amber-400" />
-            <span className="hidden sm:inline font-bold">{totalPending} Pendentes</span>
+            <span className="hidden sm:inline font-bold">{totalPending} em Análise</span>
             <span className="sm:hidden font-bold">{totalPending}</span>
-          </div>
+          </button>
         )}
 
         {/* User Auth Info / Profile & Logout */}

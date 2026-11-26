@@ -514,14 +514,19 @@ export function verifyFileAccessTicket(
   }
 }
 
+export type UserProfilesLister = () => Promise<Array<{ id: string; data: UserProfile }>>;
+
 /**
  * Verifies user credentials exclusively with plaintext password + bcrypt hash stored in Firestore.
  * Rejects fixed/default passwords, rejects passwordHash-based login, and fails closed if Firestore is unavailable.
  */
-export async function authenticateUserCredentials(params: {
-  cpfOrIdentifier?: string;
-  password?: string;
-}): Promise<SanitizedUserProfile | null> {
+export async function authenticateUserCredentials(
+  params: {
+    cpfOrIdentifier?: string;
+    password?: string;
+  },
+  customUserProfilesLister?: UserProfilesLister
+): Promise<SanitizedUserProfile | null> {
   const cleanLogin = (params.cpfOrIdentifier || '').trim().toLowerCase();
   const cleanDigits = (params.cpfOrIdentifier || '').replace(/\D/g, '');
   const password = typeof params.password === 'string' ? params.password.trim() : '';
@@ -536,7 +541,9 @@ export async function authenticateUserCredentials(params: {
 
   let userDocs: Array<{ id: string; data: UserProfile }>;
   try {
-    userDocs = await serverListCollection<UserProfile>('userProfiles');
+    userDocs = customUserProfilesLister
+      ? await customUserProfilesLister()
+      : await serverListCollection<UserProfile>('userProfiles');
   } catch (err) {
     console.error('[AuthMiddleware] Falha ao consultar Firestore userProfiles:', err);
     throw new AuthServiceUnavailableError('Serviço de autenticação indisponível no momento.');
@@ -546,7 +553,10 @@ export async function authenticateUserCredentials(params: {
   for (const docSnap of userDocs) {
     const u = docSnap.data;
     const uDigits = (u.cpf || u.username || '').replace(/\D/g, '');
-    const matchCpf = cleanDigits.length > 0 && uDigits === cleanDigits;
+    const docIdDigits = docSnap.id.replace(/\D/g, '');
+    const matchCpf =
+      cleanDigits.length === 11 &&
+      (uDigits === cleanDigits || docIdDigits === cleanDigits);
     const matchIdentifier =
       (u.cpf && u.cpf.trim().toLowerCase() === cleanLogin) ||
       (u.username && u.username.trim().toLowerCase() === cleanLogin) ||
@@ -778,42 +788,56 @@ export function createRequireAuth(customLookup?: AuthoritativeUserLookup) {
 
 export const requireAuth = createRequireAuth();
 
-export async function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  await requireAuth(req, res, () => {
-    if (!req.authUser || req.authUser.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Acesso negado. Operação exclusiva para Administradores de EHS.',
-      });
-    }
-    if (req.tokenRoleDiverged) {
-      return res.status(401).json({
-        success: false,
-        message: 'Token incompatível com o perfil oficial atual. Faça login novamente.',
-      });
-    }
-    next();
-  });
+export function createRequireAdmin(customLookup?: AuthoritativeUserLookup) {
+  const baseAuth = customLookup ? createRequireAuth(customLookup) : requireAuth;
+  return async function requireAdminHandler(
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ) {
+    await baseAuth(req, res, () => {
+      if (!req.authUser || req.authUser.role !== 'admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'Acesso negado. Operação exclusiva para Administradores de EHS.',
+        });
+      }
+      if (req.tokenRoleDiverged) {
+        return res.status(401).json({
+          success: false,
+          message: 'Token incompatível com o perfil oficial atual. Faça login novamente.',
+        });
+      }
+      next();
+    });
+  };
 }
 
-export async function requireAuthenticatedEditor(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) {
-  await requireAuth(req, res, () => {
-    if (!req.authUser || (req.authUser.role !== 'admin' && req.authUser.role !== 'solicitante')) {
-      return res.status(403).json({
-        success: false,
-        message: 'Acesso negado. Permissão insuficiente para esta operação.',
-      });
-    }
-    if (req.tokenRoleDiverged) {
-      return res.status(401).json({
-        success: false,
-        message: 'Token incompatível com o perfil oficial atual. Faça login novamente.',
-      });
-    }
-    next();
-  });
+export const requireAdmin = createRequireAdmin();
+
+export function createRequireAuthenticatedEditor(customLookup?: AuthoritativeUserLookup) {
+  const baseAuth = customLookup ? createRequireAuth(customLookup) : requireAuth;
+  return async function requireAuthenticatedEditorHandler(
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ) {
+    await baseAuth(req, res, () => {
+      if (!req.authUser || (req.authUser.role !== 'admin' && req.authUser.role !== 'solicitante')) {
+        return res.status(403).json({
+          success: false,
+          message: 'Acesso negado. Permissão insuficiente para esta operação.',
+        });
+      }
+      if (req.tokenRoleDiverged) {
+        return res.status(401).json({
+          success: false,
+          message: 'Token incompatível com o perfil oficial atual. Faça login novamente.',
+        });
+      }
+      next();
+    });
+  };
 }
+
+export const requireAuthenticatedEditor = createRequireAuthenticatedEditor();

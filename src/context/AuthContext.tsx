@@ -71,12 +71,37 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const LOCAL_STORAGE_SESSION_KEY = 'gestao_sst_user_session';
 const LOCAL_STORAGE_API_TOKEN_KEY = 'gestao_sst_api_token';
 
+const VALID_USER_ROLES = new Set<UserRole>(['admin', 'solicitante', 'auditor']);
+
+function isValidUserRole(role: unknown): role is UserRole {
+  return typeof role === 'string' && VALID_USER_ROLES.has(role as UserRole);
+}
+
+function safeStorageGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch (err) {
+    console.warn('[AuthContext] Armazenamento local indisponível; mantendo sessão apenas em memória.', err);
+  }
+}
+
 function isTokenStructurallyUnexpired(token: string | null): boolean {
   if (!token) return false;
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return false;
-    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    let base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4 !== 0) {
+      base64 += '=';
+    }
     const payload = JSON.parse(atob(base64));
     if (!payload?.exp) return false;
     return payload.exp * 1000 > Date.now() + 30_000;
@@ -127,7 +152,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const initAuth = async () => {
       try {
-        const savedToken = localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+        const savedToken = safeStorageGet(LOCAL_STORAGE_API_TOKEN_KEY);
         if (!savedToken || !isTokenStructurallyUnexpired(savedToken)) {
           clearLocalSession();
           return;
@@ -139,22 +164,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
 
         if (!resp.ok) {
+          console.warn('[AuthContext] Sessão salva recusada pelo servidor (HTTP ' + resp.status + ').');
           clearLocalSession();
           return;
         }
 
-        const data = await resp.json();
-        if (data?.success && data?.user) {
+        const data = await resp.json().catch(() => null);
+        if (data?.success && data?.user && isValidUserRole(data.user.role)) {
           const safeUser = stripSensitiveProfileFields(data.user as UserProfile);
           setProfile(safeUser);
           setApiToken(savedToken);
           setIsAuthenticated(true);
-          localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
+          safeStorageSet(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
         } else {
+          console.warn('[AuthContext] Resposta de sessão inválida ou perfil não reconhecido.');
           clearLocalSession();
         }
       } catch (err) {
-        console.warn('Falha ao validar sessão no servidor:', err);
+        console.warn('[AuthContext] Falha ao validar sessão no servidor:', err);
         clearLocalSession();
       } finally {
         setLoading(false);
@@ -192,6 +219,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const data = await resp.json().catch(() => ({}));
 
       if (!resp.ok || !data?.success || !data?.token || !data?.user) {
+        console.warn('[AuthContext] Falha no login:', {
+          status: resp.status,
+          code: data?.code,
+        });
+
+        if (resp.status >= 500) {
+          return {
+            success: false,
+            message:
+              'Serviço de autenticação temporariamente indisponível. Tente novamente em instantes.',
+          };
+        }
+
+        if (resp.status === 403) {
+          return {
+            success: false,
+            message:
+              data?.message ||
+              'Acesso não autorizado para este perfil. Contate o Administrador de EHS.',
+          };
+        }
+
         return {
           success: false,
           message:
@@ -200,9 +249,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
 
+      if (!data.user.id || !isValidUserRole(data.user.role)) {
+        console.error('[AuthContext] Perfil autenticado sem papel válido:', {
+          hasId: Boolean(data.user.id),
+          role: data.user.role,
+        });
+        return {
+          success: false,
+          message: 'Perfil de acesso inválido ou não autorizado. Contate o Administrador de EHS.',
+        };
+      }
+
       const safeUser = stripSensitiveProfileFields(data.user as UserProfile);
-      localStorage.setItem(LOCAL_STORAGE_API_TOKEN_KEY, data.token);
-      localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
+      safeStorageSet(LOCAL_STORAGE_API_TOKEN_KEY, data.token);
+      safeStorageSet(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
       setApiToken(data.token);
       setProfile(safeUser);
       setIsAuthenticated(true);
@@ -212,10 +272,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       return { success: true };
     } catch (err) {
-      console.error('Erro ao autenticar com o servidor:', err);
+      console.error('[AuthContext] Erro de comunicação ao autenticar com o servidor:', err);
       return {
         success: false,
-        message: 'Não foi possível conectar ao servidor de autenticação.',
+        message:
+          'Não foi possível conectar ao servidor de autenticação. Verifique sua conexão e tente novamente.',
       };
     }
   };
@@ -503,7 +564,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const getAuthHeaders = (): Record<string, string> => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const activeToken = apiToken || localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+    const activeToken = apiToken || safeStorageGet(LOCAL_STORAGE_API_TOKEN_KEY);
     if (activeToken) {
       headers.Authorization = `Bearer ${activeToken}`;
     }
@@ -511,7 +572,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshApiSession = async (): Promise<string | null> => {
-    const token = apiToken || localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+    const token = apiToken || safeStorageGet(LOCAL_STORAGE_API_TOKEN_KEY);
     if (!token || !isTokenStructurallyUnexpired(token)) {
       clearLocalSession();
       return null;
@@ -526,12 +587,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         clearLocalSession();
         return null;
       }
-      const data = await resp.json();
-      if (data?.success && data?.user) {
+      const data = await resp.json().catch(() => null);
+      if (data?.success && data?.user && isValidUserRole(data.user.role)) {
         const safeUser = stripSensitiveProfileFields(data.user as UserProfile);
         setProfile(safeUser);
         setIsAuthenticated(true);
-        localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
+        safeStorageSet(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
         return token;
       }
     } catch {
@@ -541,7 +602,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const authorizedFetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
-    const token: string | null = apiToken || localStorage.getItem(LOCAL_STORAGE_API_TOKEN_KEY);
+    const token: string | null = apiToken || safeStorageGet(LOCAL_STORAGE_API_TOKEN_KEY);
 
     const buildHeaders = (tok: string | null): HeadersInit => {
       const base: Record<string, string> = { 'Content-Type': 'application/json' };

@@ -1,150 +1,300 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SSTProvider, useSST } from './context/SSTContext';
 import { Sidebar, NavItemKey } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
 import { LoginPage } from './components/auth/LoginPage';
-
-// Views
 import { DashboardView } from './components/views/DashboardView';
+import { ContractorPanelView } from './components/views/ContractorPanelView';
 import { CompaniesView } from './components/views/CompaniesView';
 import { EmployeesView } from './components/views/EmployeesView';
-import { TrainingsView } from './components/views/TrainingsView';
-import { DocumentsView } from './components/views/DocumentsView';
-import { ExamsView } from './components/views/ExamsView';
-import { EpiView } from './components/views/EpiView';
-import { PermitsView } from './components/views/PermitsView';
-import { InspectionsView } from './components/views/InspectionsView';
-import { ActionPlansView } from './components/views/ActionPlansView';
-import { EnvironmentalView } from './components/views/EnvironmentalView';
-import { ReportsView } from './components/views/ReportsView';
-import { UsersPermissionsView } from './components/views/UsersPermissionsView';
-import { SettingsImportView } from './components/views/SettingsImportView';
-import { NotificationsView } from './components/views/NotificationsView';
-import { SmartDocsView } from './components/views/SmartDocsView';
-import { ActivityMatrixView } from './components/views/ActivityMatrixView';
 import { CentralIntegracaoView } from './components/views/CentralIntegracaoView';
 import { IntegrationsAdminView } from './components/views/IntegrationsAdminView';
-import { ShieldCheck, Loader2 } from 'lucide-react';
+import { DocumentAnalysisCenterView } from './components/views/DocumentAnalysisCenterView';
+import { ExpirationsControlView } from './components/views/ExpirationsControlView';
+import { AdminExpirationsControlView } from './components/views/AdminExpirationsControlView';
+import { ActivityMatrixView } from './components/views/ActivityMatrixView';
+import { UsersPermissionsView } from './components/views/UsersPermissionsView';
+import { formatCPF } from './utils/trafficLight';
+import { Shield, Loader2, X, KeyRound, User, Building2 } from 'lucide-react';
 
-// Solicitante authorized modules (Section 9): individual Colaboradores, Treinamentos, Documentos removed in favor of Central de Integração
 const SOLICITANTE_ALLOWED_TABS: NavItemKey[] = [
-  'central_integracao',
-  'acompanhamento_integracoes',
+  'painel_contratada',
   'empresas',
-  'apr_pt',
-  'smartdocs',
-  'exames',
-  'epi',
-  'planos_acao',
-  'ambiental',
+  'colaboradores',
+  'envio_documentos',
+  'gestao_integracao',
+  'pendencias_vencimentos',
 ];
 
-const MainAppContent: React.FC = () => {
-  const { isAuthenticated, loading: authLoading, isSolicitante } = useAuth();
-  const [currentTab, setCurrentTab] = useState<NavItemKey>(() =>
-    isSolicitante ? 'central_integracao' : 'dashboard'
-  );
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+const ADMIN_ALLOWED_TABS: NavItemKey[] = [
+  'dashboard',
+  'empresas',
+  'colaboradores',
+  'gestao_integracoes',
+  'analise_documental',
+  'controle_vencimentos',
+  'matriz_ehs',
+  'usuarios',
+];
+
+const AUDITOR_ALLOWED_TABS: NavItemKey[] = [
+  'dashboard',
+  'empresas',
+  'colaboradores',
+  'gestao_integracoes',
+  'analise_documental',
+  'controle_vencimentos',
+  'matriz_ehs',
+];
+
+const MainAppShell: React.FC = () => {
+  const {
+    isAuthenticated,
+    profile,
+    activeRole,
+    loading: authLoading,
+    isSolicitante,
+    isAdmin,
+    isAuditor,
+  } = useAuth();
   const { loading: sstLoading } = useSST();
 
-  // Auto-redirect Solicitante away from unauthorized or replaced individual modules
-  React.useEffect(() => {
-    if (isSolicitante && !SOLICITANTE_ALLOWED_TABS.includes(currentTab)) {
-      setCurrentTab('central_integracao');
-    }
-  }, [isSolicitante, currentTab]);
+  const [activeTab, setActiveTab] = useState<NavItemKey>(() =>
+    isSolicitante ? 'painel_contratada' : 'dashboard'
+  );
+  const [targetIntegrationId, setTargetIntegrationId] = useState<string | null>(null);
+  const [targetCompanyId, setTargetCompanyId] = useState<string | null>(null);
+  const [targetEmployeeId, setTargetEmployeeId] = useState<string | null>(null);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isUserProfileOpen, setIsUserProfileOpen] = useState(false);
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
 
-  if (authLoading && sstLoading) {
+  // Reset landing tab and transient UI state whenever authenticated user changes or logs out
+  useEffect(() => {
+    if (!isAuthenticated || !profile) {
+      setIsMobileSidebarOpen(false);
+      setIsUserProfileOpen(false);
+      setIsPasswordModalOpen(false);
+      setTargetIntegrationId(null);
+      setTargetCompanyId(null);
+      setTargetEmployeeId(null);
+      return;
+    }
+    setActiveTab(profile.role === 'solicitante' ? 'painel_contratada' : 'dashboard');
+  }, [isAuthenticated, profile?.id, profile?.role]);
+
+  // Enforce strict role-based tab isolation whenever profile/role changes
+  useEffect(() => {
+    if (isSolicitante && !SOLICITANTE_ALLOWED_TABS.includes(activeTab)) {
+      setActiveTab('painel_contratada');
+    } else if (isAuditor && !AUDITOR_ALLOWED_TABS.includes(activeTab)) {
+      setActiveTab('dashboard');
+    } else if (isAdmin && !ADMIN_ALLOWED_TABS.includes(activeTab)) {
+      setActiveTab('dashboard');
+    }
+  }, [isSolicitante, isAdmin, isAuditor, activeTab]);
+
+  const handleNavigate = (
+    tab: NavItemKey,
+    opts?: { integrationId?: string; companyId?: string; employeeId?: string }
+  ) => {
+    setTargetIntegrationId(opts?.integrationId || null);
+    setTargetCompanyId(opts?.companyId || null);
+    setTargetEmployeeId(opts?.employeeId || null);
+
+    if (isSolicitante && !SOLICITANTE_ALLOWED_TABS.includes(tab)) {
+      setActiveTab('painel_contratada');
+      return;
+    }
+    if (isAuditor && !AUDITOR_ALLOWED_TABS.includes(tab)) {
+      setActiveTab('dashboard');
+      return;
+    }
+    if (isAdmin && !ADMIN_ALLOWED_TABS.includes(tab)) {
+      setActiveTab('dashboard');
+      return;
+    }
+    setActiveTab(tab);
+  };
+
+  if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="h-12 w-12 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-600/30">
-            <ShieldCheck size={28} />
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-4">
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white shadow-xl shadow-blue-900/50 animate-pulse">
+            <Shield size={32} />
           </div>
-          <span className="text-xl font-bold tracking-tight">Gestão de EHS</span>
-        </div>
-        <div className="flex items-center gap-2 text-slate-400 text-xs">
-          <Loader2 className="animate-spin text-blue-500" size={16} />
-          <span>Carregando plataforma...</span>
+          <div className="flex items-center gap-2 text-slate-300 font-medium text-sm">
+            <Loader2 size={18} className="animate-spin text-blue-500" />
+            <span>Carregando plataforma EHS More...</span>
+          </div>
         </div>
       </div>
     );
   }
 
-  // If not authenticated via username/password, present Login Page
-  if (!isAuthenticated) {
+  if (!isAuthenticated || !profile) {
     return <LoginPage />;
   }
 
-  const handleSelectTab = (tab: NavItemKey) => {
-    if (isSolicitante && !SOLICITANTE_ALLOWED_TABS.includes(tab)) {
-      setCurrentTab('central_integracao');
-    } else {
-      setCurrentTab(tab);
+  const renderActiveView = () => {
+    if (isSolicitante) {
+      switch (activeTab) {
+        case 'painel_contratada':
+          return <ContractorPanelView onNavigate={handleNavigate} />;
+        case 'empresas':
+          return <CompaniesView initialCompanyId={targetCompanyId} />;
+        case 'colaboradores':
+          return <EmployeesView initialEmployeeId={targetEmployeeId} />;
+        case 'envio_documentos':
+          return (
+            <CentralIntegracaoView
+              initialSection="nova"
+              initialIntegrationId={targetIntegrationId}
+            />
+          );
+        case 'gestao_integracao':
+          return (
+            <CentralIntegracaoView
+              initialSection="acompanhamento"
+              initialIntegrationId={targetIntegrationId}
+            />
+          );
+        case 'pendencias_vencimentos':
+          return <ExpirationsControlView onNavigate={handleNavigate} />;
+        default:
+          return <ContractorPanelView onNavigate={handleNavigate} />;
+      }
+    }
+
+    // Admin EHS & Auditor (read-only)
+    switch (activeTab) {
+      case 'dashboard':
+        return <DashboardView onNavigate={handleNavigate} />;
+      case 'empresas':
+        return <CompaniesView initialCompanyId={targetCompanyId} />;
+      case 'colaboradores':
+        return <EmployeesView initialEmployeeId={targetEmployeeId} />;
+      case 'gestao_integracoes':
+        return <IntegrationsAdminView initialIntegrationId={targetIntegrationId} />;
+      case 'analise_documental':
+        return <DocumentAnalysisCenterView onNavigate={handleNavigate} />;
+      case 'controle_vencimentos':
+        return <AdminExpirationsControlView onNavigate={handleNavigate} />;
+      case 'matriz_ehs':
+        return <ActivityMatrixView />;
+      case 'usuarios':
+        return isAdmin ? <UsersPermissionsView /> : <DashboardView onNavigate={handleNavigate} />;
+      default:
+        return <DashboardView onNavigate={handleNavigate} />;
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col lg:flex-row antialiased selection:bg-blue-600 selection:text-white">
-      {/* Navigation Drawer / Sidebar */}
+    <div className="flex h-screen w-full bg-slate-950 text-slate-100 overflow-hidden font-sans antialiased">
       <Sidebar
-        currentTab={currentTab}
-        onSelectTab={handleSelectTab}
-        isOpen={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        onOpenPasswordModal={() => setIsPasswordModalOpen(true)}
+        activeTab={activeTab}
+        onSelectTab={(tab) => handleNavigate(tab)}
+        isOpenMobile={isMobileSidebarOpen}
+        onCloseMobile={() => setIsMobileSidebarOpen(false)}
+        onOpenUserProfile={() => setIsUserProfileOpen(true)}
+        onOpenChangePassword={() => setIsPasswordModalOpen(true)}
       />
 
-      {/* Main Content Viewport */}
-      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
-        {/* Top Header with Role Switcher & Logout */}
+      <div className="flex flex-1 flex-col min-w-0 h-full overflow-hidden">
         <Header
-          onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+          onToggleSidebar={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
+          onOpenAlertsModal={() =>
+            handleNavigate(isSolicitante ? 'pendencias_vencimentos' : 'analise_documental')
+          }
           isPasswordModalOpen={isPasswordModalOpen}
           onOpenPasswordModal={() => setIsPasswordModalOpen(true)}
           onClosePasswordModal={() => setIsPasswordModalOpen(false)}
         />
 
-        {/* View Content */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 custom-scrollbar">
-          <div className="max-w-7xl mx-auto pb-12">
-            {!isSolicitante && currentTab === 'dashboard' && <DashboardView onNavigate={handleSelectTab} />}
-            {currentTab === 'central_integracao' && <CentralIntegracaoView initialSection="nova" />}
-            {currentTab === 'acompanhamento_integracoes' && (
-              <CentralIntegracaoView initialSection="acompanhamento" />
-            )}
-            {!isSolicitante && currentTab === 'gestao_integracoes' && <IntegrationsAdminView />}
-            {currentTab === 'empresas' && <CompaniesView />}
-            {!isSolicitante && currentTab === 'colaboradores' && <EmployeesView />}
-            {!isSolicitante && currentTab === 'treinamentos' && <TrainingsView />}
-            {!isSolicitante && currentTab === 'documentos' && <DocumentsView />}
-            {currentTab === 'smartdocs' && <SmartDocsView />}
-            {currentTab === 'exames' && <ExamsView />}
-            {currentTab === 'epi' && <EpiView />}
-            {currentTab === 'apr_pt' && <PermitsView />}
-            {!isSolicitante && currentTab === 'matriz_atividades' && <ActivityMatrixView />}
-            {!isSolicitante && currentTab === 'inspecoes' && <InspectionsView />}
-            {currentTab === 'planos_acao' && <ActionPlansView />}
-            {currentTab === 'ambiental' && <EnvironmentalView />}
-            {!isSolicitante && currentTab === 'relatorios' && <ReportsView />}
-            {!isSolicitante && currentTab === 'notificacoes' && <NotificationsView />}
-            {!isSolicitante && currentTab === 'usuarios' && <UsersPermissionsView />}
-            {!isSolicitante && currentTab === 'configuracoes' && <SettingsImportView />}
-          </div>
+          {sstLoading ? (
+            <div className="h-64 flex flex-col items-center justify-center gap-3 text-slate-400">
+              <Loader2 size={24} className="animate-spin text-blue-500" />
+              <p className="text-xs">Sincronizando dados espelhados de empresas e documentos...</p>
+            </div>
+          ) : (
+            <div className="mx-auto max-w-7xl animate-in fade-in duration-200">
+              {renderActiveView()}
+            </div>
+          )}
         </main>
       </div>
+
+      {/* User Profile Summary Modal */}
+      {isUserProfileOpen && profile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <User size={16} className="text-blue-400" />
+                Meu Perfil
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsUserProfileOpen(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="space-y-2 text-xs text-slate-300">
+              <p>
+                <span className="text-slate-500">Nome:</span>{' '}
+                <strong className="text-white">{profile.nome}</strong>
+              </p>
+              <p>
+                <span className="text-slate-500">CPF:</span>{' '}
+                <span className="font-mono">{formatCPF(profile.cpf || profile.username)}</span>
+              </p>
+              <p>
+                <span className="text-slate-500">E-mail:</span> {profile.email}
+              </p>
+              <p>
+                <span className="text-slate-500">Perfil:</span>{' '}
+                <strong className="text-blue-400 uppercase">{activeRole}</strong>
+              </p>
+              {profile.empresaNome && (
+                <p className="flex items-center gap-1.5">
+                  <Building2 size={12} className="text-slate-400" />
+                  <span>{profile.empresaNome}</span>
+                </p>
+              )}
+            </div>
+            <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsUserProfileOpen(false);
+                  setIsPasswordModalOpen(true);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white inline-flex items-center gap-1.5"
+              >
+                <KeyRound size={13} />
+                Alterar Senha
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-export default function App() {
+export function App() {
   return (
     <AuthProvider>
       <SSTProvider>
-        <MainAppContent />
+        <MainAppShell />
       </SSTProvider>
     </AuthProvider>
   );
 }
+
+export default App;

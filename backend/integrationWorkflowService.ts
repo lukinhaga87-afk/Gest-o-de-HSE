@@ -1,5 +1,8 @@
 import crypto from 'crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { Firestore as ClientFirestore } from 'firebase/firestore';
+import { getAdminFirestore, isAdminSdkRequired } from './firebaseAdmin';
 import {
   serverAddDoc,
   serverGetDoc,
@@ -29,6 +32,7 @@ import {
   IntegrationFileIntegrityError,
   IntegrationFileStorage,
   IntegrationStorageUnavailableError,
+  isEphemeralServerlessRuntime,
   validateBinaryMagicBytes,
 } from './integrationFileStorage';
 import type {
@@ -59,6 +63,7 @@ import type {
   IntegrationType,
   IntegrationWorkflowHistoryEntry,
   IntegrationWorkflowStatus,
+  MirroredIntegrationDocumentItem,
   OccupationalExam,
   SafetyPermit,
   SmartDocRecord,
@@ -112,6 +117,7 @@ export interface IntegrationWorkflowRepository {
   updateIntegration(id: string, updates: Partial<ContractorIntegration>): Promise<ContractorIntegration>;
 
   getItemById(id: string): Promise<ContractorIntegrationItem | null>;
+  listAllItems(): Promise<ContractorIntegrationItem[]>;
   listItemsByIntegration(integrationId: string): Promise<ContractorIntegrationItem[]>;
   createItem(data: Omit<ContractorIntegrationItem, 'id'>): Promise<ContractorIntegrationItem>;
   updateItem(id: string, updates: Partial<ContractorIntegrationItem>): Promise<ContractorIntegrationItem>;
@@ -252,6 +258,13 @@ export interface ReviewItemInput {
   numeroDocumento?: string;
   conclusaoAso?: ConclusaoAptidao;
   aptidoesEspecificas?: string[];
+  observacoes?: string;
+  expectedVersion?: number;
+}
+
+export interface UpdateItemValidityInput {
+  dataValidade?: string;
+  semValidade?: boolean;
   observacoes?: string;
   expectedVersion?: number;
 }
@@ -493,14 +506,76 @@ function defaultSmartDocsSuggestionRunner(): SmartDocsSuggestionRunner {
 }
 
 // ============================================================================
-// FIRESTORE REPOSITORY
+// FIRESTORE REPOSITORY (WITH PRIVATE LOCAL DEV STORE FOR LOCKED COLLECTIONS)
 // ============================================================================
+
+interface LocalPrivateIntegrationDbState {
+  integrations: ContractorIntegration[];
+  items: ContractorIntegrationItem[];
+}
+
+function shouldUseLocalPrivateIntegrationStore(): boolean {
+  return !getAdminFirestore() && !isAdminSdkRequired() && !isEphemeralServerlessRuntime();
+}
+
+function getLocalPrivateIntegrationStorePath(): string {
+  const baseDir = path.resolve(
+    process.env.INTEGRATION_PRIVATE_STORAGE_DIR || path.join(process.cwd(), '.private-storage')
+  );
+  return path.join(baseDir, 'integrations-store.json');
+}
+
+let localStoreMutex: Promise<void> = Promise.resolve();
+
+async function withLocalStoreLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = localStoreMutex;
+  let release!: () => void;
+  localStoreMutex = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+async function readLocalPrivateIntegrationStore(): Promise<LocalPrivateIntegrationDbState> {
+  const filePath = getLocalPrivateIntegrationStorePath();
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<LocalPrivateIntegrationDbState>;
+    return {
+      integrations: Array.isArray(parsed.integrations) ? parsed.integrations : [],
+      items: Array.isArray(parsed.items) ? parsed.items : [],
+    };
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      return { integrations: [], items: [] };
+    }
+    throw err;
+  }
+}
+
+async function writeLocalPrivateIntegrationStore(state: LocalPrivateIntegrationDbState): Promise<void> {
+  const filePath = getLocalPrivateIntegrationStorePath();
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(state, null, 2), 'utf8');
+  await fs.rename(tmpPath, filePath);
+}
 
 export function createFirestoreIntegrationRepository(
   firestoreDb?: ClientFirestore
 ): IntegrationWorkflowRepository {
   return {
     async getIntegrationById(id) {
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        const state = await readLocalPrivateIntegrationStore();
+        const found = state.integrations.find((x) => x.id === id);
+        return found ? structuredClone(found) : null;
+      }
       const snap = await serverGetDoc<Omit<ContractorIntegration, 'id'>>(
         'contractorIntegrations',
         id,
@@ -510,6 +585,12 @@ export function createFirestoreIntegrationRepository(
       return { id: snap.id, ...snap.data };
     },
     async listIntegrations() {
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        const state = await readLocalPrivateIntegrationStore();
+        return state.integrations
+          .map((d) => structuredClone(d))
+          .sort((a, b) => (b.dataUltimaAtualizacao || '').localeCompare(a.dataUltimaAtualizacao || ''));
+      }
       const docs = await serverListCollection<Omit<ContractorIntegration, 'id'>>(
         'contractorIntegrations',
         firestoreDb
@@ -519,12 +600,36 @@ export function createFirestoreIntegrationRepository(
         .sort((a, b) => (b.dataUltimaAtualizacao || '').localeCompare(a.dataUltimaAtualizacao || ''));
     },
     async createIntegration(data) {
-      const clean = removeUndefinedDeep(data);
+      const clean = removeUndefinedDeep(data) as Omit<ContractorIntegration, 'id'>;
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        return withLocalStoreLock(async () => {
+          const state = await readLocalPrivateIntegrationStore();
+          const created: ContractorIntegration = structuredClone({
+            id: `int-${crypto.randomUUID()}`,
+            ...clean,
+          });
+          state.integrations.push(created);
+          await writeLocalPrivateIntegrationStore(state);
+          return structuredClone(created);
+        });
+      }
       const id = await serverAddDoc('contractorIntegrations', clean, firestoreDb);
-      return { id, ...(clean as Omit<ContractorIntegration, 'id'>) };
+      return { id, ...clean };
     },
     async updateIntegration(id, updates) {
-      const clean = removeUndefinedDeep(updates);
+      const clean = removeUndefinedDeep(updates) as Partial<ContractorIntegration>;
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        return withLocalStoreLock(async () => {
+          const state = await readLocalPrivateIntegrationStore();
+          const idx = state.integrations.findIndex((x) => x.id === id);
+          if (idx < 0) {
+            throw new IntegrationWorkflowError('Integração não encontrada.', 404, 'NOT_FOUND');
+          }
+          state.integrations[idx] = structuredClone({ ...state.integrations[idx], ...clean, id });
+          await writeLocalPrivateIntegrationStore(state);
+          return structuredClone(state.integrations[idx]);
+        });
+      }
       await serverUpdateDoc('contractorIntegrations', id, clean, firestoreDb);
       const snap = await serverGetDoc<Omit<ContractorIntegration, 'id'>>(
         'contractorIntegrations',
@@ -535,6 +640,11 @@ export function createFirestoreIntegrationRepository(
     },
 
     async getItemById(id) {
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        const state = await readLocalPrivateIntegrationStore();
+        const found = state.items.find((x) => x.id === id);
+        return found ? structuredClone(found) : null;
+      }
       const snap = await serverGetDoc<Omit<ContractorIntegrationItem, 'id'>>(
         'contractorIntegrationItems',
         id,
@@ -543,7 +653,29 @@ export function createFirestoreIntegrationRepository(
       if (!snap) return null;
       return { id: snap.id, ...snap.data };
     },
+    async listAllItems() {
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        const state = await readLocalPrivateIntegrationStore();
+        return state.items
+          .map((d) => structuredClone(d))
+          .sort((a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''));
+      }
+      const docs = await serverListCollection<Omit<ContractorIntegrationItem, 'id'>>(
+        'contractorIntegrationItems',
+        firestoreDb
+      );
+      return docs
+        .map((d) => ({ id: d.id, ...d.data }))
+        .sort((a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''));
+    },
     async listItemsByIntegration(integrationId) {
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        const state = await readLocalPrivateIntegrationStore();
+        return state.items
+          .filter((x) => x.integrationId === integrationId)
+          .map((d) => structuredClone(d))
+          .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+      }
       const docs = await serverQueryEquals<Omit<ContractorIntegrationItem, 'id'>>(
         'contractorIntegrationItems',
         'integrationId',
@@ -555,12 +687,36 @@ export function createFirestoreIntegrationRepository(
         .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
     },
     async createItem(data) {
-      const clean = removeUndefinedDeep(data);
+      const clean = removeUndefinedDeep(data) as Omit<ContractorIntegrationItem, 'id'>;
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        return withLocalStoreLock(async () => {
+          const state = await readLocalPrivateIntegrationStore();
+          const created: ContractorIntegrationItem = structuredClone({
+            id: `item-${crypto.randomUUID()}`,
+            ...clean,
+          });
+          state.items.push(created);
+          await writeLocalPrivateIntegrationStore(state);
+          return structuredClone(created);
+        });
+      }
       const id = await serverAddDoc('contractorIntegrationItems', clean, firestoreDb);
-      return { id, ...(clean as Omit<ContractorIntegrationItem, 'id'>) };
+      return { id, ...clean };
     },
     async updateItem(id, updates) {
-      const clean = removeUndefinedDeep(updates);
+      const clean = removeUndefinedDeep(updates) as Partial<ContractorIntegrationItem>;
+      if (shouldUseLocalPrivateIntegrationStore()) {
+        return withLocalStoreLock(async () => {
+          const state = await readLocalPrivateIntegrationStore();
+          const idx = state.items.findIndex((x) => x.id === id);
+          if (idx < 0) {
+            throw new IntegrationWorkflowError('Item documental não encontrado.', 404, 'ITEM_NOT_FOUND');
+          }
+          state.items[idx] = structuredClone({ ...state.items[idx], ...clean, id });
+          await writeLocalPrivateIntegrationStore(state);
+          return structuredClone(state.items[idx]);
+        });
+      }
       await serverUpdateDoc('contractorIntegrationItems', id, clean, firestoreDb);
       const snap = await serverGetDoc<Omit<ContractorIntegrationItem, 'id'>>(
         'contractorIntegrationItems',
@@ -768,6 +924,11 @@ export function createInMemoryIntegrationRepository(
     async getItemById(id) {
       const found = state.items.find((x) => x.id === id);
       return found ? structuredClone(found) : null;
+    },
+    async listAllItems() {
+      return state.items
+        .map((x) => structuredClone(x))
+        .sort((a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''));
     },
     async listItemsByIntegration(integrationId) {
       return state.items
@@ -1464,6 +1625,53 @@ export class IntegrationWorkflowService {
       return all.filter((item) => !UNSUBMITTED_INTEGRATION_STATUSES.has(item.status));
     }
     return all;
+  }
+
+  async listAccessibleDocumentItems(
+    actor: IntegrationWorkflowActor
+  ): Promise<MirroredIntegrationDocumentItem[]> {
+    const accessibleIntegrations = await this.listIntegrations(actor);
+    const integrationMap = new Map<string, ContractorIntegration>();
+    for (const integ of accessibleIntegrations) {
+      // Admin and Auditor only see submitted protocols in Central de Análise Documental / Controle de Vencimentos
+      if (actor.role !== 'solicitante' && UNSUBMITTED_INTEGRATION_STATUSES.has(integ.status)) {
+        continue;
+      }
+      integrationMap.set(integ.id, integ);
+    }
+
+    if (integrationMap.size === 0) {
+      return [];
+    }
+
+    const allItems = await this.repo.listAllItems();
+    const mirrored: MirroredIntegrationDocumentItem[] = [];
+
+    for (const rawItem of allItems) {
+      const parent = integrationMap.get(rawItem.integrationId);
+      if (!parent) continue;
+      // Extra defense-in-depth company scope check for Solicitante
+      if (actor.role === 'solicitante' && actor.empresaId && parent.empresaId && parent.empresaId !== actor.empresaId) {
+        continue;
+      }
+      const sanitized = stripLargeFileUrlFromItem(rawItem);
+      mirrored.push({
+        ...sanitized,
+        codigoProtocolo: parent.codigoProtocolo,
+        protocoloStatus: parent.status,
+        protocoloTipo: parent.tipo,
+        empresaCnpj: parent.empresaCnpj,
+        solicitadoPorNome: parent.solicitadoPorNome,
+        protocoloDataEnvio: parent.dataEnvio,
+        protocoloDataUltimaAtualizacao: parent.dataUltimaAtualizacao,
+      });
+    }
+
+    return mirrored.sort((a, b) =>
+      (b.updatedAt || b.dataEnvio || b.createdAt || '').localeCompare(
+        a.updatedAt || a.dataEnvio || a.createdAt || ''
+      )
+    );
   }
 
   async getIntegrationDetail(
@@ -4014,6 +4222,128 @@ export class IntegrationWorkflowService {
     );
 
     return this.getIntegrationDetail(actor, integration.id);
+  }
+
+  // --------------------------------------------------------------------------
+  // ADMIN EHS: UPDATE DOCUMENT VALIDITY / EXPIRATION DATE (MIRRORED)
+  // --------------------------------------------------------------------------
+
+  async updateItemValidity(
+    actor: IntegrationWorkflowActor,
+    integrationId: string,
+    itemId: string,
+    input: UpdateItemValidityInput
+  ): Promise<IntegrationDetailResult> {
+    this.assertAdmin(actor, 'gerenciar datas de validade dos documentos');
+
+    return this.withIntegrationLock(integrationId, async () => {
+      const integration = await this.repo.getIntegrationById(integrationId);
+      if (!integration) {
+        throw new IntegrationWorkflowError('Integração não encontrada.', 404, 'INTEGRATION_NOT_FOUND');
+      }
+      this.assertSubmittedForAdmin(integration, 'atualizar data de validade documental');
+      this.assertConcurrencyVersion(integration, input.expectedVersion);
+
+      const item = await this.repo.getItemById(itemId);
+      if (!item || item.integrationId !== integration.id) {
+        throw new IntegrationWorkflowError(
+          'Item documental não encontrado nesta integração.',
+          404,
+          'ITEM_NOT_FOUND'
+        );
+      }
+
+      const finalSemValidade = Boolean(input.semValidade);
+      let finalDataValidade = '';
+      if (!finalSemValidade) {
+        const rawDate = (input.dataValidade || '').trim();
+        if (!rawDate) {
+          throw new IntegrationWorkflowError(
+            'Informe uma data de validade válida (AAAA-MM-DD) ou marque o documento como sem validade.',
+            400,
+            'INVALID_VALIDITY_DATE'
+          );
+        }
+        const normalized = normalizeIsoDate(rawDate);
+        if (!normalized) {
+          throw new IntegrationWorkflowError(
+            `Data de validade inválida: "${rawDate}". Utilize o formato AAAA-MM-DD.`,
+            400,
+            'INVALID_VALIDITY_DATE'
+          );
+        }
+        finalDataValidade = normalized;
+      }
+
+      const now = this.nowIso();
+      const prevValidityLabel = item.semValidade
+        ? 'Sem validade'
+        : item.dataValidade || 'Não informada';
+      const nextValidityLabel = finalSemValidade ? 'Sem validade' : finalDataValidade;
+      const finalObservacoes =
+        input.observacoes !== undefined ? input.observacoes.trim() : item.observacoes || '';
+
+      const updatedVersions: IntegrationDocumentVersion[] = (item.versoes || []).map((v) =>
+        v.versao === item.versaoAtual
+          ? {
+              ...v,
+              dataValidade: finalDataValidade,
+              semValidade: finalSemValidade,
+              observacoes: finalObservacoes,
+            }
+          : v
+      );
+
+      await this.repo.updateItem(item.id, {
+        dataValidade: finalDataValidade,
+        semValidade: finalSemValidade,
+        observacoes: finalObservacoes,
+        versoes: updatedVersions,
+        updatedAt: now,
+      });
+
+      // Mirror expiration change to official DocumentSST collection if already officialized
+      if (item.officialRecordId && item.officialCollection === 'documents') {
+        try {
+          await this.repo.updateDocument(item.officialRecordId, {
+            dataValidade: finalDataValidade,
+            semValidade: finalSemValidade,
+            updatedAt: now,
+          });
+        } catch {
+          // Non-blocking if official record was already archived
+        }
+      }
+
+      await this.repo.updateIntegration(integration.id, {
+        dataUltimaAtualizacao: now,
+        updatedAt: now,
+        versaoConcorrencia: integration.versaoConcorrencia + 1,
+        historicoWorkflow: [
+          ...integration.historicoWorkflow,
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: 'ATUALIZACAO_VALIDADE_DOCUMENTO',
+            statusAnterior: item.status,
+            statusNovo: item.status,
+            itemId: item.id,
+            detalhes: `Validade do documento "${item.nomeExibicao}" atualizada por ${actor.nome}: ${prevValidityLabel} -> ${nextValidityLabel}.`,
+          },
+        ],
+      });
+
+      await this.logAudit(
+        actor,
+        'Atualização de Validade Documental',
+        item.id,
+        `Documento "${item.nomeExibicao}" (${integration.codigoProtocolo}): validade alterada de "${prevValidityLabel}" para "${nextValidityLabel}" por ${actor.nome}.`
+      );
+
+      return this.getIntegrationDetail(actor, integration.id);
+    });
   }
 
   // --------------------------------------------------------------------------

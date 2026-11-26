@@ -207,6 +207,9 @@ export const ActivityMatrixView: React.FC = () => {
   const [activityStatusFilter, setActivityStatusFilter] = useState<'todas' | 'ativas' | 'inativas'>('todas');
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null);
   const [reqScopeFilter, setReqScopeFilter] = useState<'todos' | ActivityRequirementScope>('todos');
+  const [reqObrigatorioFilter, setReqObrigatorioFilter] = useState<
+    'todos' | 'obrigatorios' | 'condicionais'
+  >('todos');
   const [showInactiveReqs, setShowInactiveReqs] = useState(true);
 
   // Feedback & Busy states
@@ -325,8 +328,19 @@ export const ActivityMatrixView: React.FC = () => {
     if (reqScopeFilter !== 'todos') {
       list = list.filter((r) => r.escopo === reqScopeFilter);
     }
+    if (reqObrigatorioFilter === 'obrigatorios') {
+      list = list.filter((r) => r.obrigatorioParaLiberacao);
+    } else if (reqObrigatorioFilter === 'condicionais') {
+      list = list.filter((r) => !r.obrigatorioParaLiberacao);
+    }
     return list;
-  }, [activityDocumentRequirements, selectedActivity, showInactiveReqs, reqScopeFilter]);
+  }, [
+    activityDocumentRequirements,
+    selectedActivity,
+    showInactiveReqs,
+    reqScopeFilter,
+    reqObrigatorioFilter,
+  ]);
 
   const selectedActivitySummary = useMemo(() => {
     if (!selectedActivity) {
@@ -673,6 +687,26 @@ export const ActivityMatrixView: React.FC = () => {
     }
   };
 
+  const handleToggleObrigatoriedade = async (req: ActivityDocumentRequirement) => {
+    if (!isAdmin) return;
+    setFeedback(null);
+    const nextVal = !req.obrigatorioParaLiberacao;
+    try {
+      await updateActivityDocumentRequirement(req.id, { obrigatorioParaLiberacao: nextVal });
+      setFeedback({
+        type: 'success',
+        message: `Requisito "${req.nomeExibicao}" atualizado para ${
+          nextVal ? 'Obrigatório (bloqueante)' : 'Condicional / Complementar'
+        }.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Erro ao alterar obrigatoriedade do requisito.',
+      });
+    }
+  };
+
   // Confirmation modal handler for deactivation
   const handleConfirmDeactivate = async () => {
     if (!isAdmin || !deactivateTarget || isDeactivating) return;
@@ -729,10 +763,10 @@ export const ActivityMatrixView: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
             <ClipboardList className="text-blue-500 shrink-0" size={22} />
-            Matriz de Atividades e Documentos Obrigatórios
+            Matriz de EHS (Atividades e Documentos)
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Configuração das atividades críticas de terceiros, riscos, normas e exigências documentais para liberação de trabalho
+            Configuração dinâmica das atividades de terceiros, normas regulamentadoras e documentos obrigatórios ou condicionais exigidos na Gestão de Integração
           </p>
         </div>
 
@@ -753,7 +787,7 @@ export const ActivityMatrixView: React.FC = () => {
                 className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-100 border border-slate-700 text-xs font-semibold transition-colors"
               >
                 {isSeeding ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-                Carregar Padrões EHS
+                Carregar 10 Atividades Iniciais (NRs)
               </button>
 
               <button
@@ -767,6 +801,15 @@ export const ActivityMatrixView: React.FC = () => {
             </>
           )}
         </div>
+      </div>
+
+      {/* Technical Disclaimer Banner */}
+      <div className="rounded-xl bg-blue-950/35 border border-blue-500/30 px-4 py-3 text-xs text-blue-100 flex items-start gap-2.5">
+        <Info size={16} className="text-blue-400 shrink-0 mt-0.5" />
+        <span>
+          <strong>Nota Técnica:</strong> A Matriz de EHS é uma referência inicial configurável (baseada nas Normas Regulamentadoras) para apoiar o controle documental e a Gestão de Integração, e{' '}
+          <strong>não substitui a avaliação técnica de SST</strong> (PGR, PCMSO, APR e PT) específica de cada operação.
+        </span>
       </div>
 
       {/* Feedback Banner */}
@@ -892,7 +935,7 @@ export const ActivityMatrixView: React.FC = () => {
                 <p className="text-xs text-slate-500">
                   {activityProfiles.length === 0
                     ? isAdmin
-                      ? 'Clique em "Carregar Padrões EHS" para iniciar com NR-35, NR-33, NR-10, Trabalho a Quente e Escavação, ou cadastre uma nova atividade.'
+                      ? 'Clique em "Carregar 10 Atividades Iniciais (NRs)" para iniciar com NR-35, NR-33, NR-10, Trabalho a Quente, Escavação, Equipamentos Móveis, Içamento, Produtos Químicos, Andaimes e Obras Civis, ou cadastre uma nova atividade.'
                       : 'Ainda não há atividades configuradas pelo Administrador EHS.'
                     : 'Ajuste a busca ou o filtro de situação para visualizar outras atividades.'}
                 </p>
@@ -1135,30 +1178,55 @@ export const ActivityMatrixView: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Scope Filter & Show Inactive Toggle */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-950 border border-slate-800 overflow-x-auto">
-                      {(
-                        [
-                          { key: 'todos', label: 'Todos os Escopos' },
-                          { key: 'empresa', label: 'Empresa' },
-                          { key: 'colaborador', label: 'Colaborador' },
-                          { key: 'atividade_pt', label: 'Atividade / PT' },
-                        ] as const
-                      ).map((tab) => (
-                        <button
-                          key={tab.key}
-                          type="button"
-                          onClick={() => setReqScopeFilter(tab.key)}
-                          className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors ${
-                            reqScopeFilter === tab.key
-                              ? 'bg-slate-800 text-white'
-                              : 'text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          {tab.label}
-                        </button>
-                      ))}
+                  {/* Scope, Requirement Type & Show Inactive Filters */}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-950 border border-slate-800 overflow-x-auto">
+                        {(
+                          [
+                            { key: 'todos', label: 'Todos os Escopos' },
+                            { key: 'empresa', label: 'Empresa' },
+                            { key: 'colaborador', label: 'Colaborador' },
+                            { key: 'atividade_pt', label: 'Atividade / PT' },
+                          ] as const
+                        ).map((tab) => (
+                          <button
+                            key={tab.key}
+                            type="button"
+                            onClick={() => setReqScopeFilter(tab.key)}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors ${
+                              reqScopeFilter === tab.key
+                                ? 'bg-slate-800 text-white'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-950 border border-slate-800">
+                        {(
+                          [
+                            { key: 'todos', label: 'Todos' },
+                            { key: 'obrigatorios', label: 'Obrigatórios' },
+                            { key: 'condicionais', label: 'Condicionais' },
+                          ] as const
+                        ).map((opt) => (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            onClick={() => setReqObrigatorioFilter(opt.key)}
+                            className={`px-2.5 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors ${
+                              reqObrigatorioFilter === opt.key
+                                ? 'bg-blue-600/25 text-blue-200'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
@@ -1216,15 +1284,15 @@ export const ActivityMatrixView: React.FC = () => {
                               <span>{COLLECTION_LABELS[req.origemColecao]}</span>
                               <span aria-hidden="true">·</span>
                               <span
-                                className={
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
                                   req.obrigatorioParaLiberacao
-                                    ? 'text-amber-400 font-semibold'
-                                    : 'text-slate-400'
-                                }
+                                    ? 'bg-amber-500/15 border-amber-500/35 text-amber-300'
+                                    : 'bg-sky-500/10 border-sky-500/30 text-sky-300'
+                                }`}
                               >
                                 {req.obrigatorioParaLiberacao
-                                  ? 'Bloqueante na liberação'
-                                  : 'Recomendado (não bloqueante)'}
+                                  ? 'Obrigatório (bloqueante)'
+                                  : 'Condicional / Complementar'}
                               </span>
                               {!req.ativo && (
                                 <>
@@ -1283,7 +1351,17 @@ export const ActivityMatrixView: React.FC = () => {
                           </div>
 
                           {isAdmin && (
-                            <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleObrigatoriedade(req)}
+                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-700 text-xs font-medium transition-colors"
+                                title="Alternar entre Obrigatório e Condicional"
+                              >
+                                {req.obrigatorioParaLiberacao
+                                  ? 'Tornar Condicional'
+                                  : 'Tornar Obrigatório'}
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => openEditReqModal(req)}

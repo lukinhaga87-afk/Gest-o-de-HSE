@@ -221,7 +221,13 @@ function formatFileSize(bytes?: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-export const IntegrationsAdminView: React.FC = () => {
+interface IntegrationsAdminViewProps {
+  initialIntegrationId?: string | null;
+}
+
+export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
+  initialIntegrationId = null,
+}) => {
   const { isAdmin, isAuditor } = useAuth();
   const {
     companies,
@@ -494,6 +500,12 @@ export const IntegrationsAdminView: React.FC = () => {
       setLoadingDetail(false);
     }
   };
+
+  useEffect(() => {
+    if (initialIntegrationId && canAccessView) {
+      openDetailModal(initialIntegrationId);
+    }
+  }, [initialIntegrationId, canAccessView]);
 
   const openProtectedDocumentPreview = async (
     item: ContractorIntegrationItem,

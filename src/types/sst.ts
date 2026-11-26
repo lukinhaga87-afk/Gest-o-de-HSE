@@ -23,6 +23,42 @@ export interface UserProfile {
   updatedAt?: string;
 }
 
+export type CompanyChangeRequestStatus = 'pendente' | 'aprovada' | 'recusada';
+
+export type CompanyEditableFields = Pick<
+  Company,
+  | 'razaoSocial'
+  | 'nomeFantasia'
+  | 'cnpj'
+  | 'responsavelLegal'
+  | 'responsavelSST'
+  | 'telefone'
+  | 'email'
+  | 'endereco'
+  | 'unidadeAtendimento'
+  | 'atividadeContratada'
+  | 'dataInicioContrato'
+  | 'dataTerminoContrato'
+  | 'contrato_indeterminado'
+>;
+
+export interface CompanyChangeRequest {
+  id: string;
+  empresaId: string;
+  solicitadoPorId: string;
+  solicitadoPorNome: string;
+  solicitadoPorEmail?: string;
+  dataSolicitacao: string;
+  justificativaSolicitante: string;
+  dadosAnteriores: Partial<CompanyEditableFields>;
+  dadosSolicitados: Partial<CompanyEditableFields>;
+  status: CompanyChangeRequestStatus;
+  analisadoPorId?: string;
+  analisadoPorNome?: string;
+  dataAnalise?: string;
+  justificativaAnalise?: string;
+}
+
 export interface Company {
   id: string;
   razaoSocial: string;
@@ -45,6 +81,7 @@ export interface Company {
     url: string;
     dataValidade?: string;
   }[];
+  solicitacoesAlteracao?: CompanyChangeRequest[];
   createdAt?: string;
   updatedAt?: string;
 }
@@ -120,6 +157,8 @@ export interface DocumentSST {
   motivoReprovacao?: string;
   analisadoPor?: string;
   dataAnalise?: string;
+  origemEnvio?: 'empresa' | 'colaborador' | 'integracao' | 'admin';
+  solicitacaoCodigo?: string;
   versao: number;
   historicoVersoes?: DocumentVersion[];
   createdAt?: string;
@@ -1106,4 +1145,15 @@ export interface ContractorIntegration {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface MirroredIntegrationDocumentItem extends ContractorIntegrationItem {
+  codigoProtocolo: string;
+  protocoloStatus: IntegrationWorkflowStatus;
+  protocoloTipo: IntegrationType;
+  empresaCnpj: string;
+  solicitadoPorNome: string;
+  protocoloDataEnvio?: string;
+  protocoloDataUltimaAtualizacao: string;
+}
+
 

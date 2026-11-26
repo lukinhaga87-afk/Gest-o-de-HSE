@@ -60,6 +60,7 @@ import {
 
 interface CentralIntegracaoViewProps {
   initialSection?: 'nova' | 'acompanhamento';
+  initialIntegrationId?: string | null;
 }
 
 type QueueItemUploadStatus = 'queued' | 'uploading' | 'success' | 'failed';
@@ -291,6 +292,7 @@ function persistActiveIntegrationId(id: string | null): void {
 
 export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
   initialSection = 'nova',
+  initialIntegrationId = null,
 }) => {
   const { activeEmpresaId, isSolicitante, isAuditor } = useAuth();
   const {
@@ -428,9 +430,14 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
 
   // Sync company default when activeEmpresaId loads
   useEffect(() => {
-    if (isSolicitante && activeEmpresaId) {
-      setSelectedEmpresaId(activeEmpresaId);
-      setCompanyMode('existing');
+    if (isSolicitante) {
+      if (activeEmpresaId) {
+        setSelectedEmpresaId(activeEmpresaId);
+        setCompanyMode('existing');
+      } else {
+        setSelectedEmpresaId('');
+        setCompanyMode('new');
+      }
     }
   }, [isSolicitante, activeEmpresaId]);
 
@@ -440,8 +447,8 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
   );
 
   const visibleCompanies = useMemo(() => {
-    if (isSolicitante && activeEmpresaId) {
-      return companies.filter((c) => c.id === activeEmpresaId);
+    if (isSolicitante) {
+      return activeEmpresaId ? companies.filter((c) => c.id === activeEmpresaId) : [];
     }
     return companies;
   }, [companies, isSolicitante, activeEmpresaId]);
@@ -514,15 +521,20 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
     }
   };
 
-  // Restore active protocol automatically on page refresh (F5)
+  // Restore active protocol automatically on page refresh (F5) or deep-link
   const restoredOnMountRef = useRef(false);
   useEffect(() => {
+    if (initialIntegrationId) {
+      restoredOnMountRef.current = true;
+      openIntegrationDetail(initialIntegrationId, { scrollToDocs: true });
+      return;
+    }
     if (restoredOnMountRef.current || activeDetail) return;
     const savedId = readSavedIntegrationId();
     if (!savedId) return;
     restoredOnMountRef.current = true;
     openIntegrationDetail(savedId);
-  }, []);
+  }, [initialIntegrationId]);
 
   const handleCheckCnpj = async () => {
     if (!newCompanyForm.cnpj.trim()) return;
@@ -2542,6 +2554,65 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                 )}
               </div>
             )}
+
+            {integrationType === 'INTEGRACAO_INICIAL' && selectedActivityIds.length > 0 && (() => {
+              const selectedReqs = activityDocumentRequirements.filter(
+                (r) => r.ativo && selectedActivityIds.includes(r.activityId)
+              );
+              const mandatoryReqs = selectedReqs.filter((r) => r.obrigatorioParaLiberacao);
+              const conditionalReqs = selectedReqs.filter((r) => !r.obrigatorioParaLiberacao);
+
+              if (selectedReqs.length === 0) return null;
+
+              return (
+                <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-4 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold text-white">
+                      Prévia Dinâmica da Matriz de EHS para a(s) atividade(s) selecionada(s)
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      {mandatoryReqs.length} obrigatório(s) · {conditionalReqs.length} condicional(is)
+                    </span>
+                  </div>
+
+                  {mandatoryReqs.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300 block">
+                        Documentos Obrigatórios
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {mandatoryReqs.map((r) => (
+                          <span
+                            key={r.id}
+                            className="px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200"
+                          >
+                            {r.nomeExibicao} ({r.escopo})
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {conditionalReqs.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-sky-300 block">
+                        Documentos Condicionais / Complementares (quando aplicáveis)
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {conditionalReqs.map((r) => (
+                          <span
+                            key={r.id}
+                            className="px-2 py-1 rounded-lg bg-sky-500/10 border border-sky-500/25 text-[11px] text-sky-200"
+                          >
+                            {r.nomeExibicao} ({r.escopo})
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Step 3: Third-party Employees (Existing + New with CPF dedup) */}

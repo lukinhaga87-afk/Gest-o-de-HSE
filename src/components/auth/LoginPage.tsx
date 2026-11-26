@@ -24,7 +24,7 @@ export const LoginPage: React.FC = () => {
     const rawValue = e.target.value;
     const digitsOnly = rawValue.replace(/\D/g, '');
     if (digitsOnly.length > 0 && /^[0-9.\-\s]+$/.test(rawValue)) {
-      setLoginCpf(maskCPFInput(rawValue));
+      setLoginCpf(maskCPFInput(digitsOnly));
     } else {
       setLoginCpf(rawValue);
     }
@@ -32,7 +32,10 @@ export const LoginPage: React.FC = () => {
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!loginCpf.trim() || !loginPassword.trim()) {
+    const trimmedCpf = loginCpf.trim();
+    const trimmedPass = loginPassword.trim();
+
+    if (!trimmedCpf || !trimmedPass) {
       setErrorMessage('Por favor, informe seu CPF e sua senha.');
       return;
     }
@@ -40,13 +43,15 @@ export const LoginPage: React.FC = () => {
     try {
       setLoading(true);
       setErrorMessage(null);
-      const res = await loginWithCredentials(loginCpf, loginPassword);
+      const res = await loginWithCredentials(trimmedCpf, trimmedPass);
       if (!res.success) {
-        setErrorMessage(res.message || 'Credenciais inválidas. Verifique seu CPF e senha.');
+        const msg = res.message || 'Credenciais inválidas. Verifique seu CPF e senha.';
+        console.warn('[LoginPage] Autenticação recusada:', msg);
+        setErrorMessage(msg);
       }
     } catch (err) {
-      console.error(err);
-      setErrorMessage('Falha ao autenticar. Tente novamente.');
+      console.error('[LoginPage] Exceção inesperada durante autenticação:', err);
+      setErrorMessage('Falha ao autenticar. Verifique sua conexão e tente novamente.');
     } finally {
       setLoading(false);
     }
@@ -86,7 +91,11 @@ export const LoginPage: React.FC = () => {
 
         {/* Error message alert */}
         {errorMessage && (
-          <div className="mb-5 p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-start gap-2.5">
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="mb-5 p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-start gap-2.5"
+          >
             <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-400" />
             <span>{errorMessage}</span>
           </div>

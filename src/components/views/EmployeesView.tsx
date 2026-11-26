@@ -1,19 +1,18 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Users,
   Plus,
   Search,
-  Filter,
   Eye,
   Edit2,
   Trash2,
   Building2,
-  Briefcase,
   Camera,
   Upload,
   User,
   X,
   Layers,
+  FileText,
 } from 'lucide-react';
 import { useSST } from '../../context/SSTContext';
 import { useAuth } from '../../context/AuthContext';
@@ -21,22 +20,25 @@ import { Employee } from '../../types/sst';
 import { formatCPF, formatDateBR } from '../../utils/trafficLight';
 import { EmployeeDossierModal } from './EmployeeDossierModal';
 
+interface EmployeesViewProps {
+  initialEmployeeId?: string | null;
+}
+
 const SAMPLE_AVATARS = [
   'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=300&fit=crop&crop=faces&q=80',
   'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=300&fit=crop&crop=faces&q=80',
   'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=300&fit=crop&crop=faces&q=80',
   'https://images.unsplash.com/photo-1580489944761-15a19d654956?w=300&fit=crop&crop=faces&q=80',
   'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300&fit=crop&crop=faces&q=80',
-  'https://images.unsplash.com/photo-1567532939604-b6b5b0db2604?w=300&fit=crop&crop=faces&q=80',
-  'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?w=300&fit=crop&crop=faces&q=80',
-  'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=300&fit=crop&crop=faces&q=80',
-  'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?w=300&fit=crop&crop=faces&q=80',
 ];
 
-export const EmployeesView: React.FC = () => {
+export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId }) => {
   const {
     employees,
     companies,
+    documents,
+    exams,
+    trainings,
     activityProfiles,
     addEmployee,
     updateEmployee,
@@ -48,7 +50,8 @@ export const EmployeesView: React.FC = () => {
   const [companyFilter, setCompanyFilter] = useState<string>('todos');
   const [statusFilter, setStatusFilter] = useState<string>('todos');
 
-  const [selectedDossierEmployee, setSelectedDossierEmployee] = useState<Employee | null>(null);
+  const [selectedDossierEmployeeId, setSelectedDossierEmployeeId] = useState<string | null>(null);
+  const [openUploadOnMount, setOpenUploadOnMount] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(
@@ -56,12 +59,26 @@ export const EmployeesView: React.FC = () => {
   );
   const [pendingDeleteEmployee, setPendingDeleteEmployee] = useState<Employee | null>(null);
 
+  useEffect(() => {
+    if (initialEmployeeId && employees.some((e) => e.id === initialEmployeeId)) {
+      setSelectedDossierEmployeeId(initialEmployeeId);
+      setOpenUploadOnMount(false);
+    }
+  }, [initialEmployeeId, employees]);
+
+  const selectedDossierEmployee = useMemo(
+    () =>
+      selectedDossierEmployeeId
+        ? employees.find((e) => e.id === selectedDossierEmployeeId) || null
+        : null,
+    [employees, selectedDossierEmployeeId]
+  );
+
   const activeActivities = useMemo(
     () => activityProfiles.filter((a) => a.ativo),
     [activityProfiles]
   );
 
-  // Form states
   const [formData, setFormData] = useState<Omit<Employee, 'id'>>({
     empresaId: '',
     empresaNome: '',
@@ -84,11 +101,10 @@ export const EmployeesView: React.FC = () => {
     fotoUrl: '',
   });
 
-  // Filter scoped list
   const filteredEmployees = useMemo(() => {
     let list = employees;
-    if (isSolicitante && activeEmpresaId) {
-      list = list.filter((e) => e.empresaId === activeEmpresaId);
+    if (isSolicitante) {
+      list = activeEmpresaId ? list.filter((e) => e.empresaId === activeEmpresaId) : [];
     }
     if (companyFilter !== 'todos') {
       list = list.filter((e) => e.empresaId === companyFilter);
@@ -111,12 +127,29 @@ export const EmployeesView: React.FC = () => {
     return list;
   }, [employees, isSolicitante, activeEmpresaId, companyFilter, statusFilter, searchTerm]);
 
+  const docCountByEmployee = useMemo(() => {
+    const map = new Map<string, { total: number; pending: number; rejected: number }>();
+    const bump = (empId: string | undefined, situacao: string) => {
+      if (!empId) return;
+      const cur = map.get(empId) || { total: 0, pending: 0, rejected: 0 };
+      cur.total += 1;
+      if (situacao === 'pendente') cur.pending += 1;
+      if (situacao === 'reprovado') cur.rejected += 1;
+      map.set(empId, cur);
+    };
+    documents.forEach((d) => bump(d.colaboradorId, d.situacao));
+    exams.forEach((ex) => bump(ex.colaboradorId, ex.situacao));
+    trainings.forEach((tr) => bump(tr.colaboradorId, tr.situacao));
+    return map;
+  }, [documents, exams, trainings]);
+
   const handleOpenAddModal = () => {
     setFeedback(null);
     setEditingEmployee(null);
-    const defaultEmp = isSolicitante && activeEmpresaId
-      ? companies.find((c) => c.id === activeEmpresaId)
-      : companies.find((c) => c.situacao === 'ativa') || companies[0];
+    const defaultEmp =
+      isSolicitante && activeEmpresaId
+        ? companies.find((c) => c.id === activeEmpresaId)
+        : companies.find((c) => c.situacao === 'ativa') || companies[0];
 
     setFormData({
       empresaId: defaultEmp?.id || '',
@@ -184,8 +217,8 @@ export const EmployeesView: React.FC = () => {
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.size > 2 * 1024 * 1024) {
-        setFeedback({ type: 'error', message: 'A fotografia deve ter no máximo 2MB.' });
+      if (file.size > 700 * 1024) {
+        setFeedback({ type: 'error', message: 'A fotografia deve ter no máximo 700 KB.' });
         return;
       }
       const reader = new FileReader();
@@ -201,7 +234,12 @@ export const EmployeesView: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFeedback(null);
-    if (!formData.nomeCompleto.trim() || !formData.cpf.trim() || !formData.empresaId || !formData.cargo.trim()) {
+    if (
+      !formData.nomeCompleto.trim() ||
+      !formData.cpf.trim() ||
+      !formData.empresaId ||
+      !formData.cargo.trim()
+    ) {
       setFeedback({
         type: 'error',
         message: 'Nome completo, CPF, Empresa Contratada e Cargo/Função são obrigatórios.',
@@ -210,12 +248,14 @@ export const EmployeesView: React.FC = () => {
     }
 
     try {
-      const targetEmpresaId = isSolicitante && activeEmpresaId ? activeEmpresaId : formData.empresaId;
+      const targetEmpresaId =
+        isSolicitante && activeEmpresaId ? activeEmpresaId : formData.empresaId;
       const selectedComp = companies.find((c) => c.id === targetEmpresaId);
       if (!selectedComp) {
         setFeedback({
           type: 'error',
-          message: 'Vincule obrigatoriamente o colaborador terceirizado a uma empresa contratada cadastrada.',
+          message:
+            'Vincule obrigatoriamente o colaborador terceirizado a uma empresa contratada cadastrada.',
         });
         return;
       }
@@ -229,10 +269,16 @@ export const EmployeesView: React.FC = () => {
 
       if (editingEmployee) {
         await updateEmployee(editingEmployee.id, payload);
-        setFeedback({ type: 'success', message: `Colaborador "${payload.nomeCompleto}" atualizado.` });
+        setFeedback({
+          type: 'success',
+          message: `Colaborador "${payload.nomeCompleto}" atualizado.`,
+        });
       } else {
         await addEmployee(payload);
-        setFeedback({ type: 'success', message: `Colaborador terceirizado "${payload.nomeCompleto}" cadastrado.` });
+        setFeedback({
+          type: 'success',
+          message: `Colaborador terceirizado "${payload.nomeCompleto}" cadastrado.`,
+        });
       }
       setIsModalOpen(false);
     } catch (err: any) {
@@ -256,6 +302,9 @@ export const EmployeesView: React.FC = () => {
     }
     try {
       await deleteEmployee(pendingDeleteEmployee.id);
+      if (selectedDossierEmployeeId === pendingDeleteEmployee.id) {
+        setSelectedDossierEmployeeId(null);
+      }
       setFeedback({
         type: 'success',
         message: `Colaborador "${pendingDeleteEmployee.nomeCompleto}" removido.`,
@@ -271,6 +320,11 @@ export const EmployeesView: React.FC = () => {
     }
   };
 
+  const openDossier = (emp: Employee, openUpload = false) => {
+    setSelectedDossierEmployeeId(emp.id);
+    setOpenUploadOnMount(openUpload);
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Header */}
@@ -278,20 +332,23 @@ export const EmployeesView: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Users className="text-blue-500" />
-            Colaboradores Terceirizados (Empresas Contratadas)
+            {isSolicitante ? 'Meus Colaboradores' : 'Colaboradores'}
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Ficha individual de terceiros, vínculo obrigatório à contratada, atividades habilitadas, ASO, treinamentos e EPIs
+            {isSolicitante
+              ? 'Gerencie seus colaboradores, acesse o dossiê individual e envie documentos, exames (ASO) ou treinamentos individualmente (sem mínimo de arquivos).'
+              : 'Visualização em lista dos colaboradores terceirizados. Selecione um colaborador para abrir a ficha individual, documentos e histórico de avaliações.'}
           </p>
         </div>
 
-        {(isAdmin || isSolicitante) && (
+        {(isAdmin || (isSolicitante && Boolean(activeEmpresaId))) && (
           <button
+            type="button"
             onClick={handleOpenAddModal}
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
           >
             <Plus size={16} />
-            Adicionar Terceirizado
+            Adicionar Colaborador
           </button>
         )}
       </div>
@@ -315,7 +372,7 @@ export const EmployeesView: React.FC = () => {
         </div>
       )}
 
-      {/* Search & Filters (Section 6 Requirement: nome, CPF, matrícula, empresa, cargo e setor) */}
+      {/* Search & Filters */}
       <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between bg-slate-900 p-4 rounded-xl border border-slate-800">
         <div className="relative flex-1">
           <Search size={16} className="absolute left-3 top-2.5 text-slate-400" />
@@ -349,7 +406,7 @@ export const EmployeesView: React.FC = () => {
             onChange={(e) => setStatusFilter(e.target.value)}
             className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
           >
-            <option value="todos">Todas as Situações</option>
+            <option value="todos">Todas as Situações ({filteredEmployees.length})</option>
             <option value="ativo">Ativo</option>
             <option value="afastado">Afastado</option>
             <option value="ferias">Férias</option>
@@ -358,131 +415,176 @@ export const EmployeesView: React.FC = () => {
         </div>
       </div>
 
-      {/* Employees Grid with Photo Displays */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      {/* Employees List / Table View */}
+      <div className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
         {filteredEmployees.length === 0 ? (
-          <div className="col-span-full py-12 text-center bg-slate-900 rounded-xl border border-slate-800">
-            <Users size={40} className="mx-auto text-slate-400 mb-2" />
+          <div className="py-12 text-center">
+            <Users size={40} className="mx-auto text-slate-500 mb-2" />
             <p className="text-sm font-semibold text-slate-300">Nenhum colaborador encontrado</p>
-            <p className="text-xs text-slate-400 mt-1">Ajuste os filtros ou cadastre um novo colaborador.</p>
+            <p className="text-xs text-slate-400 mt-1">
+              Ajuste os filtros ou cadastre um novo colaborador.
+            </p>
           </div>
         ) : (
-          filteredEmployees.map((emp) => (
-            <div
-              key={emp.id}
-              className="rounded-xl bg-slate-900 border border-slate-800 p-4 hover:border-slate-700 transition-all flex flex-col justify-between shadow-sm"
-            >
-              <div>
-                <div className="flex items-start gap-3.5">
-                  {/* Photo Thumbnail */}
-                  <div className="relative shrink-0">
-                    {emp.fotoUrl ? (
-                      <img
-                        src={emp.fotoUrl}
-                        alt={emp.nomeCompleto}
-                        className="h-14 w-14 rounded-xl object-cover border border-slate-700 shadow-sm"
-                      />
-                    ) : (
-                      <div className="h-14 w-14 rounded-xl bg-slate-800 flex items-center justify-center text-slate-400 border border-slate-700">
-                        <User size={24} />
-                      </div>
-                    )}
-                    <span
-                      className={`absolute -bottom-1 -right-1 h-3 w-3 rounded-full border-2 border-slate-900 ${
-                        emp.situacaoCadastral === 'ativo'
-                          ? 'bg-emerald-500'
-                          : emp.situacaoCadastral === 'ferias'
-                          ? 'bg-blue-500'
-                          : 'bg-amber-500'
-                      }`}
-                    />
-                  </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  <th className="py-3 px-4">Colaborador</th>
+                  <th className="py-3 px-4">CPF / Matrícula</th>
+                  <th className="py-3 px-4">Cargo / Setor</th>
+                  {!isSolicitante && <th className="py-3 px-4">Empresa</th>}
+                  <th className="py-3 px-4">Situação</th>
+                  <th className="py-3 px-4">Documentação</th>
+                  <th className="py-3 px-4 text-right">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800 text-xs">
+                {filteredEmployees.map((emp) => {
+                  const counts = docCountByEmployee.get(emp.id) || {
+                    total: 0,
+                    pending: 0,
+                    rejected: 0,
+                  };
+                  const canEditOwn = isSolicitante && activeEmpresaId === emp.empresaId;
 
-                  {/* Name and Info */}
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-bold text-white truncate">{emp.nomeCompleto}</h3>
-                    <p className="text-xs text-blue-400 font-medium truncate mt-0.5">
-                      {emp.cargo}
-                    </p>
-                    <p className="text-[11px] text-slate-400 truncate">
-                      {emp.setor} • {emp.empresaNome}
-                    </p>
-                  </div>
-                </div>
+                  return (
+                    <tr
+                      key={emp.id}
+                      onClick={() => openDossier(emp, false)}
+                      className="hover:bg-slate-800/40 transition-colors cursor-pointer"
+                    >
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-3">
+                          {emp.fotoUrl ? (
+                            <img
+                              src={emp.fotoUrl}
+                              alt={emp.nomeCompleto}
+                              className="h-9 w-9 rounded-lg object-cover border border-slate-700 shrink-0"
+                            />
+                          ) : (
+                            <div className="h-9 w-9 rounded-lg bg-slate-800 flex items-center justify-center text-slate-400 border border-slate-700 shrink-0">
+                              <User size={16} />
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="font-bold text-white truncate max-w-[200px]">
+                              {emp.nomeCompleto}
+                            </div>
+                            <div className="text-[10px] text-slate-400">
+                              Admissão: {formatDateBR(emp.dataAdmissao)}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
 
-                <div className="mt-4 pt-3 border-t border-slate-800/80 space-y-1.5 text-xs text-slate-300">
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">CPF:</span>
-                    <span className="font-mono text-slate-200">{formatCPF(emp.cpf)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Matrícula:</span>
-                    <span className="font-mono text-slate-200">{emp.matricula || '-'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Admissão:</span>
-                    <span className="text-slate-200">{formatDateBR(emp.dataAdmissao)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Integração:</span>
-                    <span className="text-slate-200">{formatDateBR(emp.dataIntegracao)}</span>
-                  </div>
-                  {(emp.atividadesHabilitadasIds || []).length > 0 && (
-                    <div className="pt-1.5 flex flex-wrap gap-1">
-                      {(emp.atividadesHabilitadasIds || []).slice(0, 3).map((actId) => {
-                        const act = activityProfiles.find((a) => a.id === actId);
-                        return (
-                          <span
-                            key={actId}
-                            className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-blue-300"
-                          >
-                            {act ? act.codigo : actId}
-                          </span>
-                        );
-                      })}
-                      {(emp.atividadesHabilitadasIds || []).length > 3 && (
-                        <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-400">
-                          +{(emp.atividadesHabilitadasIds || []).length - 3}
-                        </span>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <div className="font-mono text-slate-200">{formatCPF(emp.cpf)}</div>
+                        {emp.matricula && (
+                          <div className="text-[10px] font-mono text-slate-500">
+                            Mat: {emp.matricula}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="py-3 px-4">
+                        <div className="font-medium text-blue-300">{emp.cargo}</div>
+                        <div className="text-[11px] text-slate-400">{emp.setor || '—'}</div>
+                      </td>
+
+                      {!isSolicitante && (
+                        <td className="py-3 px-4 text-slate-300 max-w-[180px] truncate">
+                          {emp.empresaNome}
+                        </td>
                       )}
-                    </div>
-                  )}
-                </div>
-              </div>
 
-              {/* Action Buttons */}
-              <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
-                <button
-                  onClick={() => setSelectedDossierEmployee(emp)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600 text-blue-300 hover:text-white text-xs font-semibold transition-colors"
-                >
-                  <Eye size={14} />
-                  Ficha Individual
-                </button>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            emp.situacaoCadastral === 'ativo'
+                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                              : emp.situacaoCadastral === 'ferias'
+                              ? 'bg-blue-500/10 text-blue-300 border border-blue-500/20'
+                              : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                          }`}
+                        >
+                          {emp.situacaoCadastral}
+                        </span>
+                      </td>
 
-                <div className="flex items-center gap-1">
-                  {isAdmin && (
-                    <>
-                      <button
-                        onClick={() => handleOpenEditModal(emp)}
-                        className="p-1.5 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition-colors"
-                        title="Editar colaborador"
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="inline-flex items-center gap-1 text-slate-300 tabular-nums">
+                            <FileText size={13} className="text-slate-400" />
+                            {counts.total} doc(s)
+                          </span>
+                          {counts.pending > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[10px] font-bold">
+                              {counts.pending} pendente(s)
+                            </span>
+                          )}
+                          {counts.rejected > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[10px] font-bold">
+                              {counts.rejected} recusado(s)
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td
+                        className="py-3 px-4 text-right whitespace-nowrap"
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        <Edit2 size={14} />
-                      </button>
-                      <button
-                        onClick={() => setPendingDeleteEmployee(emp)}
-                        className="p-1.5 text-slate-400 hover:text-red-400 rounded hover:bg-slate-800 transition-colors"
-                        title="Excluir colaborador"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))
+                        <div className="inline-flex items-center gap-1.5">
+                          {(isSolicitante && canEditOwn) && (
+                            <button
+                              type="button"
+                              onClick={() => openDossier(emp, true)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-300 hover:text-white text-xs font-semibold transition-colors"
+                              title="Enviar documento individual, ASO ou treinamento"
+                            >
+                              <Upload size={12} />
+                              Enviar Doc
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => openDossier(emp, false)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600 text-blue-300 hover:text-white text-xs font-semibold transition-colors"
+                          >
+                            <Eye size={13} />
+                            Dossiê
+                          </button>
+
+                          {(isAdmin || canEditOwn) && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(emp)}
+                              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                              title="Editar colaborador"
+                            >
+                              <Edit2 size={14} />
+                            </button>
+                          )}
+
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => setPendingDeleteEmployee(emp)}
+                              className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-slate-800 transition-colors"
+                              title="Excluir colaborador"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
@@ -496,6 +598,7 @@ export const EmployeesView: React.FC = () => {
                 {editingEmployee ? 'Editar Ficha do Colaborador' : 'Cadastrar Novo Colaborador'}
               </h3>
               <button
+                type="button"
                 onClick={() => setIsModalOpen(false)}
                 className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
               >
@@ -504,7 +607,7 @@ export const EmployeesView: React.FC = () => {
             </div>
 
             <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-              {/* Photo Upload / Avatar Selection Section */}
+              {/* Photo Upload */}
               <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col sm:flex-row items-center gap-4">
                 <div className="relative">
                   {formData.fotoUrl ? (
@@ -521,10 +624,9 @@ export const EmployeesView: React.FC = () => {
                 </div>
 
                 <div className="flex-1 space-y-2 text-center sm:text-left">
-                  <span className="text-xs font-semibold text-white block">Fotografia do Colaborador</span>
-                  <p className="text-[11px] text-slate-400">
-                    Selecione um arquivo de imagem (PNG, JPG) ou escolha um avatar padrão.
-                  </p>
+                  <span className="text-xs font-semibold text-white block">
+                    Fotografia do Colaborador
+                  </span>
                   <div className="flex flex-wrap items-center gap-2 justify-center sm:justify-start">
                     <label className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium cursor-pointer transition-colors">
                       <Upload size={13} />
@@ -536,14 +638,15 @@ export const EmployeesView: React.FC = () => {
                         className="hidden"
                       />
                     </label>
-
-                    {SAMPLE_AVATARS.slice(0, 5).map((av, idx) => (
+                    {SAMPLE_AVATARS.map((av, idx) => (
                       <button
                         key={idx}
                         type="button"
                         onClick={() => setFormData({ ...formData, fotoUrl: av })}
                         className={`h-7 w-7 rounded-lg overflow-hidden border transition-all ${
-                          formData.fotoUrl === av ? 'border-blue-400 ring-2 ring-blue-500' : 'border-slate-700 opacity-60 hover:opacity-100'
+                          formData.fotoUrl === av
+                            ? 'border-blue-400 ring-2 ring-blue-500'
+                            : 'border-slate-700 opacity-60 hover:opacity-100'
                         }`}
                       >
                         <img src={av} alt="Avatar" className="h-full w-full object-cover" />
@@ -553,7 +656,7 @@ export const EmployeesView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Form Fields Grid */}
+              {/* Fields */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
                 <div className="md:col-span-2">
                   <label className="block text-xs font-medium text-slate-300 mb-1">
@@ -564,11 +667,9 @@ export const EmployeesView: React.FC = () => {
                     required
                     value={formData.nomeCompleto}
                     onChange={(e) => setFormData({ ...formData, nomeCompleto: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Nome e Sobrenome"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
                     CPF <span className="text-red-400">*</span>
@@ -578,40 +679,37 @@ export const EmployeesView: React.FC = () => {
                     required
                     value={formData.cpf}
                     onChange={(e) => setFormData({ ...formData, cpf: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                     placeholder="000.000.000-00"
                   />
                 </div>
-
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">RG</label>
                   <input
                     type="text"
                     value={formData.rg}
                     onChange={(e) => setFormData({ ...formData, rg: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Número e Órgão Emissor"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Data de Nascimento</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Data de Nascimento
+                  </label>
                   <input
                     type="date"
                     value={formData.dataNascimento}
                     onChange={(e) => setFormData({ ...formData, dataNascimento: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">Matrícula</label>
                   <input
                     type="text"
                     value={formData.matricula}
                     onChange={(e) => setFormData({ ...formData, matricula: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Ex: MAT-2026-01"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
 
@@ -620,15 +718,18 @@ export const EmployeesView: React.FC = () => {
                     Empresa Contratada <span className="text-red-400">*</span>
                   </label>
                   {isSolicitante ? (
-                    <div className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white flex items-center justify-between shadow-sm">
+                    <div className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Building2 size={15} className="text-blue-400 shrink-0" />
                         <span className="font-semibold text-white">
-                          {companies.find((c) => c.id === (activeEmpresaId || formData.empresaId))?.razaoSocial || formData.empresaNome || 'Sua Empresa Contratada'}
+                          {companies.find((c) => c.id === (activeEmpresaId || formData.empresaId))
+                            ?.razaoSocial ||
+                            formData.empresaNome ||
+                            'Sua Empresa'}
                         </span>
                       </div>
-                      <span className="text-[10px] text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 font-medium">
-                        Bloqueado para sua empresa
+                      <span className="text-[10px] text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                        Vinculado à sua empresa
                       </span>
                     </div>
                   ) : (
@@ -644,7 +745,7 @@ export const EmployeesView: React.FC = () => {
                           responsavelEmpresa: sel?.responsavelLegal || formData.responsavelEmpresa,
                         });
                       }}
-                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                     >
                       <option value="">Selecione a empresa vinculada...</option>
                       {companies.map((c) => (
@@ -657,11 +758,15 @@ export const EmployeesView: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Situação Cadastral</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Situação Cadastral
+                  </label>
                   <select
                     value={formData.situacaoCadastral}
-                    onChange={(e: any) => setFormData({ ...formData, situacaoCadastral: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                    onChange={(e: any) =>
+                      setFormData({ ...formData, situacaoCadastral: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   >
                     <option value="ativo">Ativo</option>
                     <option value="afastado">Afastado</option>
@@ -679,61 +784,58 @@ export const EmployeesView: React.FC = () => {
                     required
                     value={formData.cargo}
                     onChange={(e) => setFormData({ ...formData, cargo: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Ex: Soldador TIG, Eletricista"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">Setor</label>
                   <input
                     type="text"
                     value={formData.setor}
                     onChange={(e) => setFormData({ ...formData, setor: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Ex: Manutenção, SESMT"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Unidade de Alocação</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Unidade de Alocação
+                  </label>
                   <input
                     type="text"
                     value={formData.unidadeAlocacao}
                     onChange={(e) => setFormData({ ...formData, unidadeAlocacao: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="Ex: Planta Industrial RJ"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Data de Admissão</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Data de Admissão
+                  </label>
                   <input
                     type="date"
                     value={formData.dataAdmissao}
                     onChange={(e) => setFormData({ ...formData, dataAdmissao: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Data de Integração SST</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Data de Integração SST
+                  </label>
                   <input
                     type="date"
                     value={formData.dataIntegracao}
                     onChange={(e) => setFormData({ ...formData, dataIntegracao: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
-
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">Telefone</label>
                   <input
                     type="text"
                     value={formData.telefone}
                     onChange={(e) => setFormData({ ...formData, telefone: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                    placeholder="(00) 00000-0000"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                 </div>
               </div>
@@ -774,7 +876,9 @@ export const EmployeesView: React.FC = () => {
                           />
                           <div className="min-w-0">
                             <span className="font-semibold block truncate">{act.nome}</span>
-                            <span className="text-[10px] text-slate-400 font-mono">{act.codigo}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              {act.codigo}
+                            </span>
                           </div>
                         </label>
                       );
@@ -784,13 +888,16 @@ export const EmployeesView: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Atividade Executada Detalhada</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Atividade Executada Detalhada
+                </label>
                 <textarea
                   rows={2}
                   value={formData.atividadeExecutada}
-                  onChange={(e) => setFormData({ ...formData, atividadeExecutada: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
-                  placeholder="Descreva as tarefas e operações executadas pelo colaborador terceirizado..."
+                  onChange={(e) =>
+                    setFormData({ ...formData, atividadeExecutada: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                 />
               </div>
 
@@ -804,7 +911,7 @@ export const EmployeesView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white shadow-md shadow-blue-600/30"
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white"
                 >
                   Salvar Colaborador
                 </button>
@@ -824,12 +931,17 @@ export const EmployeesView: React.FC = () => {
               </div>
               <div>
                 <h3 className="text-sm font-bold text-white">Confirmar Exclusão</h3>
-                <p className="text-xs text-slate-400">Remover cadastro do colaborador terceirizado.</p>
+                <p className="text-xs text-slate-400">
+                  Remover cadastro do colaborador terceirizado.
+                </p>
               </div>
             </div>
             <p className="text-xs text-slate-300">
               Confirma a exclusão de{' '}
-              <span className="font-semibold text-white">{pendingDeleteEmployee.nomeCompleto}</span>?
+              <span className="font-semibold text-white">
+                {pendingDeleteEmployee.nomeCompleto}
+              </span>
+              ?
             </p>
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
               <button
@@ -855,7 +967,11 @@ export const EmployeesView: React.FC = () => {
       {selectedDossierEmployee && (
         <EmployeeDossierModal
           employee={selectedDossierEmployee}
-          onClose={() => setSelectedDossierEmployee(null)}
+          openUploadOnMount={openUploadOnMount}
+          onClose={() => {
+            setSelectedDossierEmployeeId(null);
+            setOpenUploadOnMount(false);
+          }}
         />
       )}
     </div>

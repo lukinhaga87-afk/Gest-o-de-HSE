@@ -29,11 +29,14 @@ import {
   verifyFileAccessTicket,
   resolveAuthoritativeUserByClaim,
   createRequireAuth,
+  createRequireAdmin,
+  createRequireAuthenticatedEditor,
   requireAuth,
   requireAdmin,
   requireAuthenticatedEditor,
   AuthenticatedRequest,
   AuthoritativeUserLookup,
+  UserProfilesLister,
   getValidatedApiAuthSecret,
   hashPasswordBcrypt,
   sanitizeUserProfile,
@@ -123,15 +126,23 @@ export function createApiApp(options?: {
   permitWorkflowService?: PermitWorkflowService;
   integrationWorkflowService?: IntegrationWorkflowService;
   authoritativeUserLookup?: AuthoritativeUserLookup;
+  userProfilesLister?: UserProfilesLister;
 }) {
   const app = express();
   const permitService = options?.permitWorkflowService ?? new PermitWorkflowService();
   const integrationService =
     options?.integrationWorkflowService ?? new IntegrationWorkflowService();
   const authoritativeUserLookup = options?.authoritativeUserLookup;
+  const userProfilesLister = options?.userProfilesLister;
   const requireIntegrationAuth = authoritativeUserLookup
     ? createRequireAuth(authoritativeUserLookup)
     : requireAuth;
+  const requireIntegrationAdmin = authoritativeUserLookup
+    ? createRequireAdmin(authoritativeUserLookup)
+    : requireAdmin;
+  const requireIntegrationEditor = authoritativeUserLookup
+    ? createRequireAuthenticatedEditor(authoritativeUserLookup)
+    : requireAuthenticatedEditor;
 
   app.use(express.json({ limit: '25mb' }));
 
@@ -157,9 +168,11 @@ export function createApiApp(options?: {
   // ---------------------------------------------------------------------------
   app.post('/api/auth/session', async (req: Request, res: Response) => {
     if (!getValidatedApiAuthSecret()) {
+      console.error('[API auth/session] Serviço indisponível: segredo de assinatura ausente ou inválido.');
       return res.status(503).json({
         success: false,
-        message: 'Serviço de autenticação indisponível: variável API_AUTH_SECRET ausente ou inválida no servidor.',
+        code: 'AUTH_SERVICE_UNAVAILABLE',
+        message: 'Serviço de autenticação temporariamente indisponível. Contate o suporte técnico.',
       });
     }
 
@@ -189,14 +202,18 @@ export function createApiApp(options?: {
     }
 
     try {
-      const authenticated = await authenticateUserCredentials({
-        cpfOrIdentifier,
-        password,
-      });
+      const authenticated = await authenticateUserCredentials(
+        {
+          cpfOrIdentifier,
+          password,
+        },
+        userProfilesLister
+      );
 
       if (!authenticated) {
         return res.status(401).json({
           success: false,
+          code: 'INVALID_CREDENTIALS',
           message: 'CPF ou senha incorretos. Verifique suas credenciais de acesso.',
         });
       }
@@ -211,9 +228,11 @@ export function createApiApp(options?: {
       });
     } catch (err: any) {
       if (err instanceof AuthConfigError || err instanceof AuthServiceUnavailableError) {
+        console.error('[API auth/session Unavailable]:', err.message);
         return res.status(503).json({
           success: false,
-          message: err.message,
+          code: err.code,
+          message: 'Serviço de autenticação temporariamente indisponível. Tente novamente em instantes.',
         });
       }
       console.error('[API auth/session Error]:', err);
@@ -324,7 +343,7 @@ export function createApiApp(options?: {
   // ---------------------------------------------------------------------------
   // CURRENT SESSION PROFILE (Authoritative Firestore profile & role)
   // ---------------------------------------------------------------------------
-  app.get('/api/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/auth/me', requireIntegrationAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (req.tokenRoleDiverged || !req.officialProfile) {
       return res.status(401).json({
         success: false,
@@ -3253,7 +3272,7 @@ export function createApiApp(options?: {
     });
   };
 
-  app.get('/api/integrations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/integrations', requireIntegrationAuth, async (req: AuthenticatedRequest, res: Response) => {
     const actor = extractIntegrationActor(req);
     if (!actor) {
       return res.status(401).json({
@@ -3269,9 +3288,29 @@ export function createApiApp(options?: {
     }
   });
 
+  app.get('/api/integrations/items', requireIntegrationAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const actor = extractIntegrationActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sessão inválida ou divergente. Faça login novamente.',
+      });
+    }
+    try {
+      const items = await integrationService.listAccessibleDocumentItems(actor);
+      return res.json({ success: true, items });
+    } catch (err) {
+      return handleIntegrationWorkflowError(
+        res,
+        err,
+        'Erro ao listar documentos espelhados das integrações.'
+      );
+    }
+  });
+
   app.post(
     '/api/integrations/check-duplicates',
-    requireAuth,
+    requireIntegrationAuth,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3294,7 +3333,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations',
-    requireAuthenticatedEditor,
+    requireIntegrationEditor,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3316,7 +3355,7 @@ export function createApiApp(options?: {
     }
   );
 
-  app.get('/api/integrations/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/integrations/:id', requireIntegrationAuth, async (req: AuthenticatedRequest, res: Response) => {
     const actor = extractIntegrationActor(req);
     if (!actor) {
       return res.status(401).json({
@@ -3334,7 +3373,7 @@ export function createApiApp(options?: {
 
   app.put(
     '/api/integrations/:id',
-    requireAuthenticatedEditor,
+    requireIntegrationEditor,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3362,7 +3401,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/documents/upload',
-    requireAuthenticatedEditor,
+    requireIntegrationEditor,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3606,7 +3645,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/documents/batch',
-    requireAuthenticatedEditor,
+    requireIntegrationEditor,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3634,7 +3673,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/items/:itemId/renew',
-    requireAuthenticatedEditor,
+    requireIntegrationEditor,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3663,7 +3702,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/submit',
-    requireAuthenticatedEditor,
+    requireIntegrationEditor,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3692,7 +3731,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/start-review',
-    requireAdmin,
+    requireIntegrationAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3719,7 +3758,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/items/:itemId/review',
-    requireAdmin,
+    requireIntegrationAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3752,9 +3791,51 @@ export function createApiApp(options?: {
     }
   );
 
+  app.patch(
+    '/api/integrations/:id/items/:itemId/validity',
+    requireIntegrationAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.updateItemValidity(
+          actor,
+          req.params.id,
+          req.params.itemId,
+          {
+            dataValidade:
+              typeof req.body?.dataValidade === 'string' ? req.body.dataValidade : undefined,
+            semValidade:
+              typeof req.body?.semValidade === 'boolean' ? req.body.semValidade : undefined,
+            observacoes:
+              typeof req.body?.observacoes === 'string' ? req.body.observacoes : undefined,
+            expectedVersion:
+              typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+          }
+        );
+        return res.json({
+          success: true,
+          message: 'Data de validade do documento atualizada com sucesso.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao atualizar data de validade do documento.'
+        );
+      }
+    }
+  );
+
   app.post(
     '/api/integrations/:id/request-correction',
-    requireAdmin,
+    requireIntegrationAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3784,7 +3865,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/approve',
-    requireAdmin,
+    requireIntegrationAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3814,7 +3895,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/reject',
-    requireAdmin,
+    requireIntegrationAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3843,7 +3924,7 @@ export function createApiApp(options?: {
 
   app.post(
     '/api/integrations/:id/close',
-    requireAdmin,
+    requireIntegrationAdmin,
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
@@ -3870,7 +3951,7 @@ export function createApiApp(options?: {
     }
   );
 
-  app.delete('/api/integrations/:id', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
+  app.delete('/api/integrations/:id', requireIntegrationAuth, async (_req: AuthenticatedRequest, res: Response) => {
     return res.status(403).json({
       success: false,
       code: 'PHYSICAL_DELETE_FORBIDDEN',
@@ -3881,7 +3962,7 @@ export function createApiApp(options?: {
 
   app.delete(
     '/api/integrations/:id/items/:itemId',
-    requireAuth,
+    requireIntegrationAuth,
     async (_req: AuthenticatedRequest, res: Response) => {
       return res.status(403).json({
         success: false,
