@@ -15,6 +15,7 @@ import {
   buildProtectedDownloadUrl,
   classifyDocumentUrl,
   extractFileNameFromContentDisposition,
+  resolveProtectedDocumentUrl,
 } from '../../utils/protectedDocumentViewer';
 
 interface ProtectedDocumentButtonProps {
@@ -52,6 +53,7 @@ export const ProtectedDocumentButton: React.FC<ProtectedDocumentButtonProps> = (
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const urlKind = classifyDocumentUrl(url);
+  const resolvedUrl = resolveProtectedDocumentUrl(url, fileName);
 
   const revokeCurrentBlob = useCallback(() => {
     if (activeObjectUrlRef.current) {
@@ -107,7 +109,7 @@ export const ProtectedDocumentButton: React.FC<ProtectedDocumentButtonProps> = (
 
     try {
       if (urlKind === 'protected_api') {
-        const res = await authorizedFetch(url, {
+        const res = await authorizedFetch(resolvedUrl, {
           method: 'GET',
           signal: controller.signal,
         });
@@ -168,7 +170,7 @@ export const ProtectedDocumentButton: React.FC<ProtectedDocumentButtonProps> = (
     } finally {
       setLoading(false);
     }
-  }, [authorizedFetch, fileName, revokeCurrentBlob, url, urlKind]);
+  }, [authorizedFetch, fileName, resolvedUrl, revokeCurrentBlob, url, urlKind]);
 
   const handleOpen = () => {
     setIsOpen(true);
@@ -193,7 +195,7 @@ export const ProtectedDocumentButton: React.FC<ProtectedDocumentButtonProps> = (
     setDownloading(true);
     setError(null);
     try {
-      const downloadUrl = buildProtectedDownloadUrl(url);
+      const downloadUrl = buildProtectedDownloadUrl(resolvedUrl || url, fileName);
       const res = await authorizedFetch(downloadUrl, { method: 'GET' });
       if (!res.ok) {
         let msg = 'Não foi possível baixar o documento protegido.';

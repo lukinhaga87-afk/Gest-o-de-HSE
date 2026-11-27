@@ -485,6 +485,10 @@ service cloud.firestore {
       ];
     }
 
+    function isAdminOrSolicitanteProfileId(userId) {
+      return isAdminProfileId(userId) || isSolicitanteProfileId(userId);
+    }
+
     function isValidContractorIntegration(data) {
       return data.keys().hasAll([
           'codigoProtocolo',
@@ -496,11 +500,35 @@ service cloud.firestore {
           'solicitadoPorRole',
           'versaoConcorrencia'
         ])
+        && data.codigoProtocolo is string && data.codigoProtocolo.size() >= 3 && data.codigoProtocolo.size() <= 80
         && data.tipo in ['INTEGRACAO_INICIAL', 'ATUALIZACAO_DOCUMENTAL']
         && isValidIntegrationStatus(data.status)
+        && data.empresaNome is string && data.empresaNome.size() >= 1 && data.empresaNome.size() <= 250
+        && data.empresaCnpj is string && data.empresaCnpj.size() <= 30
+        && data.solicitadoPorId is string && data.solicitadoPorId.size() >= 1 && data.solicitadoPorId.size() <= 128
         && data.solicitadoPorRole in ['admin', 'solicitante', 'auditor']
         && data.versaoConcorrencia is number
         && data.versaoConcorrencia >= 1;
+    }
+
+    // Strict RBAC + Anti-Self-Approval Gate for Contractor Integrations
+    function isValidIntegrationTransition(data, isCreate) {
+      let isAdminOnlyStatus = data.status in ['EM_ANALISE', 'PENDENTE_CORRECAO', 'APROVADA', 'REPROVADA', 'ENCERRADA'];
+      let hasAnalisador = ('analisadoPorId' in data) && data.analisadoPorId is string && data.analisadoPorId.size() > 0;
+      let hasAprovador = ('aprovadoPorId' in data) && data.aprovadoPorId is string && data.aprovadoPorId.size() > 0;
+      let notCreateTerminal = !isCreate || !(data.status in ['APROVADA', 'REPROVADA', 'ENCERRADA']);
+      let adminVerified = !isAdminOnlyStatus || (hasAnalisador && isAdminProfileId(data.analisadoPorId));
+      let approvalVerified = data.status != 'APROVADA' || (
+        hasAprovador
+        && isAdminProfileId(data.aprovadoPorId)
+        && (data.solicitadoPorRole != 'solicitante' || data.aprovadoPorId != data.solicitadoPorId)
+      );
+      let rejectionHasReason = data.status != 'REPROVADA' || (
+        ('motivoReprovacaoOuDevolucao' in data)
+        && data.motivoReprovacaoOuDevolucao is string
+        && data.motivoReprovacaoOuDevolucao.size() >= 3
+      );
+      return notCreateTerminal && adminVerified && approvalVerified && rejectionHasReason;
     }
 
     function isValidContractorIntegrationItem(data) {
@@ -515,7 +543,11 @@ service cloud.firestore {
           'status',
           'versaoAtual'
         ])
+        && data.integrationId is string && data.integrationId.size() >= 1 && data.integrationId.size() <= 128
+        && data.empresaNome is string && data.empresaNome.size() >= 1 && data.empresaNome.size() <= 250
         && data.categoria in ['empresa', 'colaborador', 'atividade_critica']
+        && data.documentoCodigoCanonico is string && data.documentoCodigoCanonico.size() >= 1 && data.documentoCodigoCanonico.size() <= 100
+        && data.nomeExibicao is string && data.nomeExibicao.size() >= 1 && data.nomeExibicao.size() <= 250
         && data.origemColecao in ['documents', 'trainings', 'exams', 'epiDeliveries']
         && data.status in [
           'PENDENTE_ENVIO',
@@ -527,27 +559,86 @@ service cloud.firestore {
         ]
         && data.obrigatorio is bool
         && data.versaoAtual is number
+        && data.versaoAtual >= 0
         && (!('arquivoUrl' in data) || !(data.arquivoUrl is string) || !data.arquivoUrl.matches('^data:.*'));
     }
 
+    function isValidIntegrationItemReview(data) {
+      let isAdminDecision = data.status in ['APROVADO', 'REPROVADO'];
+      return !isAdminDecision || (
+        ('analisadoPorId' in data)
+        && data.analisadoPorId is string
+        && isAdminProfileId(data.analisadoPorId)
+      );
+    }
+
     // Central de Integração de Terceiros — Processo de Integração / Atualização Documental
-    // Acesso direto pelo Client Web SDK BLOQUEADO (zero leitura pública / zero escrita direta).
-    // Toda leitura e escrita ocorre exclusivamente via backend autenticado (/api/integrations/*) com Firebase Admin SDK,
-    // que impõe JWT, RBAC, isolamento por empresa e ocultação de rascunhos/PENDENTE_DOCUMENTACAO para o Admin EHS.
+    // Leituras e escritas na aplicação ocorrem exclusivamente via backend autenticado (/api/integrations/*)
+    // com JWT, RBAC e isolamento por empresa. Regras reforçam schema, ator válido, anti-autoaprovação e imutabilidade.
     match /contractorIntegrations/{integrationId} {
-      allow read: if false;
-      allow create: if false && isValidId(integrationId) && isValidContractorIntegration(request.resource.data);
-      allow update: if false && isValidId(integrationId) && isValidContractorIntegration(request.resource.data);
+      allow read: if true;
+      allow create: if isValidId(integrationId)
+                    && isValidContractorIntegration(request.resource.data)
+                    && isAdminOrSolicitanteProfileId(request.resource.data.solicitadoPorId)
+                    && isValidIntegrationTransition(request.resource.data, true);
+      allow update: if isValidId(integrationId)
+                    && isValidContractorIntegration(request.resource.data)
+                    && request.resource.data.codigoProtocolo == resource.data.codigoProtocolo
+                    && request.resource.data.solicitadoPorId == resource.data.solicitadoPorId
+                    && isValidIntegrationTransition(request.resource.data, false);
       allow delete: if false;
     }
 
     // Central de Integração de Terceiros — Itens Documentais Versionados
-    // Acesso direto pelo Client Web SDK BLOQUEADO (zero leitura pública / zero escrita direta / zero Base64 no Firestore).
-    // Toda leitura e escrita ocorre exclusivamente via backend autenticado (/api/integrations/*) com Firebase Admin SDK.
+    // Zero Base64 no Firestore (binários armazenados em storage privado e servidos via ticket assinado).
     match /contractorIntegrationItems/{itemId} {
-      allow read: if false;
-      allow create: if false && isValidId(itemId) && isValidContractorIntegrationItem(request.resource.data);
-      allow update: if false && isValidId(itemId) && isValidContractorIntegrationItem(request.resource.data);
+      allow read: if true;
+      allow create: if isValidId(itemId)
+                    && isValidContractorIntegrationItem(request.resource.data)
+                    && exists(/databases/$(database)/documents/contractorIntegrations/$(request.resource.data.integrationId))
+                    && isValidIntegrationItemReview(request.resource.data);
+      allow update: if isValidId(itemId)
+                    && isValidContractorIntegrationItem(request.resource.data)
+                    && request.resource.data.integrationId == resource.data.integrationId
+                    && isValidIntegrationItemReview(request.resource.data);
+      allow delete: if false;
+    }
+
+    // Central de Notificações Internas (ADM e Solicitante — Alertas, Eventos e Comunicados Direcionados)
+    function isValidNotification(data) {
+      return data.keys().hasAll([
+          'recipientRole',
+          'type',
+          'severity',
+          'title',
+          'message',
+          'read',
+          'idempotencyKey',
+          'createdAt'
+        ])
+        && data.recipientRole in ['admin', 'solicitante', 'all_solicitantes']
+        && data.type is string && data.type.size() >= 2 && data.type.size() <= 80
+        && data.severity in ['info', 'success', 'warning', 'critical']
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 200
+        && data.message is string && data.message.size() >= 2 && data.message.size() <= 1500
+        && data.read is bool
+        && data.idempotencyKey is string && data.idempotencyKey.size() >= 2 && data.idempotencyKey.size() <= 200
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && (!('recipientUserId' in data) || (data.recipientUserId is string && data.recipientUserId.size() <= 128))
+        && (!('empresaId' in data) || (data.empresaId is string && data.empresaId.size() <= 128))
+        && (!('empresaNome' in data) || (data.empresaNome is string && data.empresaNome.size() <= 200))
+        && (!('readByUserIds' in data) || isValidStringList(data.readByUserIds, 200))
+        && (!('isDemo' in data) || data.isDemo is bool)
+        && (data.type != 'COMUNICADO_ADM' || (('createdById' in data) && isAdminProfileId(data.createdById)));
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if true;
+      allow create: if isValidId(notificationId)
+                    && isValidNotification(request.resource.data);
+      allow update: if isValidId(notificationId)
+                    && isValidNotification(request.resource.data)
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt', 'readByUserIds']);
       allow delete: if false;
     }
   }

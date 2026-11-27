@@ -40,12 +40,24 @@ export function buildNotificationHtml(payload: EmailNotificationPayload): string
     milestoneTitle = 'Atenção Crítica: Vencimento em 15 Dias';
     milestoneDescription =
       'Restam apenas 15 dias para o vencimento deste documento. Risco iminente de não conformidade legal.';
+  } else if (milestone === '7_dias') {
+    milestoneBadgeColor = '#d97706'; // dark amber
+    milestoneBadgeBg = '#fef3c7';
+    milestoneTitle = 'Alerta Urgente: Vencimento em 7 Dias';
+    milestoneDescription =
+      'Restam apenas 7 dias para o vencimento deste documento. Providencie a renovação imediatamente.';
   } else if (milestone === 'hoje') {
     milestoneBadgeColor = '#dc2626'; // red
     milestoneBadgeBg = '#fee2e2';
     milestoneTitle = 'URGENTE: VENCIMENTO NA DATA DE HOJE';
     milestoneDescription =
       'Este documento atinge o vencimento hoje! Ação imediata é necessária para evitar paralisação ou penalidades.';
+  } else if (milestone === 'vencido') {
+    milestoneBadgeColor = '#991b1b'; // dark red
+    milestoneBadgeBg = '#fee2e2';
+    milestoneTitle = 'DOCUMENTO VENCIDO — AÇÃO IMEDIATA';
+    milestoneDescription =
+      'Este documento já está vencido. A regularização documental é obrigatória para continuidade das atividades.';
   }
 
   return `
@@ -223,7 +235,7 @@ export function buildNotificationHtml(payload: EmailNotificationPayload): string
         <tr>
           <td class="label-col">Prazo Restante:</td>
           <td class="value-col highlight-val">
-            ${daysRemaining === 0 ? 'Vence HOJE' : `${daysRemaining} dias restantes`}
+            ${daysRemaining < 0 ? `Vencido há ${Math.abs(daysRemaining)} dia(s)` : daysRemaining === 0 ? 'Vence HOJE' : `${daysRemaining} dias restantes`}
           </td>
         </tr>
         <tr>
@@ -233,6 +245,10 @@ export function buildNotificationHtml(payload: EmailNotificationPayload): string
               ? '30 dias antes'
               : milestone === '15_dias'
               ? '15 dias antes'
+              : milestone === '7_dias'
+              ? '7 dias antes'
+              : milestone === 'vencido'
+              ? 'Documento vencido'
               : 'Data exata do vencimento'
           }</td>
         </tr>

@@ -24,8 +24,10 @@ import { useAuth } from '../../context/AuthContext';
 import { useSST } from '../../context/SSTContext';
 import type {
   DocumentSST,
+  DocumentVersion,
   MirroredIntegrationDocumentItem,
   OccupationalExam,
+  PendingDocumentVersion,
   Training,
 } from '../../types/sst';
 import type { NavItemKey } from '../layout/Sidebar';
@@ -55,6 +57,11 @@ interface PreviewModalState {
   version?: number;
 }
 
+interface ReferencedIntegrationBadge {
+  integrationId: string;
+  codigoProtocolo: string;
+}
+
 type UnifiedAnalysisItem =
   | {
       source: 'integration';
@@ -80,6 +87,10 @@ type UnifiedAnalysisItem =
       arquivoNome?: string;
       hasFile: boolean;
       stdStatus: StandardizedDocStatus;
+      versaoAtual?: number;
+      versaoPendente?: PendingDocumentVersion | null;
+      historicoVersoes?: DocumentVersion[];
+      referencedIntegrations: ReferencedIntegrationBadge[];
       raw: MirroredIntegrationDocumentItem;
     }
   | {
@@ -106,6 +117,10 @@ type UnifiedAnalysisItem =
       arquivoUrl?: string;
       hasFile: boolean;
       stdStatus: StandardizedDocStatus;
+      versaoAtual?: number;
+      versaoPendente?: PendingDocumentVersion | null;
+      historicoVersoes?: DocumentVersion[];
+      referencedIntegrations: ReferencedIntegrationBadge[];
       raw: DocumentSST;
     }
   | {
@@ -132,6 +147,10 @@ type UnifiedAnalysisItem =
       arquivoUrl?: string;
       hasFile: boolean;
       stdStatus: StandardizedDocStatus;
+      versaoAtual?: number;
+      versaoPendente?: PendingDocumentVersion | null;
+      historicoVersoes?: DocumentVersion[];
+      referencedIntegrations: ReferencedIntegrationBadge[];
       raw: OccupationalExam;
     }
   | {
@@ -158,14 +177,20 @@ type UnifiedAnalysisItem =
       arquivoUrl?: string;
       hasFile: boolean;
       stdStatus: StandardizedDocStatus;
+      versaoAtual?: number;
+      versaoPendente?: PendingDocumentVersion | null;
+      historicoVersoes?: DocumentVersion[];
+      referencedIntegrations: ReferencedIntegrationBadge[];
       raw: Training;
     };
 
 function resolveDirectStandardizedStatus(
   situacao: string,
   dataValidade?: string,
-  semValidade?: boolean
+  semValidade?: boolean,
+  hasPendingVersion?: boolean
 ): StandardizedDocStatus {
+  if (hasPendingVersion) return 'AGUARDANDO_ANALISE';
   if (situacao === 'pendente') return 'AGUARDANDO_ANALISE';
   if (situacao === 'reprovado') return 'REPROVADO';
   const exp = getExpirationInfo(dataValidade, semValidade);
@@ -249,11 +274,56 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
     }
   };
 
-  // Unify Integration items + Direct Company/Employee Documents, Exams & Trainings
+  // Unify and DEDUPLICATE official documents + integration items so a reused document is reviewed ONCE
   const unifiedItems = useMemo<UnifiedAnalysisItem[]>(() => {
     const list: UnifiedAnalysisItem[] = [];
 
+    const officialDocIds = new Set(documents.map((d) => `documents:${d.id}`));
+    const officialExamIds = new Set(exams.map((e) => `exams:${e.id}`));
+    const officialTrainingIds = new Set(trainings.map((t) => `trainings:${t.id}`));
+
+    // Map each official record -> all integrations referencing it (avoid duplicate cards!)
+    const refsByOfficialKey = new Map<string, ReferencedIntegrationBadge[]>();
+    const pushRef = (key: string, badge: ReferencedIntegrationBadge) => {
+      const arr = refsByOfficialKey.get(key) || [];
+      if (!arr.some((b) => b.integrationId === badge.integrationId)) {
+        arr.push(badge);
+        refsByOfficialKey.set(key, arr);
+      }
+    };
+
     for (const item of contractorIntegrationItems) {
+      const col = item.officialCollection || item.documentoExistenteColecao;
+      const recId = item.officialRecordId || item.documentoExistenteId;
+      if (col && recId) {
+        pushRef(`${col}:${recId}`, {
+          integrationId: item.integrationId,
+          codigoProtocolo: item.codigoProtocolo,
+        });
+      }
+    }
+
+    const seenOfficialKeysInIntegration = new Set<string>();
+
+    for (const item of contractorIntegrationItems) {
+      const col = item.officialCollection || item.documentoExistenteColecao;
+      const recId = item.officialRecordId || item.documentoExistenteId;
+      const officialKey = col && recId ? `${col}:${recId}` : '';
+
+      // If this integration item already points to an official centralized record shown below, skip duplicating it!
+      if (
+        officialKey &&
+        (officialDocIds.has(officialKey) ||
+          officialExamIds.has(officialKey) ||
+          officialTrainingIds.has(officialKey))
+      ) {
+        continue;
+      }
+      if (officialKey) {
+        if (seenOfficialKeysInIntegration.has(officialKey)) continue;
+        seenOfficialKeysInIntegration.add(officialKey);
+      }
+
       list.push({
         source: 'integration',
         uid: `int-${item.id}`,
@@ -278,21 +348,26 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
         arquivoNome: item.arquivoNome,
         hasFile: Boolean(item.hasStoredFile),
         stdStatus: resolveIntegrationItemStandardizedStatus(item, item.protocoloStatus),
+        versaoAtual: item.versaoAtual || 0,
+        referencedIntegrations: officialKey
+          ? refsByOfficialKey.get(officialKey) || [
+              { integrationId: item.integrationId, codigoProtocolo: item.codigoProtocolo },
+            ]
+          : [{ integrationId: item.integrationId, codigoProtocolo: item.codigoProtocolo }],
         raw: item,
       });
     }
 
     for (const doc of documents) {
       const isEmployee = Boolean(doc.colaboradorId);
+      const refs = refsByOfficialKey.get(`documents:${doc.id}`) || [];
       list.push({
         source: 'direct_doc',
         uid: `doc-${doc.id}`,
-        groupKey: isEmployee
-          ? `COL::${doc.colaboradorId}`
-          : `EMP::${doc.empresaId}`,
+        groupKey: isEmployee ? `COL::${doc.colaboradorId}` : `EMP::${doc.empresaId}`,
         groupLabel: isEmployee
-          ? `Solicitação Individual — ${doc.colaboradorNome || 'Colaborador'}`
-          : `Documentação Empresarial — ${doc.empresaNome}`,
+          ? `Base Individual — ${doc.colaboradorNome || 'Colaborador'}`
+          : `Base Empresarial — ${doc.empresaNome}`,
         groupBadge: isEmployee ? 'Colaborador' : 'Empresa',
         groupType: isEmployee ? 'colaborador' : 'empresa',
         empresaId: doc.empresaId,
@@ -300,9 +375,9 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
         colaboradorId: doc.colaboradorId,
         colaboradorNome: doc.colaboradorNome,
         title: doc.nomeDocumento,
-        code: doc.solicitacaoCodigo || doc.numeroDocumento || 'DOC',
+        code: doc.tipoDocumentoCanonico || doc.solicitacaoCodigo || doc.numeroDocumento || 'DOC',
         category: doc.categoria || (isEmployee ? 'colaborador' : 'empresa'),
-        dataEnvio: doc.updatedAt || doc.createdAt || doc.dataEmissao,
+        dataEnvio: doc.versaoPendente?.dataEnvio || doc.updatedAt || doc.createdAt || doc.dataEmissao,
         dataValidade: doc.dataValidade,
         semValidade: doc.semValidade,
         analisadoPor: doc.analisadoPor,
@@ -311,17 +386,27 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
         arquivoNome: doc.arquivoNome,
         arquivoUrl: doc.arquivoUrl,
         hasFile: Boolean(doc.arquivoUrl),
-        stdStatus: resolveDirectStandardizedStatus(doc.situacao, doc.dataValidade, doc.semValidade),
+        stdStatus: resolveDirectStandardizedStatus(
+          doc.situacao,
+          doc.dataValidade,
+          doc.semValidade,
+          Boolean(doc.versaoPendente)
+        ),
+        versaoAtual: doc.versao || 1,
+        versaoPendente: doc.versaoPendente || null,
+        historicoVersoes: doc.historicoVersoes || [],
+        referencedIntegrations: refs,
         raw: doc,
       });
     }
 
     for (const ex of exams) {
+      const refs = refsByOfficialKey.get(`exams:${ex.id}`) || [];
       list.push({
         source: 'direct_exam',
         uid: `exam-${ex.id}`,
         groupKey: `COL::${ex.colaboradorId}`,
-        groupLabel: `Solicitação Individual — ${ex.colaboradorNome}`,
+        groupLabel: `Base Individual — ${ex.colaboradorNome}`,
         groupBadge: 'Colaborador',
         groupType: 'colaborador',
         empresaId: ex.empresaId,
@@ -329,9 +414,9 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
         colaboradorId: ex.colaboradorId,
         colaboradorNome: ex.colaboradorNome,
         title: `Exame / ASO: ${ex.tipoExame} (${ex.conclusao.toUpperCase()})`,
-        code: 'ASO',
+        code: ex.tipoDocumentoCanonico || 'ASO',
         category: 'exame',
-        dataEnvio: ex.updatedAt || ex.createdAt || ex.dataRealizacao,
+        dataEnvio: ex.versaoPendente?.dataEnvio || ex.updatedAt || ex.createdAt || ex.dataRealizacao,
         dataValidade: ex.dataValidade,
         semValidade: ex.semValidade,
         analisadoPor: ex.analisadoPor,
@@ -340,17 +425,27 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
         arquivoNome: ex.anexoNome,
         arquivoUrl: ex.anexoUrl,
         hasFile: Boolean(ex.anexoUrl),
-        stdStatus: resolveDirectStandardizedStatus(ex.situacao, ex.dataValidade, ex.semValidade),
+        stdStatus: resolveDirectStandardizedStatus(
+          ex.situacao,
+          ex.dataValidade,
+          ex.semValidade,
+          Boolean(ex.versaoPendente)
+        ),
+        versaoAtual: ex.versao || 1,
+        versaoPendente: ex.versaoPendente || null,
+        historicoVersoes: ex.historicoVersoes || [],
+        referencedIntegrations: refs,
         raw: ex,
       });
     }
 
     for (const tr of trainings) {
+      const refs = refsByOfficialKey.get(`trainings:${tr.id}`) || [];
       list.push({
         source: 'direct_training',
         uid: `train-${tr.id}`,
         groupKey: `COL::${tr.colaboradorId}`,
-        groupLabel: `Solicitação Individual — ${tr.colaboradorNome}`,
+        groupLabel: `Base Individual — ${tr.colaboradorNome}`,
         groupBadge: 'Colaborador',
         groupType: 'colaborador',
         empresaId: tr.empresaId,
@@ -358,9 +453,9 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
         colaboradorId: tr.colaboradorId,
         colaboradorNome: tr.colaboradorNome,
         title: `Treinamento: ${tr.nomeTreinamento}`,
-        code: 'TREINAMENTO',
+        code: tr.tipoDocumentoCanonico || 'TREINAMENTO',
         category: 'treinamento',
-        dataEnvio: tr.updatedAt || tr.createdAt || tr.dataRealizacao,
+        dataEnvio: tr.versaoPendente?.dataEnvio || tr.updatedAt || tr.createdAt || tr.dataRealizacao,
         dataValidade: tr.dataValidade,
         semValidade: tr.semValidade,
         analisadoPor: tr.analisadoPor,
@@ -369,7 +464,16 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
         arquivoNome: tr.certificadoNome,
         arquivoUrl: tr.certificadoUrl,
         hasFile: Boolean(tr.certificadoUrl),
-        stdStatus: resolveDirectStandardizedStatus(tr.situacao, tr.dataValidade, tr.semValidade),
+        stdStatus: resolveDirectStandardizedStatus(
+          tr.situacao,
+          tr.dataValidade,
+          tr.semValidade,
+          Boolean(tr.versaoPendente)
+        ),
+        versaoAtual: tr.versao || 1,
+        versaoPendente: tr.versaoPendente || null,
+        historicoVersoes: tr.historicoVersoes || [],
+        referencedIntegrations: refs,
         raw: tr,
       });
     }
@@ -1006,9 +1110,19 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
                                 <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] font-mono text-slate-300">
                                   {entry.code}
                                 </span>
-                                {isIntegration && (
-                                  <span className="text-[11px] text-slate-400">
-                                    v{entry.raw.versaoAtual || 0}
+                                <span className="text-[11px] font-mono text-slate-400">
+                                  v{entry.versaoAtual || 1}
+                                </span>
+                                {entry.referencedIntegrations.length > 0 && (
+                                  <span className="text-[11px] text-sky-300 font-medium">
+                                    · Vinculado a {entry.referencedIntegrations.length} integração(ões):{' '}
+                                    {entry.referencedIntegrations
+                                      .slice(0, 3)
+                                      .map((r) => r.codigoProtocolo)
+                                      .join(', ')}
+                                    {entry.referencedIntegrations.length > 3
+                                      ? ` +${entry.referencedIntegrations.length - 3}`
+                                      : ''}
                                   </span>
                                 )}
                               </div>
@@ -1053,6 +1167,33 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
                                   )}
                                 </div>
                               </div>
+
+                              {entry.versaoPendente && (
+                                <div className="mt-2 rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2">
+                                  <div>
+                                    <strong className="text-amber-300">
+                                      Nova versão v{entry.versaoPendente.versao} aguardando aprovação:
+                                    </strong>{' '}
+                                    {entry.versaoPendente.arquivoNome}
+                                    {entry.versaoPendente.dataValidade && !entry.versaoPendente.semValidade
+                                      ? ` · Validade proposta: ${formatIsoDatePt(entry.versaoPendente.dataValidade)}`
+                                      : ''}
+                                    <span className="text-amber-300/80 block text-[11px] mt-0.5">
+                                      A versão aprovada atual (v{entry.versaoAtual || 1}) permanece válida até que você aprove ou recuse esta atualização.
+                                    </span>
+                                  </div>
+                                  {entry.versaoPendente.arquivoUrl && (
+                                    <ProtectedDocumentButton
+                                      url={entry.versaoPendente.arquivoUrl}
+                                      fileName={entry.versaoPendente.arquivoNome}
+                                      title={`Visualizar nova versão v${entry.versaoPendente.versao}`}
+                                      label={`Ver v${entry.versaoPendente.versao}`}
+                                      icon={<Eye size={12} />}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-[11px] font-semibold text-amber-100"
+                                    />
+                                  )}
+                                </div>
+                              )}
 
                               {entry.motivoReprovacao && (
                                 <div className="mt-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-200">
@@ -1138,7 +1279,7 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
                                 </button>
                               )}
 
-                              {isIntegration && (
+                              {(isIntegration || (entry.historicoVersoes && entry.historicoVersoes.length > 0)) && (
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -1147,13 +1288,17 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
                                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-300"
                                 >
                                   <History size={13} />
-                                  v({entry.raw.versoes?.length || 0})
+                                  v(
+                                  {isIntegration
+                                    ? entry.raw.versoes?.length || 0
+                                    : entry.historicoVersoes?.length || 1}
+                                  )
                                 </button>
                               )}
                             </div>
                           </div>
 
-                          {isIntegration && isExpanded && (
+                          {isExpanded && isIntegration && (
                             <div className="mt-3 pt-3 border-t border-slate-800 space-y-1.5">
                               <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
                                 Histórico de Versões e Avaliações
@@ -1219,6 +1364,58 @@ export const DocumentAnalysisCenterView: React.FC<DocumentAnalysisCenterViewProp
                                     </div>
                                   ))
                               )}
+                            </div>
+                          )}
+
+                          {isExpanded && !isIntegration && entry.historicoVersoes && (
+                            <div className="mt-3 pt-3 border-t border-slate-800 space-y-1.5">
+                              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                                Histórico de Versões (Base Centralizada)
+                              </p>
+                              {[...entry.historicoVersoes]
+                                .sort((a, b) => b.versao - a.versao)
+                                .map((v) => (
+                                  <div
+                                    key={`${entry.uid}-v-${v.versao}`}
+                                    className="rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]"
+                                  >
+                                    <div>
+                                      <span className="font-mono font-bold text-blue-400 mr-2">
+                                        v{v.versao}
+                                      </span>
+                                      <span className="text-slate-200 font-semibold mr-2">
+                                        {v.arquivoNome}
+                                      </span>
+                                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-semibold uppercase">
+                                        {v.situacao}
+                                      </span>
+                                      <div className="text-slate-400 mt-0.5">
+                                        Enviado por {v.responsavelEnvio} em {formatDateTimePt(v.dataEnvio)}
+                                        {v.analisadoPor && (
+                                          <>
+                                            {' '}
+                                            · Avaliado por{' '}
+                                            <strong className="text-slate-200">{v.analisadoPor}</strong>
+                                            {v.dataAnalise ? ` em ${formatDateTimePt(v.dataAnalise)}` : ''}
+                                          </>
+                                        )}
+                                      </div>
+                                      {v.motivoReprovacao && (
+                                        <div className="text-rose-300">Motivo: {v.motivoReprovacao}</div>
+                                      )}
+                                    </div>
+                                    {v.arquivoUrl && (
+                                      <ProtectedDocumentButton
+                                        url={v.arquivoUrl}
+                                        fileName={v.arquivoNome}
+                                        title={`Visualizar ${entry.title} v${v.versao}`}
+                                        label={`Ver v${v.versao}`}
+                                        icon={<Eye size={12} />}
+                                        className="self-start sm:self-center inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200"
+                                      />
+                                    )}
+                                  </div>
+                                ))}
                             </div>
                           )}
                         </div>

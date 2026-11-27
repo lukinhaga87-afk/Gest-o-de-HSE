@@ -12,6 +12,10 @@ import {
   serverUpdateDoc,
 } from './firestoreServer';
 import {
+  CreateInAppNotificationInput,
+  InAppNotificationService,
+} from './inAppNotificationService';
+import {
   getGeminiIntegrationStatus,
   normalizeIsoDate,
   removeUndefinedDeep,
@@ -35,6 +39,12 @@ import {
   isEphemeralServerlessRuntime,
   validateBinaryMagicBytes,
 } from './integrationFileStorage';
+import {
+  MAX_UPLOAD_FILE_BYTES,
+  detectRealMimeFromBuffer,
+  normalizeDeclaredMime,
+} from './multipartUpload';
+import type { OfficialDocumentReviewedEvent } from './thirdPartyManagementService';
 import type {
   ActivityComplianceResult,
   ActivityDocumentRequirement,
@@ -45,12 +55,14 @@ import type {
   ContractorIntegration,
   ContractorIntegrationItem,
   ContractorIntegrationSummaryCounts,
+  DocumentReuseResolutionState,
   DocumentSST,
   DocumentVersion,
   Employee,
   EPIDelivery,
   IntegrationCompanyRequest,
   IntegrationDocumentGroupId,
+  IntegrationDocumentReuseSource,
   IntegrationDocumentVersion,
   IntegrationEmployeeCandidate,
   IntegrationItemCategory,
@@ -58,6 +70,8 @@ import type {
   IntegrationOfficialCollection,
   IntegrationPendingDocumentInfo,
   IntegrationCollaboratorReadiness,
+  IntegrationReusePreviewItem,
+  IntegrationReusePreviewResult,
   IntegrationSmartDocsSuggestion,
   IntegrationSubmissionReadiness,
   IntegrationType,
@@ -66,6 +80,10 @@ import type {
   MirroredIntegrationDocumentItem,
   OccupationalExam,
   SafetyPermit,
+  SimpleActivityDocumentInput,
+  SimpleActivityEntry,
+  SimpleActivityHistoryEntry,
+  SimpleActivityStatus,
   SmartDocRecord,
   Training,
   UserRole,
@@ -77,6 +95,7 @@ export interface IntegrationWorkflowActor {
   email: string;
   role: UserRole;
   empresaId?: string;
+  empresaIds?: string[];
 }
 
 export class IntegrationWorkflowError extends Error {
@@ -141,9 +160,11 @@ export interface IntegrationWorkflowRepository {
 
   listTrainings(): Promise<Training[]>;
   createTraining(data: Omit<Training, 'id'>): Promise<Training>;
+  updateTraining?(id: string, updates: Partial<Training>): Promise<Training>;
 
   listExams(): Promise<OccupationalExam[]>;
   createExam(data: Omit<OccupationalExam, 'id'>): Promise<OccupationalExam>;
+  updateExam?(id: string, updates: Partial<OccupationalExam>): Promise<OccupationalExam>;
 
   listEpiDeliveries(): Promise<EPIDelivery[]>;
   createEpiDelivery(data: Omit<EPIDelivery, 'id'>): Promise<EPIDelivery>;
@@ -180,15 +201,37 @@ export interface CreateIntegrationEmployeeInput {
   atividadesHabilitadasIds?: string[];
 }
 
+export interface CreateSimpleActivityInput {
+  nome: string;
+  descricaoServico: string;
+  observacoes?: string;
+  documentos?: SimpleActivityDocumentInput[];
+}
+
+export interface UpdateSimpleActivityInput {
+  nome?: string;
+  descricaoServico?: string;
+  observacoes?: string;
+  expectedVersion?: number;
+}
+
+export interface ReviewSimpleActivityInput {
+  decisao: 'APROVAR' | 'RECUSAR' | 'SOLICITAR_COMPLEMENTACAO';
+  justificativa?: string;
+  expectedVersion?: number;
+}
+
 export interface CreateIntegrationInput {
   tipo?: IntegrationType;
   empresaId?: string;
   solicitacaoNovaEmpresa?: Omit<IntegrationCompanyRequest, 'aprovadoCompanyId'>;
   atividadeIds?: string[];
+  atividadesSimples?: CreateSimpleActivityInput[];
   colaboradorIds?: string[];
   novosColaboradores?: CreateIntegrationEmployeeInput[];
   customItems?: CreateIntegrationCustomItemInput[];
   observacoes?: string;
+  isDemo?: boolean;
 }
 
 export interface UpdateIntegrationDraftInput {
@@ -210,7 +253,9 @@ export interface BatchDocumentFileInput {
   origemColecao?: IntegrationOfficialCollection;
   obrigatorio?: boolean;
   arquivoNome: string;
-  arquivoBase64: string;
+  arquivoBase64?: string;
+  arquivoBuffer?: Buffer;
+  arquivoMimeType?: string;
   dataEmissao?: string;
   dataValidade?: string;
   semValidade?: boolean;
@@ -272,6 +317,9 @@ export interface UpdateItemValidityInput {
 export interface IntegrationActionInput {
   justificativa?: string;
   expectedVersion?: number;
+  approveWholePackage?: boolean;
+  rejectedItemIds?: string[];
+  itemReasons?: Record<string, string>;
 }
 
 export interface DuplicateCheckInput {
@@ -319,6 +367,7 @@ const EDITABLE_UPLOAD_STATUSES: IntegrationWorkflowStatus[] = [
   'PENDENTE_DOCUMENTACAO',
   'EM_ENVIO',
   'PENDENTE_CORRECAO',
+  'REPROVADA',
 ];
 
 function digitsOnly(value?: string | null): string {
@@ -808,6 +857,12 @@ export function createFirestoreIntegrationRepository(
       const id = await serverAddDoc('trainings', clean, firestoreDb);
       return { id, ...(clean as Omit<Training, 'id'>) };
     },
+    async updateTraining(id, updates) {
+      const clean = removeUndefinedDeep(updates);
+      await serverSetDoc('trainings', id, clean, { merge: true }, firestoreDb);
+      const snap = await serverGetDoc<Omit<Training, 'id'>>('trainings', id, firestoreDb);
+      return { id: snap?.id || id, ...(snap?.data as Omit<Training, 'id'>) };
+    },
 
     async listExams() {
       const docs = await serverListCollection<Omit<OccupationalExam, 'id'>>('exams', firestoreDb);
@@ -817,6 +872,12 @@ export function createFirestoreIntegrationRepository(
       const clean = removeUndefinedDeep(data);
       const id = await serverAddDoc('exams', clean, firestoreDb);
       return { id, ...(clean as Omit<OccupationalExam, 'id'>) };
+    },
+    async updateExam(id, updates) {
+      const clean = removeUndefinedDeep(updates);
+      await serverSetDoc('exams', id, clean, { merge: true }, firestoreDb);
+      const snap = await serverGetDoc<Omit<OccupationalExam, 'id'>>('exams', id, firestoreDb);
+      return { id: snap?.id || id, ...(snap?.data as Omit<OccupationalExam, 'id'>) };
     },
 
     async listEpiDeliveries() {
@@ -1018,6 +1079,12 @@ export function createInMemoryIntegrationRepository(
       state.trainings.push(created);
       return structuredClone(created);
     },
+    async updateTraining(id, updates) {
+      const idx = state.trainings.findIndex((x) => x.id === id);
+      if (idx < 0) throw new IntegrationWorkflowError('Treinamento oficial não encontrado.', 404, 'TRAINING_NOT_FOUND');
+      state.trainings[idx] = structuredClone({ ...state.trainings[idx], ...updates });
+      return structuredClone(state.trainings[idx]);
+    },
 
     async listExams() {
       return state.exams.map((x) => structuredClone(x));
@@ -1026,6 +1093,12 @@ export function createInMemoryIntegrationRepository(
       const created: OccupationalExam = structuredClone({ id: nextId('exam'), ...data });
       state.exams.push(created);
       return structuredClone(created);
+    },
+    async updateExam(id, updates) {
+      const idx = state.exams.findIndex((x) => x.id === id);
+      if (idx < 0) throw new IntegrationWorkflowError('Exame oficial não encontrado.', 404, 'EXAM_NOT_FOUND');
+      state.exams[idx] = structuredClone({ ...state.exams[idx], ...updates });
+      return structuredClone(state.exams[idx]);
     },
 
     async listEpiDeliveries() {
@@ -1059,6 +1132,7 @@ export class IntegrationWorkflowService {
   private readonly fileStorage: IntegrationFileStorage;
   private readonly nowProvider: () => Date;
   private readonly smartDocsSuggestionRunner: SmartDocsSuggestionRunner;
+  private readonly notificationService?: InAppNotificationService;
   private readonly integrationLocks = new Map<string, Promise<void>>();
 
   constructor(options?: {
@@ -1066,6 +1140,7 @@ export class IntegrationWorkflowService {
     fileStorage?: IntegrationFileStorage;
     nowProvider?: () => Date;
     smartDocsSuggestionRunner?: SmartDocsSuggestionRunner;
+    notificationService?: InAppNotificationService;
   }) {
     this.repo = options?.repo ?? createFirestoreIntegrationRepository();
     this.fileStorage =
@@ -1076,6 +1151,17 @@ export class IntegrationWorkflowService {
     this.nowProvider = options?.nowProvider ?? (() => new Date());
     this.smartDocsSuggestionRunner =
       options?.smartDocsSuggestionRunner ?? defaultSmartDocsSuggestionRunner();
+    this.notificationService =
+      options?.notificationService ?? (options?.repo ? undefined : new InAppNotificationService());
+  }
+
+  private async emitNotification(input: CreateInAppNotificationInput): Promise<void> {
+    if (!this.notificationService) return;
+    try {
+      await this.notificationService.createIdempotentNotification(input);
+    } catch (err) {
+      console.warn('[IntegrationWorkflow] Aviso ao gravar notificação interna:', err);
+    }
   }
 
   private async withIntegrationLock<T>(integrationId: string, fn: () => Promise<T>): Promise<T> {
@@ -1122,15 +1208,29 @@ export class IntegrationWorkflowService {
     }
   }
 
+  private getActorAuthorizedCompanyIds(actor: IntegrationWorkflowActor): string[] {
+    return Array.from(
+      new Set(
+        [
+          ...(Array.isArray(actor.empresaIds) ? actor.empresaIds : []),
+          ...(actor.empresaId ? [actor.empresaId] : []),
+        ]
+          .map((v) => String(v || '').trim())
+          .filter(Boolean)
+      )
+    );
+  }
+
   private assertCompanyScopeAccess(
     actor: IntegrationWorkflowActor,
     integration: ContractorIntegration
   ): void {
     if (actor.role !== 'solicitante') return;
-    if (actor.empresaId) {
-      if (integration.empresaId && integration.empresaId !== actor.empresaId) {
+    const allowedCompanyIds = this.getActorAuthorizedCompanyIds(actor);
+    if (allowedCompanyIds.length > 0) {
+      if (integration.empresaId && !allowedCompanyIds.includes(integration.empresaId)) {
         throw new IntegrationWorkflowError(
-          'Acesso negado: Solicitante só pode visualizar ou operar integrações da própria empresa contratada.',
+          'Acesso negado: Solicitante só pode visualizar ou operar integrações das empresas contratadas às quais possui autorização.',
           403,
           'COMPANY_SCOPE_VIOLATION'
         );
@@ -1515,6 +1615,18 @@ export class IntegrationWorkflowService {
         continue;
       }
 
+      if (
+        item.reaproveitado &&
+        !item.semValidade &&
+        item.dataValidade &&
+        isIsoDateExpired(item.dataValidade, this.nowIso())
+      ) {
+        pushPending(
+          `Documento reaproveitado venceu em ${item.dataValidade} — anexe uma versão atualizada dentro da validade.`
+        );
+        continue;
+      }
+
       obrigatoriosConfirmados += 1;
       if (colabCtx) {
         colabCtx.entry.obrigatoriosConfirmados += 1;
@@ -1542,13 +1654,25 @@ export class IntegrationWorkflowService {
     const porColaborador = Array.from(collaboratorMap.values());
     const anyCollaboratorIncomplete = porColaborador.some((c) => !c.completo);
 
-    let podeSubmeter = pendenciasObrigatorias.length === 0 && !anyCollaboratorIncomplete;
+    const blockingSimpleActivities = (integration.atividadesSimples || []).filter(
+      (sa) => sa.status === 'RECUSADA' || sa.status === 'COMPLEMENTACAO_SOLICITADA'
+    );
+
+    let podeSubmeter =
+      pendenciasObrigatorias.length === 0 &&
+      !anyCollaboratorIncomplete &&
+      blockingSimpleActivities.length === 0;
     let resumoBloqueio: string | undefined;
 
-    if (rawItems.length === 0) {
+    if (blockingSimpleActivities.length > 0) {
+      podeSubmeter = false;
+      resumoBloqueio = `Submissão bloqueada: existem ${blockingSimpleActivities.length} Atividade(s) Simples aguardando ajuste ou complementação pelo Solicitante (${blockingSimpleActivities
+        .map((sa) => `${sa.nome} — ${sa.status === 'RECUSADA' ? 'Recusada' : 'Complementação solicitada'}`)
+        .join(', ')}). Atualize a atividade ou anexe a documentação complementar antes de reenviar.`;
+    } else if (rawItems.length === 0) {
       podeSubmeter = false;
       resumoBloqueio =
-        'Nenhum item documental encontrado no checklist. Gere o checklist completo antes de enviar.';
+        'Nenhum item documental encontrado no checklist. Anexe ao menos um documento da atividade antes de enviar para análise.';
     } else if (mandatoryItems.length === 0 && opcionaisEnviados === 0) {
       podeSubmeter = false;
       resumoBloqueio =
@@ -1566,6 +1690,41 @@ export class IntegrationWorkflowService {
       resumoBloqueio = `Submissão bloqueada: existem ${pendenciasObrigatorias.length} documento(s) obrigatório(s) pendente(s), reprovado(s) ou sem confirmação no armazenamento: ${previewNames}${extraCount}.`;
     }
 
+    // Etapa 4 consolidated summary counters
+    let reaproveitadosAprovados = 0;
+    let novosEnviados = 0;
+    let pendentesAprovacaoExistentes = 0;
+    let recusados = 0;
+    let atualizacaoNecessaria = 0;
+    const nowRef = this.nowIso();
+
+    for (const item of rawItems) {
+      const expiredReused =
+        Boolean(item.reaproveitado) &&
+        !item.semValidade &&
+        Boolean(item.dataValidade) &&
+        isIsoDateExpired(item.dataValidade, nowRef);
+
+      if (item.status === 'APROVADO' && item.reaproveitado && !expiredReused) {
+        reaproveitadosAprovados += 1;
+      } else if (
+        item.situacaoDocumentoExistente === 'PENDENTE_APROVACAO' &&
+        (item.status === 'ENVIADO' || item.status === 'EM_ANALISE')
+      ) {
+        pendentesAprovacaoExistentes += 1;
+      } else if (item.status === 'REPROVADO') {
+        recusados += 1;
+        atualizacaoNecessaria += 1;
+      } else if (item.status === 'PENDENTE_ENVIO' || item.status === 'SUBSTITUIDO' || expiredReused) {
+        if (item.situacaoDocumentoExistente === 'RECUSADO') {
+          recusados += 1;
+        }
+        atualizacaoNecessaria += 1;
+      } else if (item.versaoAtual >= 1 && item.arquivoNome) {
+        novosEnviados += 1;
+      }
+    }
+
     return {
       podeSubmeter,
       totalItens: rawItems.length,
@@ -1577,6 +1736,11 @@ export class IntegrationWorkflowService {
       pendenciasObrigatorias,
       porColaborador,
       resumoBloqueio,
+      reaproveitadosAprovados,
+      novosEnviados,
+      pendentesAprovacaoExistentes,
+      recusados,
+      atualizacaoNecessaria,
     };
   }
 
@@ -1613,9 +1777,13 @@ export class IntegrationWorkflowService {
   async listIntegrations(actor: IntegrationWorkflowActor): Promise<ContractorIntegration[]> {
     const all = await this.repo.listIntegrations();
     if (actor.role === 'solicitante') {
+      const allowedCompanyIds = this.getActorAuthorizedCompanyIds(actor);
       return all.filter((item) => {
-        if (actor.empresaId) {
-          return item.empresaId === actor.empresaId || (!item.empresaId && item.solicitadoPorId === actor.id);
+        if (allowedCompanyIds.length > 0) {
+          return (
+            (Boolean(item.empresaId) && allowedCompanyIds.includes(item.empresaId!)) ||
+            (!item.empresaId && item.solicitadoPorId === actor.id)
+          );
         }
         return item.solicitadoPorId === actor.id;
       });
@@ -1646,12 +1814,18 @@ export class IntegrationWorkflowService {
 
     const allItems = await this.repo.listAllItems();
     const mirrored: MirroredIntegrationDocumentItem[] = [];
+    const allowedCompanyIds = this.getActorAuthorizedCompanyIds(actor);
 
     for (const rawItem of allItems) {
       const parent = integrationMap.get(rawItem.integrationId);
       if (!parent) continue;
       // Extra defense-in-depth company scope check for Solicitante
-      if (actor.role === 'solicitante' && actor.empresaId && parent.empresaId && parent.empresaId !== actor.empresaId) {
+      if (
+        actor.role === 'solicitante' &&
+        allowedCompanyIds.length > 0 &&
+        parent.empresaId &&
+        !allowedCompanyIds.includes(parent.empresaId)
+      ) {
         continue;
       }
       const sanitized = stripLargeFileUrlFromItem(rawItem);
@@ -1748,21 +1922,798 @@ export class IntegrationWorkflowService {
   }
 
   // --------------------------------------------------------------------------
+  // CENTRALIZED DOCUMENT REUSE ENGINE (5-GATE VALIDATION, ZERO RE-UPLOAD)
+  // --------------------------------------------------------------------------
+
+  private resolveStorageKeyFromOfficialUrl(
+    url: string | undefined,
+    allIntegrationItems: ContractorIntegrationItem[]
+  ): { storageKey?: string; reuseOrigin?: 'BASE_OFICIAL' | 'INTEGRACAO_ANTERIOR' } {
+    if (!url || typeof url !== 'string') return {};
+    const trimmed = url.trim();
+    if (trimmed.startsWith('ehs-direct://')) {
+      const key = trimmed.slice('ehs-direct://'.length).trim();
+      return key ? { storageKey: key, reuseOrigin: 'BASE_OFICIAL' } : {};
+    }
+    const match = trimmed.match(/\/api\/integrations\/([^/]+)\/items\/([^/?#]+)\/file(?:\?[^#]*version=(\d+))?/i);
+    if (match) {
+      const sourceItemId = decodeURIComponent(match[2]);
+      const requestedVersion = match[3] ? Number(match[3]) : undefined;
+      const sourceItem = allIntegrationItems.find((it) => it.id === sourceItemId);
+      if (sourceItem) {
+        const matchedVersion =
+          requestedVersion && Array.isArray(sourceItem.versoes)
+            ? sourceItem.versoes.find((v) => v.versao === requestedVersion)
+            : (sourceItem.versoes || []).find((v) => v.versao === sourceItem.versaoAtual);
+        const key = matchedVersion?.storageKey || sourceItem.storageKey;
+        if (key) {
+          return { storageKey: key, reuseOrigin: 'INTEGRACAO_ANTERIOR' };
+        }
+      }
+    }
+    return {};
+  }
+
+  private doesCanonicalOrTitleMatchRequirement(params: {
+    recordCanonical?: string;
+    recordTitle?: string;
+    reqCanonical: string;
+    reqKeywords?: string[];
+  }): boolean {
+    const recCanon = normalizeCanonicalCode(params.recordCanonical);
+    const reqCanon = normalizeCanonicalCode(params.reqCanonical);
+
+    if (recCanon && reqCanon) {
+      if (recCanon === reqCanon) return true;
+      if (reqCanon === 'ASO' && recCanon.includes('ASO')) return true;
+      return false;
+    }
+
+    const titleNorm = normalizeMatchText(params.recordTitle || '');
+    if (!titleNorm) return false;
+    if (reqCanon && titleNorm.includes(normalizeMatchText(reqCanon))) return true;
+    for (const kw of params.reqKeywords || []) {
+      const kwNorm = normalizeMatchText(kw);
+      if (kwNorm && titleNorm.includes(kwNorm)) return true;
+    }
+    return false;
+  }
+
+  private async resolveReusableDocumentForRequirement(params: {
+    empresaId?: string;
+    categoria: IntegrationItemCategory;
+    origemColecao: IntegrationOfficialCollection;
+    documentoCodigoCanonico: string;
+    palavrasChaveMatch?: string[];
+    exigeAptoASO?: boolean;
+    colaboradorId?: string;
+    colaboradorCpf?: string;
+    allEmployees: Employee[];
+    allDocuments: DocumentSST[];
+    allExams: OccupationalExam[];
+    allTrainings: Training[];
+    allEpiDeliveries: EPIDelivery[];
+    allIntegrationItems: ContractorIntegrationItem[];
+    now: string;
+  }): Promise<{
+    resolution: DocumentReuseResolutionState;
+    aviso?: string;
+    officialCollection?: IntegrationOfficialCollection;
+    officialRecordId?: string;
+    reaproveitadoDe?: IntegrationDocumentReuseSource;
+    storageKey?: string;
+    arquivoNome?: string;
+    arquivoMimeType?: 'application/pdf' | 'image/jpeg' | 'image/png';
+    arquivoTamanhoBytes?: number;
+    arquivoHashSha256?: string;
+    dataEmissao?: string;
+    dataValidade?: string;
+    semValidade?: boolean;
+    numeroDocumento?: string;
+    conclusaoAso?: ConclusaoAptidao;
+    aptidoesEspecificas?: string[];
+    analisadoPorNome?: string;
+    dataAnalise?: string;
+    motivoReprovacao?: string;
+    versaoAtual?: number;
+  }> {
+    const { empresaId, categoria, origemColecao, now } = params;
+    if (!empresaId) {
+      return { resolution: 'AUSENTE' };
+    }
+
+    // Strict identity matching for collaborator documents: ONLY by exact employeeId or normalized 11-digit CPF within the exact company (NEVER by name similarity)
+    let matchedEmployeeId: string | undefined;
+    if (categoria === 'colaborador') {
+      if (params.colaboradorId) {
+        const emp = params.allEmployees.find(
+          (e) => e.id === params.colaboradorId && e.empresaId === empresaId
+        );
+        matchedEmployeeId = emp?.id || params.colaboradorId;
+      } else {
+        const cpfDigits = digitsOnly(params.colaboradorCpf);
+        if (cpfDigits.length === 11) {
+          const emp = params.allEmployees.find(
+            (e) => e.empresaId === empresaId && digitsOnly(e.cpf) === cpfDigits
+          );
+          matchedEmployeeId = emp?.id;
+        }
+      }
+      if (!matchedEmployeeId) {
+        return { resolution: 'AUSENTE' };
+      }
+    }
+
+    interface NormalizedOfficialCandidate {
+      id: string;
+      colecao: IntegrationOfficialCollection;
+      situacao: 'pendente' | 'aprovado' | 'reprovado' | 'vencido';
+      url: string;
+      arquivoNome: string;
+      dataEmissao?: string;
+      dataValidade?: string;
+      semValidade?: boolean;
+      numeroDocumento?: string;
+      conclusaoAso?: ConclusaoAptidao;
+      aptidoesEspecificas?: string[];
+      analisadoPor?: string;
+      dataAnalise?: string;
+      motivoReprovacao?: string;
+      versao?: number;
+      sortKey: string;
+    }
+
+    const candidates: NormalizedOfficialCandidate[] = [];
+
+    if (origemColecao === 'documents') {
+      for (const doc of params.allDocuments) {
+        if (doc.empresaId !== empresaId) continue;
+        const docColabId = (doc.colaboradorId || '').trim();
+        if (categoria === 'empresa' && docColabId !== '') continue;
+        if (categoria === 'colaborador' && docColabId !== matchedEmployeeId) continue;
+
+        if (
+          !this.doesCanonicalOrTitleMatchRequirement({
+            recordCanonical: doc.tipoDocumentoCanonico,
+            recordTitle: doc.nomeDocumento,
+            reqCanonical: params.documentoCodigoCanonico,
+            reqKeywords: params.palavrasChaveMatch,
+          })
+        ) {
+          continue;
+        }
+
+        candidates.push({
+          id: doc.id,
+          colecao: 'documents',
+          situacao: doc.situacao || 'pendente',
+          url: doc.arquivoUrl || '',
+          arquivoNome: doc.arquivoNome || `${doc.nomeDocumento}.pdf`,
+          dataEmissao: doc.dataEmissao,
+          dataValidade: doc.dataValidade,
+          semValidade: Boolean(doc.semValidade),
+          numeroDocumento: doc.numeroDocumento,
+          analisadoPor: doc.analisadoPor,
+          dataAnalise: doc.dataAnalise,
+          motivoReprovacao: doc.motivoReprovacao,
+          versao: doc.versao || 1,
+          sortKey: doc.updatedAt || doc.dataAnalise || doc.createdAt || '',
+        });
+      }
+    } else if (origemColecao === 'exams') {
+      if (categoria === 'colaborador') {
+        for (const exam of params.allExams) {
+          if (exam.empresaId !== empresaId) continue;
+          if ((exam.colaboradorId || '').trim() !== matchedEmployeeId) continue;
+          if (
+            !this.doesCanonicalOrTitleMatchRequirement({
+              recordCanonical: exam.tipoDocumentoCanonico || 'ASO',
+              recordTitle: exam.tipoExame,
+              reqCanonical: params.documentoCodigoCanonico,
+              reqKeywords: params.palavrasChaveMatch,
+            })
+          ) {
+            continue;
+          }
+          candidates.push({
+            id: exam.id,
+            colecao: 'exams',
+            situacao: exam.situacao || 'pendente',
+            url: exam.anexoUrl || '',
+            arquivoNome: exam.anexoNome || `${exam.tipoExame}.pdf`,
+            dataEmissao: exam.dataRealizacao,
+            dataValidade: exam.dataValidade,
+            semValidade: Boolean(exam.semValidade),
+            conclusaoAso: exam.conclusao,
+            aptidoesEspecificas: exam.aptidoesEspecificas,
+            analisadoPor: exam.analisadoPor,
+            dataAnalise: exam.dataAnalise,
+            motivoReprovacao: exam.motivoReprovacao,
+            versao: exam.versao || 1,
+            sortKey: exam.updatedAt || exam.dataAnalise || exam.createdAt || '',
+          });
+        }
+      }
+    } else if (origemColecao === 'trainings') {
+      if (categoria === 'colaborador') {
+        for (const trn of params.allTrainings) {
+          if (trn.empresaId !== empresaId) continue;
+          if ((trn.colaboradorId || '').trim() !== matchedEmployeeId) continue;
+          if (
+            !this.doesCanonicalOrTitleMatchRequirement({
+              recordCanonical: trn.tipoDocumentoCanonico,
+              recordTitle: trn.nomeTreinamento,
+              reqCanonical: params.documentoCodigoCanonico,
+              reqKeywords: params.palavrasChaveMatch,
+            })
+          ) {
+            continue;
+          }
+          candidates.push({
+            id: trn.id,
+            colecao: 'trainings',
+            situacao: trn.situacao || 'pendente',
+            url: trn.certificadoUrl || '',
+            arquivoNome: trn.certificadoNome || `${trn.nomeTreinamento}.pdf`,
+            dataEmissao: trn.dataRealizacao,
+            dataValidade: trn.dataValidade,
+            semValidade: Boolean(trn.semValidade),
+            analisadoPor: trn.analisadoPor,
+            dataAnalise: trn.dataAnalise,
+            motivoReprovacao: trn.motivoReprovacao,
+            versao: trn.versao || 1,
+            sortKey: trn.updatedAt || trn.dataAnalise || trn.createdAt || '',
+          });
+        }
+      }
+    } else if (origemColecao === 'epiDeliveries') {
+      if (categoria === 'colaborador') {
+        for (const epi of params.allEpiDeliveries) {
+          if (epi.empresaId !== empresaId) continue;
+          if ((epi.colaboradorId || '').trim() !== matchedEmployeeId) continue;
+          candidates.push({
+            id: epi.id,
+            colecao: 'epiDeliveries',
+            situacao: 'aprovado',
+            url: epi.assinaturaUrl || '',
+            arquivoNome: epi.comprovanteNome || `${epi.nomeEpi}.pdf`,
+            dataEmissao: epi.dataEntrega,
+            semValidade: true,
+            versao: 1,
+            sortKey: epi.createdAt || '',
+          });
+        }
+      }
+    }
+
+    if (candidates.length === 0) {
+      return { resolution: 'AUSENTE' };
+    }
+
+    // Sort newest first
+    candidates.sort((a, b) => b.sortKey.localeCompare(a.sortKey));
+
+    const verifyCandidateBinary = async (cand: NormalizedOfficialCandidate) => {
+      const resolved = this.resolveStorageKeyFromOfficialUrl(cand.url, params.allIntegrationItems);
+      if (!resolved.storageKey) return null;
+      try {
+        const stored = await this.fileStorage.getObject(resolved.storageKey);
+        if (!stored || !stored.buffer || stored.buffer.length <= 0) return null;
+        const detectedMime =
+          detectRealMimeFromBuffer(stored.buffer) || 'application/pdf';
+        const sha256 = computeBufferSha256(stored.buffer);
+        const reuseSource: IntegrationDocumentReuseSource = {
+          colecao: cand.colecao,
+          registroId: cand.id,
+          versao: cand.versao || 1,
+          aprovadoPor: cand.analisadoPor,
+          dataAprovacao: cand.dataAnalise,
+          dataValidade: cand.dataValidade,
+          semValidade: cand.semValidade,
+          storageKey: resolved.storageKey,
+          arquivoNome: cand.arquivoNome,
+        };
+        return {
+          storageKey: resolved.storageKey,
+          reuseSource,
+          arquivoMimeType: detectedMime,
+          arquivoTamanhoBytes: stored.buffer.length,
+          arquivoHashSha256: sha256,
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    // Pass 1: Approved + valid + readable in private storage -> REAPROVEITADO_VALIDO
+    let approvedButExpired: NormalizedOfficialCandidate | null = null;
+    let approvedButMissingFile: NormalizedOfficialCandidate | null = null;
+
+    for (const cand of candidates) {
+      if (cand.situacao !== 'aprovado') continue;
+      const expired = !cand.semValidade && Boolean(cand.dataValidade) && isIsoDateExpired(cand.dataValidade, now);
+      const asoNotApto =
+        cand.colecao === 'exams' &&
+        Boolean(params.exigeAptoASO) &&
+        cand.conclusaoAso &&
+        cand.conclusaoAso !== 'apto';
+
+      if (expired || asoNotApto) {
+        if (!approvedButExpired) approvedButExpired = cand;
+        continue;
+      }
+
+      const verified = await verifyCandidateBinary(cand);
+      if (!verified) {
+        if (!approvedButMissingFile) approvedButMissingFile = cand;
+        continue;
+      }
+
+      return {
+        resolution: 'REAPROVEITADO_VALIDO',
+        aviso: cand.semValidade
+          ? 'Documento aprovado e válido na base oficial — reaproveitado automaticamente.'
+          : cand.dataValidade
+          ? `Documento aprovado e válido até ${cand.dataValidade} — reaproveitado automaticamente.`
+          : 'Documento aprovado na base oficial — reaproveitado automaticamente.',
+        officialCollection: cand.colecao,
+        officialRecordId: cand.id,
+        reaproveitadoDe: verified.reuseSource,
+        storageKey: verified.storageKey,
+        arquivoNome: cand.arquivoNome,
+        arquivoMimeType: verified.arquivoMimeType,
+        arquivoTamanhoBytes: verified.arquivoTamanhoBytes,
+        arquivoHashSha256: verified.arquivoHashSha256,
+        dataEmissao: cand.dataEmissao,
+        dataValidade: cand.dataValidade,
+        semValidade: cand.semValidade,
+        numeroDocumento: cand.numeroDocumento,
+        conclusaoAso: cand.conclusaoAso,
+        aptidoesEspecificas: cand.aptidoesEspecificas,
+        analisadoPorNome: cand.analisadoPor,
+        dataAnalise: cand.dataAnalise,
+        versaoAtual: cand.versao || 1,
+      };
+    }
+
+    // Pass 2: Pending official document with verified binary -> link WITHOUT marking approved (prevents duplicate upload AND enforces Admin approval)
+    for (const cand of candidates) {
+      if (cand.situacao !== 'pendente') continue;
+      const verified = await verifyCandidateBinary(cand);
+      if (!verified) continue;
+      return {
+        resolution: 'PENDENTE_APROVACAO',
+        aviso:
+          'Documento já enviado na base e aguardando aprovação do Administrador EHS. Não é necessário reenviar; a aprovação atualizará esta integração automaticamente.',
+        officialCollection: cand.colecao,
+        officialRecordId: cand.id,
+        reaproveitadoDe: verified.reuseSource,
+        storageKey: verified.storageKey,
+        arquivoNome: cand.arquivoNome,
+        arquivoMimeType: verified.arquivoMimeType,
+        arquivoTamanhoBytes: verified.arquivoTamanhoBytes,
+        arquivoHashSha256: verified.arquivoHashSha256,
+        dataEmissao: cand.dataEmissao,
+        dataValidade: cand.dataValidade,
+        semValidade: cand.semValidade,
+        numeroDocumento: cand.numeroDocumento,
+        conclusaoAso: cand.conclusaoAso,
+        aptidoesEspecificas: cand.aptidoesEspecificas,
+        versaoAtual: cand.versao || 1,
+      };
+    }
+
+    // Pass 3: Rejected official document -> require corrected upload with clear reason
+    const rejected = candidates.find((c) => c.situacao === 'reprovado');
+    if (rejected) {
+      return {
+        resolution: 'RECUSADO',
+        aviso: rejected.motivoReprovacao
+          ? `Documento existente foi recusado pelo Admin EHS (${rejected.motivoReprovacao}). Anexe uma versão corrigida.`
+          : 'Documento existente foi recusado pelo Admin EHS. Anexe uma versão corrigida.',
+        officialCollection: rejected.colecao,
+        officialRecordId: rejected.id,
+        dataValidade: rejected.dataValidade,
+        motivoReprovacao: rejected.motivoReprovacao,
+      };
+    }
+
+    // Pass 4: Approved but expired (or ASO not apto) -> NEVER reuse, clearly ask for updated upload
+    if (approvedButExpired) {
+      const isAsoIssue =
+        approvedButExpired.colecao === 'exams' &&
+        Boolean(params.exigeAptoASO) &&
+        approvedButExpired.conclusaoAso &&
+        approvedButExpired.conclusaoAso !== 'apto';
+      return {
+        resolution: 'VENCIDO',
+        aviso: isAsoIssue
+          ? `ASO existente consta como "${approvedButExpired.conclusaoAso}" — anexe um ASO APTO dentro da validade.`
+          : `Documento existente venceu em ${approvedButExpired.dataValidade} e não pode ser reaproveitado. Anexe uma versão atualizada.`,
+        officialCollection: approvedButExpired.colecao,
+        officialRecordId: approvedButExpired.id,
+        dataValidade: approvedButExpired.dataValidade,
+      };
+    }
+
+    // Pass 5: Approved in metadata but binary missing from private storage -> request re-upload
+    if (approvedButMissingFile) {
+      return {
+        resolution: 'ARQUIVO_INDISPONIVEL',
+        aviso:
+          'Documento localizado no cadastro, porém o arquivo não está legível/disponível no armazenamento privado. Anexe novamente.',
+        officialCollection: approvedButMissingFile.colecao,
+        officialRecordId: approvedButMissingFile.id,
+      };
+    }
+
+    return { resolution: 'AUSENTE' };
+  }
+
+  private applyReuseResolutionToDraft(
+    baseDraft: Omit<ContractorIntegrationItem, 'id' | 'integrationId'>,
+    reuse: Awaited<ReturnType<IntegrationWorkflowService['resolveReusableDocumentForRequirement']>>,
+    now: string
+  ): Omit<ContractorIntegrationItem, 'id' | 'integrationId'> {
+    if (reuse.resolution === 'REAPROVEITADO_VALIDO' && reuse.storageKey && reuse.arquivoNome) {
+      const versionNum = Math.max(1, reuse.versaoAtual || 1);
+      const reuseSource: IntegrationDocumentReuseSource | undefined =
+        reuse.reaproveitadoDe ||
+        (reuse.officialCollection && reuse.officialRecordId
+          ? {
+              colecao: reuse.officialCollection,
+              registroId: reuse.officialRecordId,
+              versao: versionNum,
+              aprovadoPor: reuse.analisadoPorNome,
+              dataAprovacao: reuse.dataAnalise,
+              dataValidade: reuse.dataValidade,
+              semValidade: reuse.semValidade,
+              storageKey: reuse.storageKey,
+              arquivoNome: reuse.arquivoNome,
+            }
+          : undefined);
+      return {
+        ...baseDraft,
+        status: 'APROVADO',
+        reaproveitado: true,
+        reaproveitadoDe: reuseSource,
+        situacaoDocumentoExistente: 'REAPROVEITADO_VALIDO',
+        documentoExistenteAviso: reuse.aviso,
+        documentoExistenteId: reuse.officialRecordId,
+        documentoExistenteColecao: reuse.officialCollection,
+        officialCollection: reuse.officialCollection,
+        officialRecordId: reuse.officialRecordId,
+        storageKey: reuse.storageKey,
+        hasStoredFile: true,
+        arquivoNome: reuse.arquivoNome,
+        arquivoMimeType: reuse.arquivoMimeType,
+        arquivoTamanhoBytes: reuse.arquivoTamanhoBytes,
+        arquivoHashSha256: reuse.arquivoHashSha256,
+        dataEmissao: reuse.dataEmissao,
+        dataValidade: reuse.dataValidade,
+        semValidade: reuse.semValidade,
+        numeroDocumento: reuse.numeroDocumento,
+        conclusaoAso: reuse.conclusaoAso,
+        aptidoesEspecificas: reuse.aptidoesEspecificas,
+        analisadoPorNome: reuse.analisadoPorNome,
+        dataAnalise: reuse.dataAnalise || now,
+        versaoAtual: versionNum,
+        versoes: [
+          {
+            versao: versionNum,
+            arquivoNome: reuse.arquivoNome,
+            arquivoMimeType: reuse.arquivoMimeType || 'application/pdf',
+            arquivoTamanhoBytes: reuse.arquivoTamanhoBytes || 0,
+            arquivoHashSha256: reuse.arquivoHashSha256 || '',
+            storageKey: reuse.storageKey,
+            hasStoredFile: true,
+            enviadoPorId: 'system-reuse',
+            enviadoPorNome: 'Base Oficial EHS (Reaproveitado)',
+            enviadoEm: reuse.dataAnalise || now,
+            dataEmissao: reuse.dataEmissao,
+            dataValidade: reuse.dataValidade,
+            semValidade: reuse.semValidade,
+            numeroDocumento: reuse.numeroDocumento,
+            conclusaoAso: reuse.conclusaoAso,
+            aptidoesEspecificas: reuse.aptidoesEspecificas,
+            status: 'APROVADO',
+            analisadoPorNome: reuse.analisadoPorNome,
+            analisadoEm: reuse.dataAnalise || now,
+          },
+        ],
+      };
+    }
+
+    if (reuse.resolution === 'PENDENTE_APROVACAO' && reuse.storageKey && reuse.arquivoNome) {
+      const versionNum = Math.max(1, reuse.versaoAtual || 1);
+      const reuseSource: IntegrationDocumentReuseSource | undefined =
+        reuse.reaproveitadoDe ||
+        (reuse.officialCollection && reuse.officialRecordId
+          ? {
+              colecao: reuse.officialCollection,
+              registroId: reuse.officialRecordId,
+              versao: versionNum,
+              dataValidade: reuse.dataValidade,
+              semValidade: reuse.semValidade,
+              storageKey: reuse.storageKey,
+              arquivoNome: reuse.arquivoNome,
+            }
+          : undefined);
+      return {
+        ...baseDraft,
+        status: 'ENVIADO',
+        reaproveitado: false,
+        reaproveitadoDe: reuseSource,
+        situacaoDocumentoExistente: 'PENDENTE_APROVACAO',
+        documentoExistenteAviso: reuse.aviso,
+        documentoExistenteId: reuse.officialRecordId,
+        documentoExistenteColecao: reuse.officialCollection,
+        officialCollection: reuse.officialCollection,
+        officialRecordId: reuse.officialRecordId,
+        storageKey: reuse.storageKey,
+        hasStoredFile: true,
+        arquivoNome: reuse.arquivoNome,
+        arquivoMimeType: reuse.arquivoMimeType,
+        arquivoTamanhoBytes: reuse.arquivoTamanhoBytes,
+        arquivoHashSha256: reuse.arquivoHashSha256,
+        dataEmissao: reuse.dataEmissao,
+        dataValidade: reuse.dataValidade,
+        semValidade: reuse.semValidade,
+        numeroDocumento: reuse.numeroDocumento,
+        conclusaoAso: reuse.conclusaoAso,
+        aptidoesEspecificas: reuse.aptidoesEspecificas,
+        versaoAtual: versionNum,
+        versoes: [
+          {
+            versao: versionNum,
+            arquivoNome: reuse.arquivoNome,
+            arquivoMimeType: reuse.arquivoMimeType || 'application/pdf',
+            arquivoTamanhoBytes: reuse.arquivoTamanhoBytes || 0,
+            arquivoHashSha256: reuse.arquivoHashSha256 || '',
+            storageKey: reuse.storageKey,
+            hasStoredFile: true,
+            enviadoPorId: 'base-pendente',
+            enviadoPorNome: 'Enviado na Base (Aguardando EHS)',
+            enviadoEm: now,
+            dataEmissao: reuse.dataEmissao,
+            dataValidade: reuse.dataValidade,
+            semValidade: reuse.semValidade,
+            numeroDocumento: reuse.numeroDocumento,
+            conclusaoAso: reuse.conclusaoAso,
+            aptidoesEspecificas: reuse.aptidoesEspecificas,
+            status: 'ENVIADO',
+          },
+        ],
+      };
+    }
+
+    if (reuse.resolution !== 'AUSENTE') {
+      return {
+        ...baseDraft,
+        status: 'PENDENTE_ENVIO',
+        reaproveitado: false,
+        situacaoDocumentoExistente: reuse.resolution,
+        documentoExistenteAviso: reuse.aviso,
+        documentoExistenteId: reuse.officialRecordId,
+        documentoExistenteColecao: reuse.officialCollection,
+        motivoReprovacao: reuse.resolution === 'RECUSADO' ? reuse.motivoReprovacao : undefined,
+      };
+    }
+
+    return {
+      ...baseDraft,
+      situacaoDocumentoExistente: 'AUSENTE',
+    };
+  }
+
+  // --------------------------------------------------------------------------
   // DYNAMIC CHECKLIST GENERATION FROM EXISTING ACTIVITY MATRIX
   // --------------------------------------------------------------------------
+
+  private inferSimpleActivityDocumentMeta(doc: SimpleActivityDocumentInput): {
+    canonical: string;
+    origem: IntegrationOfficialCollection;
+    palavrasChave: string[];
+    exigeAptoASO: boolean;
+  } {
+    const rawName = String(doc.nomeDocumento || '').trim();
+    const explicit = String(doc.documentoCodigoCanonico || '').trim();
+    const normName = normalizeMatchText(rawName);
+    const slug = normName
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toUpperCase()
+      .slice(0, 48);
+
+    let canonical = explicit ? normalizeCanonicalCode(explicit) || explicit.toUpperCase() : '';
+    let origem: IntegrationOfficialCollection = 'documents';
+    let exigeAptoASO = false;
+    const palavrasChave: string[] = [rawName];
+
+    if (!canonical) {
+      if (/\bpgr\b|gerenciamento de riscos/.test(normName)) {
+        canonical = 'PGR';
+        origem = 'documents';
+        palavrasChave.push('PGR', 'Programa de Gerenciamento de Riscos');
+      } else if (/\bpcmso\b|controle medico/.test(normName)) {
+        canonical = 'PCMSO';
+        origem = 'documents';
+        palavrasChave.push('PCMSO', 'Controle Médico');
+      } else if (/\baso\b|atestado de saude/.test(normName)) {
+        canonical = 'ASO';
+        origem = 'exams';
+        exigeAptoASO = true;
+        palavrasChave.push('ASO', 'Atestado de Saúde Ocupacional');
+      } else if (/\bepi\b|ficha de epi/.test(normName)) {
+        canonical = 'FICHA_EPI';
+        origem = 'epiDeliveries';
+        palavrasChave.push('EPI', 'Ficha de EPI');
+      } else if (/ordem de servico|\bos\b/.test(normName)) {
+        canonical = 'ORDEM_SERVICO';
+        origem = 'documents';
+        palavrasChave.push('Ordem de Serviço', 'OS');
+      } else if (/contrato social/.test(normName)) {
+        canonical = 'CONTRATO_SOCIAL';
+        origem = 'documents';
+        palavrasChave.push('Contrato Social');
+      } else if (/cartao cnpj|\bcnpj\b/.test(normName)) {
+        canonical = 'CNPJ';
+        origem = 'documents';
+        palavrasChave.push('CNPJ', 'Cartão CNPJ');
+      } else if (/\bart\b|anotacao de responsabilidade/.test(normName)) {
+        canonical = 'ART';
+        origem = 'documents';
+        palavrasChave.push('ART', 'Anotação de Responsabilidade Técnica');
+      } else if (/\bpgrs\b/.test(normName)) {
+        canonical = 'PGRS';
+        origem = 'documents';
+        palavrasChave.push('PGRS');
+      } else {
+        const nrMatch = normName.match(/\bnr[\s-]*(\d{1,2})\b/);
+        if (nrMatch) {
+          canonical = `NR-${nrMatch[1]}`;
+          origem = 'trainings';
+          palavrasChave.push(`NR-${nrMatch[1]}`, `NR ${nrMatch[1]}`);
+        } else if (/treinamento|certificado|capacitacao/.test(normName)) {
+          canonical = `SIMPLES_${slug || 'DOC'}`;
+          origem = 'trainings';
+        } else {
+          canonical = `SIMPLES_${slug || 'DOC'}`;
+          origem = 'documents';
+        }
+      }
+    } else {
+      const upper = canonical.toUpperCase();
+      if (upper.includes('ASO')) {
+        origem = 'exams';
+        exigeAptoASO = true;
+      } else if (/^NR[-_]?\d+/.test(upper)) {
+        origem = 'trainings';
+      } else if (upper.includes('EPI')) {
+        origem = 'epiDeliveries';
+      }
+      palavrasChave.push(canonical);
+    }
+
+    return {
+      canonical,
+      origem,
+      palavrasChave: Array.from(new Set(palavrasChave.filter(Boolean))),
+      exigeAptoASO,
+    };
+  }
+
+  private sanitizeSimpleActivitiesInput(
+    actor: IntegrationWorkflowActor,
+    rawList: CreateSimpleActivityInput[] | undefined,
+    empresaId: string | undefined,
+    now: string
+  ): Array<{ entry: SimpleActivityEntry; documentos: SimpleActivityDocumentInput[] }> {
+    if (!Array.isArray(rawList) || rawList.length === 0) return [];
+    const result: Array<{ entry: SimpleActivityEntry; documentos: SimpleActivityDocumentInput[] }> = [];
+
+    for (let idx = 0; idx < rawList.length; idx += 1) {
+      const raw = rawList[idx];
+      const nome = String(raw?.nome || '').trim();
+      const descricaoServico = String(raw?.descricaoServico || '').trim();
+      const observacoes = String(raw?.observacoes || '').trim();
+
+      if (nome.length < 2 || nome.length > 160) {
+        throw new IntegrationWorkflowError(
+          `Atividade Simples #${idx + 1}: informe um nome válido para a atividade (entre 2 e 160 caracteres).`,
+          400,
+          'INVALID_SIMPLE_ACTIVITY'
+        );
+      }
+      if (descricaoServico.length < 5 || descricaoServico.length > 2000) {
+        throw new IntegrationWorkflowError(
+          `Atividade Simples "${nome}": descreva o serviço que será executado (mínimo de 5 caracteres).`,
+          400,
+          'INVALID_SIMPLE_ACTIVITY'
+        );
+      }
+
+      const sanitizedDocs: SimpleActivityDocumentInput[] = [];
+      for (const rawDoc of Array.isArray(raw?.documentos) ? raw.documentos : []) {
+        const docName = String(rawDoc?.nomeDocumento || '').trim();
+        if (!docName) continue;
+        sanitizedDocs.push({
+          nomeDocumento: docName.slice(0, 180),
+          documentoCodigoCanonico: rawDoc?.documentoCodigoCanonico
+            ? String(rawDoc.documentoCodigoCanonico).trim().slice(0, 80)
+            : undefined,
+          escopo: rawDoc?.escopo === 'colaborador' ? 'colaborador' : 'empresa',
+          colaboradorId: rawDoc?.colaboradorId ? String(rawDoc.colaboradorId).trim() : undefined,
+          colaboradorCandidateId: rawDoc?.colaboradorCandidateId
+            ? String(rawDoc.colaboradorCandidateId).trim()
+            : undefined,
+          obrigatorio: rawDoc?.obrigatorio !== undefined ? Boolean(rawDoc.obrigatorio) : true,
+          observacoes: rawDoc?.observacoes ? String(rawDoc.observacoes).trim().slice(0, 500) : undefined,
+        });
+      }
+
+      const id = `sa-${Date.now()}-${idx + 1}-${crypto.randomBytes(3).toString('hex')}`;
+      // Anti-tampering: status is ALWAYS forced to PENDENTE_ANALISE on creation
+      const entry: SimpleActivityEntry = {
+        id,
+        empresaId,
+        nome,
+        descricaoServico,
+        observacoes: observacoes || undefined,
+        status: 'PENDENTE_ANALISE',
+        criadoPorId: actor.id,
+        criadoPorNome: actor.nome,
+        criadoPorRole: actor.role,
+        criadoEm: now,
+        atualizadoEm: now,
+        historico: [
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: 'CRIACAO_ATIVIDADE_SIMPLES',
+            statusAnterior: null,
+            statusNovo: 'PENDENTE_ANALISE',
+            detalhes: `Atividade Simples "${nome}" cadastrada por ${actor.nome} (${sanitizedDocs.length} documento(s) vinculado(s)). Aguardando análise do Administrador EHS.`,
+          },
+        ],
+      };
+
+      result.push({ entry, documentos: sanitizedDocs });
+    }
+
+    return result;
+  }
 
   private async buildDynamicChecklistDrafts(params: {
     tipo: IntegrationType;
     empresaId?: string;
     empresaNome: string;
     atividadeIds: string[];
+    atividadesSimples?: Array<{ entry: SimpleActivityEntry; documentos: SimpleActivityDocumentInput[] }>;
     colaboradoresCandidatos: IntegrationEmployeeCandidate[];
     customItems?: CreateIntegrationCustomItemInput[];
   }): Promise<Omit<ContractorIntegrationItem, 'id' | 'integrationId'>[]> {
     const now = this.nowIso();
-    const [profiles, allRequirements] = await Promise.all([
+    const [
+      profiles,
+      allRequirements,
+      allEmployees,
+      allDocuments,
+      allExams,
+      allTrainings,
+      allEpiDeliveries,
+      allIntegrationItems,
+    ] = await Promise.all([
       this.repo.listActivityProfiles(),
       this.repo.listActivityDocumentRequirements(),
+      params.empresaId ? this.repo.listEmployees() : Promise.resolve([] as Employee[]),
+      params.empresaId ? this.repo.listDocuments() : Promise.resolve([] as DocumentSST[]),
+      params.empresaId ? this.repo.listExams() : Promise.resolve([] as OccupationalExam[]),
+      params.empresaId ? this.repo.listTrainings() : Promise.resolve([] as Training[]),
+      params.empresaId ? this.repo.listEpiDeliveries() : Promise.resolve([] as EPIDelivery[]),
+      params.empresaId ? this.repo.listAllItems() : Promise.resolve([] as ContractorIntegrationItem[]),
     ]);
 
     const activeProfileMap = new Map<string, ActivityProfile>();
@@ -1813,24 +2764,68 @@ export class IntegrationWorkflowService {
 
         if (req.escopo === 'empresa') {
           const dedupKey = `empresa|${canonical}|${origem}`;
-          pushOrMergeItem(dedupKey, {
+          if (dedupMap.has(dedupKey)) {
+            pushOrMergeItem(dedupKey, {
+              empresaId: params.empresaId,
+              empresaNome: params.empresaNome,
+              categoria: 'empresa',
+              requirementId: req.id,
+              activityId: req.activityId,
+              activityNome: actProfile?.nome,
+              documentoCodigoCanonico: req.documentoCodigoCanonico,
+              nomeExibicao: req.nomeExibicao,
+              origemColecao: origem,
+              obrigatorio: Boolean(req.obrigatorioParaLiberacao),
+              baseLegal: req.baseLegal,
+              status: 'PENDENTE_ENVIO',
+              versaoAtual: 0,
+              versoes: [],
+              createdAt: now,
+              updatedAt: now,
+            });
+            continue;
+          }
+
+          const reuse = await this.resolveReusableDocumentForRequirement({
             empresaId: params.empresaId,
-            empresaNome: params.empresaNome,
             categoria: 'empresa',
-            requirementId: req.id,
-            activityId: req.activityId,
-            activityNome: actProfile?.nome,
-            documentoCodigoCanonico: req.documentoCodigoCanonico,
-            nomeExibicao: req.nomeExibicao,
             origemColecao: origem,
-            obrigatorio: Boolean(req.obrigatorioParaLiberacao),
-            baseLegal: req.baseLegal,
-            status: 'PENDENTE_ENVIO',
-            versaoAtual: 0,
-            versoes: [],
-            createdAt: now,
-            updatedAt: now,
+            documentoCodigoCanonico: req.documentoCodigoCanonico,
+            palavrasChaveMatch: req.palavrasChaveMatch,
+            allEmployees,
+            allDocuments,
+            allExams,
+            allTrainings,
+            allEpiDeliveries,
+            allIntegrationItems,
+            now,
           });
+
+          pushOrMergeItem(
+            dedupKey,
+            this.applyReuseResolutionToDraft(
+              {
+                empresaId: params.empresaId,
+                empresaNome: params.empresaNome,
+                categoria: 'empresa',
+                requirementId: req.id,
+                activityId: req.activityId,
+                activityNome: actProfile?.nome,
+                documentoCodigoCanonico: req.documentoCodigoCanonico,
+                nomeExibicao: req.nomeExibicao,
+                origemColecao: origem,
+                obrigatorio: Boolean(req.obrigatorioParaLiberacao),
+                baseLegal: req.baseLegal,
+                status: 'PENDENTE_ENVIO',
+                versaoAtual: 0,
+                versoes: [],
+                createdAt: now,
+                updatedAt: now,
+              },
+              reuse,
+              now
+            )
+          );
         } else if (req.escopo === 'colaborador') {
           for (const cand of params.colaboradoresCandidatos) {
             const empActivities =
@@ -1841,7 +2836,7 @@ export class IntegrationWorkflowService {
             if (!matchesEmployeeRole(cand.cargo, req.funcoesAplicaveis)) continue;
 
             const dedupKey = `colaborador|${cand.candidateId}|${canonical}|${origem}|${req.aptidaoEspecifica || ''}`;
-            pushOrMergeItem(dedupKey, {
+            const baseDraft: Omit<ContractorIntegrationItem, 'id' | 'integrationId'> = {
               empresaId: params.empresaId,
               empresaNome: params.empresaNome,
               colaboradorId: cand.colaboradorId,
@@ -1870,7 +2865,32 @@ export class IntegrationWorkflowService {
               versoes: [],
               createdAt: now,
               updatedAt: now,
+            };
+
+            if (dedupMap.has(dedupKey)) {
+              pushOrMergeItem(dedupKey, baseDraft);
+              continue;
+            }
+
+            const reuse = await this.resolveReusableDocumentForRequirement({
+              empresaId: params.empresaId,
+              categoria: 'colaborador',
+              origemColecao: origem,
+              documentoCodigoCanonico: req.documentoCodigoCanonico,
+              palavrasChaveMatch: req.palavrasChaveMatch,
+              exigeAptoASO: Boolean(req.exigeAptoASO),
+              colaboradorId: cand.colaboradorId,
+              colaboradorCpf: cand.cpf,
+              allEmployees,
+              allDocuments,
+              allExams,
+              allTrainings,
+              allEpiDeliveries,
+              allIntegrationItems,
+              now,
             });
+
+            pushOrMergeItem(dedupKey, this.applyReuseResolutionToDraft(baseDraft, reuse, now));
           }
         }
       }
@@ -1921,7 +2941,281 @@ export class IntegrationWorkflowService {
       }
     }
 
+    // Add documents linked to ATIVIDADE SIMPLES (with full 5-gate automatic document reuse!)
+    if (params.atividadesSimples && params.atividadesSimples.length > 0) {
+      for (const { entry, documentos } of params.atividadesSimples) {
+        for (const doc of documentos) {
+          const meta = this.inferSimpleActivityDocumentMeta(doc);
+          const canonicalNorm = normalizeCanonicalCode(meta.canonical) || meta.canonical;
+          const isCollaboratorScope =
+            doc.escopo === 'colaborador' && params.colaboradoresCandidatos.length > 0;
+
+          if (!isCollaboratorScope) {
+            const dedupKey = `empresa|${canonicalNorm}|${meta.origem}`;
+            const baseDraft: Omit<ContractorIntegrationItem, 'id' | 'integrationId'> = {
+              empresaId: params.empresaId,
+              empresaNome: params.empresaNome,
+              categoria: 'empresa',
+              categoriaOrganizacional: 'atividade_simples',
+              simpleActivityId: entry.id,
+              simpleActivityNome: entry.nome,
+              activityNome: `Atividade Simples: ${entry.nome}`,
+              documentoCodigoCanonico: meta.canonical,
+              nomeExibicao: doc.nomeDocumento,
+              origemColecao: meta.origem,
+              obrigatorio: doc.obrigatorio !== undefined ? Boolean(doc.obrigatorio) : true,
+              exigeAptoASO: meta.exigeAptoASO || undefined,
+              observacoes: doc.observacoes,
+              status: 'PENDENTE_ENVIO',
+              versaoAtual: 0,
+              versoes: [],
+              createdAt: now,
+              updatedAt: now,
+            };
+
+            if (dedupMap.has(dedupKey)) {
+              const existingIdx = dedupMap.get(dedupKey)!;
+              if (!items[existingIdx].simpleActivityId) {
+                items[existingIdx].simpleActivityId = entry.id;
+                items[existingIdx].simpleActivityNome = entry.nome;
+              }
+              pushOrMergeItem(dedupKey, baseDraft);
+              continue;
+            }
+
+            const reuse = await this.resolveReusableDocumentForRequirement({
+              empresaId: params.empresaId,
+              categoria: 'empresa',
+              origemColecao: meta.origem,
+              documentoCodigoCanonico: meta.canonical,
+              palavrasChaveMatch: meta.palavrasChave,
+              allEmployees,
+              allDocuments,
+              allExams,
+              allTrainings,
+              allEpiDeliveries,
+              allIntegrationItems,
+              now,
+            });
+
+            pushOrMergeItem(dedupKey, this.applyReuseResolutionToDraft(baseDraft, reuse, now));
+          } else {
+            const targetCandidates =
+              doc.colaboradorId || doc.colaboradorCandidateId
+                ? params.colaboradoresCandidatos.filter(
+                    (c) =>
+                      (doc.colaboradorId && c.colaboradorId === doc.colaboradorId) ||
+                      (doc.colaboradorCandidateId && c.candidateId === doc.colaboradorCandidateId)
+                  )
+                : params.colaboradoresCandidatos;
+
+            for (const cand of targetCandidates) {
+              const dedupKey = `colaborador|${cand.candidateId}|${canonicalNorm}|${meta.origem}|`;
+              const baseDraft: Omit<ContractorIntegrationItem, 'id' | 'integrationId'> = {
+                empresaId: params.empresaId,
+                empresaNome: params.empresaNome,
+                colaboradorId: cand.colaboradorId,
+                colaboradorCandidateId: cand.candidateId,
+                colaboradorNome: cand.nomeCompleto,
+                colaboradorCpf: cand.cpf,
+                colaboradorCargo: cand.cargo,
+                categoria: 'colaborador',
+                categoriaOrganizacional: 'atividade_simples',
+                simpleActivityId: entry.id,
+                simpleActivityNome: entry.nome,
+                activityNome: `Atividade Simples: ${entry.nome}`,
+                documentoCodigoCanonico: meta.canonical,
+                nomeExibicao: doc.nomeDocumento,
+                origemColecao: meta.origem,
+                obrigatorio: doc.obrigatorio !== undefined ? Boolean(doc.obrigatorio) : true,
+                exigeAptoASO: meta.exigeAptoASO || undefined,
+                observacoes: doc.observacoes,
+                status: 'PENDENTE_ENVIO',
+                versaoAtual: 0,
+                versoes: [],
+                createdAt: now,
+                updatedAt: now,
+              };
+
+              if (dedupMap.has(dedupKey)) {
+                const existingIdx = dedupMap.get(dedupKey)!;
+                if (!items[existingIdx].simpleActivityId) {
+                  items[existingIdx].simpleActivityId = entry.id;
+                  items[existingIdx].simpleActivityNome = entry.nome;
+                }
+                pushOrMergeItem(dedupKey, baseDraft);
+                continue;
+              }
+
+              const reuse = await this.resolveReusableDocumentForRequirement({
+                empresaId: params.empresaId,
+                categoria: 'colaborador',
+                origemColecao: meta.origem,
+                documentoCodigoCanonico: meta.canonical,
+                palavrasChaveMatch: meta.palavrasChave,
+                exigeAptoASO: meta.exigeAptoASO,
+                colaboradorId: cand.colaboradorId,
+                colaboradorCpf: cand.cpf,
+                allEmployees,
+                allDocuments,
+                allExams,
+                allTrainings,
+                allEpiDeliveries,
+                allIntegrationItems,
+                now,
+              });
+
+              pushOrMergeItem(dedupKey, this.applyReuseResolutionToDraft(baseDraft, reuse, now));
+            }
+          }
+        }
+      }
+    }
+
     return items;
+  }
+
+  // --------------------------------------------------------------------------
+  // PREVIEW AUTOMATIC DOCUMENT REUSE BEFORE CREATING INTEGRATION
+  // --------------------------------------------------------------------------
+
+  async previewDocumentReuse(
+    actor: IntegrationWorkflowActor,
+    input: {
+      empresaId: string;
+      atividadeIds: string[];
+      atividadesSimples?: CreateSimpleActivityInput[];
+      colaboradorIds?: string[];
+    }
+  ): Promise<IntegrationReusePreviewResult> {
+    const empresaId = String(input.empresaId || '').trim();
+    if (!empresaId) {
+      throw new IntegrationWorkflowError('Selecione a empresa contratada para consultar reaproveitamento.', 400, 'COMPANY_REQUIRED');
+    }
+
+    const company = await this.repo.getCompanyById(empresaId);
+    if (!company) {
+      throw new IntegrationWorkflowError('Empresa contratada não encontrada.', 404, 'COMPANY_NOT_FOUND');
+    }
+
+    if (actor.role === 'solicitante') {
+      const allowedCompanyIds = this.getActorAuthorizedCompanyIds(actor);
+      const isAuthorized =
+        allowedCompanyIds.includes(empresaId) ||
+        (company.solicitantesAutorizadosIds || []).includes(actor.id) ||
+        company.criadoPorId === actor.id;
+      if (!isAuthorized) {
+        throw new IntegrationWorkflowError(
+          'Acesso negado: solicitante não possui autorização para consultar documentos desta empresa.',
+          403,
+          'COMPANY_SCOPE_VIOLATION'
+        );
+      }
+    }
+
+    const allEmployees = await this.repo.listEmployees();
+    const requestedIds = Array.from(new Set((input.colaboradorIds || []).filter(Boolean)));
+    const candidatos: IntegrationEmployeeCandidate[] = [];
+
+    for (const empId of requestedIds) {
+      const emp = allEmployees.find((e) => e.id === empId);
+      if (!emp) continue;
+      if (emp.empresaId !== empresaId) {
+        throw new IntegrationWorkflowError(
+          `Colaborador "${emp.nomeCompleto}" pertence a outra empresa contratada.`,
+          403,
+          'EMPLOYEE_COMPANY_MISMATCH'
+        );
+      }
+      candidatos.push({
+        candidateId: `emp-existing-${emp.id}`,
+        colaboradorId: emp.id,
+        nomeCompleto: emp.nomeCompleto,
+        cpf: emp.cpf,
+        cargo: emp.cargo,
+        setor: emp.setor || '',
+        atividadesHabilitadasIds: input.atividadeIds || [],
+        jaExistiaNaBase: true,
+        aprovadoEmployeeId: emp.id,
+      });
+    }
+
+    const now = this.nowIso();
+    const previewSimpleActivities: Array<{
+      entry: SimpleActivityEntry;
+      documentos: SimpleActivityDocumentInput[];
+    }> = [];
+    for (let idx = 0; idx < (input.atividadesSimples || []).length; idx += 1) {
+      const raw = input.atividadesSimples![idx];
+      const nome = String(raw?.nome || '').trim() || `Atividade Simples ${idx + 1}`;
+      const docs = (Array.isArray(raw?.documentos) ? raw.documentos : []).filter(
+        (d) => String(d?.nomeDocumento || '').trim().length > 0
+      );
+      if (docs.length === 0) continue;
+      previewSimpleActivities.push({
+        entry: {
+          id: `preview-sa-${idx + 1}`,
+          empresaId: company.id,
+          nome,
+          descricaoServico: String(raw?.descricaoServico || '').trim(),
+          observacoes: raw?.observacoes ? String(raw.observacoes).trim() : undefined,
+          status: 'PENDENTE_ANALISE',
+          criadoPorId: actor.id,
+          criadoPorNome: actor.nome,
+          criadoPorRole: actor.role,
+          criadoEm: now,
+          atualizadoEm: now,
+          historico: [],
+        },
+        documentos: docs,
+      });
+    }
+
+    const drafts = await this.buildDynamicChecklistDrafts({
+      tipo: 'INTEGRACAO_INICIAL',
+      empresaId: company.id,
+      empresaNome: company.razaoSocial,
+      atividadeIds: Array.from(new Set(input.atividadeIds || [])),
+      atividadesSimples: previewSimpleActivities,
+      colaboradoresCandidatos: candidatos,
+    });
+
+    const previewItems: IntegrationReusePreviewItem[] = drafts.map((d) => {
+      const situacao: DocumentReuseResolutionState = d.situacaoDocumentoExistente || 'AUSENTE';
+      return {
+        categoria: d.categoria,
+        colaboradorId: d.colaboradorId,
+        colaboradorNome: d.colaboradorNome,
+        documentoCodigoCanonico: d.documentoCodigoCanonico,
+        nomeExibicao: d.nomeExibicao,
+        origemColecao: d.origemColecao,
+        obrigatorio: d.obrigatorio,
+        situacao,
+        reaproveitado: situacao === 'REAPROVEITADO_VALIDO',
+        aviso: d.documentoExistenteAviso,
+        officialRecordId: d.documentoExistenteId || d.officialRecordId,
+        arquivoNome: d.arquivoNome,
+        dataValidade: d.dataValidade,
+        semValidade: d.semValidade,
+        motivoReprovacao: d.motivoReprovacao,
+        simpleActivityId: d.simpleActivityId,
+        simpleActivityNome: d.simpleActivityNome,
+      };
+    });
+
+    return {
+      empresaId: company.id,
+      empresaNome: company.razaoSocial,
+      totalRequisitos: previewItems.length,
+      reaproveitadosAprovados: previewItems.filter((i) => i.situacao === 'REAPROVEITADO_VALIDO').length,
+      pendentesAprovacao: previewItems.filter((i) => i.situacao === 'PENDENTE_APROVACAO').length,
+      recusados: previewItems.filter((i) => i.situacao === 'RECUSADO').length,
+      vencidos: previewItems.filter((i) => i.situacao === 'VENCIDO').length,
+      ausentes: previewItems.filter(
+        (i) => i.situacao === 'AUSENTE' || i.situacao === 'ARQUIVO_INDISPONIVEL'
+      ).length,
+      itens: previewItems,
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -1947,10 +3241,12 @@ export class IntegrationWorkflowService {
     let solicitacaoNovaEmpresa: IntegrationCompanyRequest | undefined;
     let empresaPendenteCadastro = false;
 
+    const allowedCompanyIds = this.getActorAuthorizedCompanyIds(actor);
+
     if (empresaId) {
-      if (actor.role === 'solicitante' && actor.empresaId && actor.empresaId !== empresaId) {
+      if (actor.role === 'solicitante' && allowedCompanyIds.length > 0 && !allowedCompanyIds.includes(empresaId)) {
         throw new IntegrationWorkflowError(
-          'Solicitante só pode iniciar integrações para sua própria empresa contratada.',
+          'Solicitante só pode iniciar integrações para empresas contratadas às quais possui autorização.',
           403,
           'COMPANY_SCOPE_VIOLATION'
         );
@@ -1959,10 +3255,22 @@ export class IntegrationWorkflowService {
       if (!company) {
         throw new IntegrationWorkflowError('Empresa contratada não encontrada.', 404, 'COMPANY_NOT_FOUND');
       }
+      if (
+        actor.role === 'solicitante' &&
+        allowedCompanyIds.length === 0 &&
+        !(company.solicitantesAutorizadosIds || []).includes(actor.id) &&
+        company.criadoPorId !== actor.id
+      ) {
+        throw new IntegrationWorkflowError(
+          'Solicitante não possui autorização vinculada para esta empresa contratada.',
+          403,
+          'COMPANY_SCOPE_VIOLATION'
+        );
+      }
       empresaNome = company.razaoSocial;
       empresaCnpj = company.cnpj;
     } else if (input.solicitacaoNovaEmpresa) {
-      if (actor.role === 'solicitante' && actor.empresaId) {
+      if (actor.role === 'solicitante' && allowedCompanyIds.length > 0) {
         throw new IntegrationWorkflowError(
           'Seu perfil já está vinculado a uma empresa contratada. Selecione a empresa vinculada para iniciar a integração.',
           403,
@@ -1992,8 +3300,8 @@ export class IntegrationWorkflowService {
       empresaNome = reqComp.razaoSocial.trim();
       empresaCnpj = reqComp.cnpj.trim();
       empresaPendenteCadastro = true;
-    } else if (actor.role === 'solicitante' && actor.empresaId) {
-      const company = allCompanies.find((c) => c.id === actor.empresaId);
+    } else if (actor.role === 'solicitante' && allowedCompanyIds.length > 0) {
+      const company = allCompanies.find((c) => c.id === allowedCompanyIds[0]);
       if (!company) {
         throw new IntegrationWorkflowError('Empresa vinculada ao perfil não localizada.', 404, 'COMPANY_NOT_FOUND');
       }
@@ -2023,9 +3331,22 @@ export class IntegrationWorkflowService {
       }
     }
 
-    if (tipo === 'INTEGRACAO_INICIAL' && requestedActivityIds.length === 0 && (!input.customItems || input.customItems.length === 0)) {
+    const nowCreation = this.nowIso();
+    const sanitizedSimpleActivities = this.sanitizeSimpleActivitiesInput(
+      actor,
+      input.atividadesSimples,
+      empresaId,
+      nowCreation
+    );
+
+    if (
+      tipo === 'INTEGRACAO_INICIAL' &&
+      requestedActivityIds.length === 0 &&
+      sanitizedSimpleActivities.length === 0 &&
+      (!input.customItems || input.customItems.length === 0)
+    ) {
       throw new IntegrationWorkflowError(
-        'Selecione ao menos uma atividade da Matriz de Atividades para montar o checklist obrigatório da integração.',
+        'Selecione ao menos uma atividade da Matriz de Atividades ou cadastre uma Atividade Simples para montar o checklist obrigatório da integração.',
         400,
         'ACTIVITY_REQUIRED'
       );
@@ -2178,12 +3499,20 @@ export class IntegrationWorkflowService {
       empresaId,
       empresaNome,
       atividadeIds: requestedActivityIds,
+      atividadesSimples: sanitizedSimpleActivities,
       colaboradoresCandidatos: candidatos,
       customItems: input.customItems,
     });
 
-    const now = this.nowIso();
+    const now = nowCreation;
     const codigoProtocolo = generateProtocolCode(this.nowProvider());
+
+    const simpleSummarySuffix =
+      sanitizedSimpleActivities.length > 0
+        ? ` e ${sanitizedSimpleActivities.length} Atividade(s) Simples (${sanitizedSimpleActivities
+            .map((s) => s.entry.nome)
+            .join(', ')})`
+        : '';
 
     const initialHistory: IntegrationWorkflowHistoryEntry = {
       dataHora: now,
@@ -2193,7 +3522,7 @@ export class IntegrationWorkflowService {
       acao: tipo === 'ATUALIZACAO_DOCUMENTAL' ? 'CRIACAO_ATUALIZACAO_DOCUMENTAL' : 'CRIACAO_INTEGRACAO',
       statusAnterior: null,
       statusNovo: 'RASCUNHO',
-      detalhes: `Protocolo ${codigoProtocolo} criado para ${empresaNome} com ${candidatos.length} colaborador(es) e ${checklistDrafts.length} item(ns) no checklist dinâmico.`,
+      detalhes: `Protocolo ${codigoProtocolo} criado para ${empresaNome} com ${candidatos.length} colaborador(es)${simpleSummarySuffix} e ${checklistDrafts.length} item(ns) no checklist dinâmico.`,
     };
 
     const integration = await this.repo.createIntegration({
@@ -2207,6 +3536,9 @@ export class IntegrationWorkflowService {
       empresaPendenteCadastro,
       atividadeIds: requestedActivityIds,
       atividadeNomes,
+      ...(sanitizedSimpleActivities.length > 0
+        ? { atividadesSimples: sanitizedSimpleActivities.map((s) => s.entry) }
+        : {}),
       colaboradorIds: resolvedEmployeeIds,
       colaboradoresCandidatos: candidatos,
       observacoes: input.observacoes?.trim() || '',
@@ -2216,21 +3548,26 @@ export class IntegrationWorkflowService {
       solicitadoPorRole: actor.role,
       dataCriacao: now,
       dataUltimaAtualizacao: now,
-      resumoItens: {
-        total: checklistDrafts.length,
-        obrigatorios: checklistDrafts.filter((i) => i.obrigatorio).length,
-        pendentesEnvio: checklistDrafts.length,
-        enviados: 0,
-        emAnalise: 0,
-        aprovados: 0,
-        reprovados: 0,
-        substituidos: 0,
-      },
+      resumoItens: computeSummaryCounts(
+        checklistDrafts.map((d, idx) => ({ ...d, id: `draft-${idx}`, integrationId: '' }))
+      ),
       versaoConcorrencia: 1,
       historicoWorkflow: [initialHistory],
+      ...(input.isDemo ? { isDemo: true } : {}),
       createdAt: now,
       updatedAt: now,
     });
+
+    // Stamp integrationId onto each created SimpleActivityEntry for full traceability
+    if (sanitizedSimpleActivities.length > 0) {
+      const linkedSimpleActivities: SimpleActivityEntry[] = sanitizedSimpleActivities.map((s) => ({
+        ...s.entry,
+        integrationId: integration.id,
+      }));
+      await this.repo.updateIntegration(integration.id, {
+        atividadesSimples: linkedSimpleActivities,
+      });
+    }
 
     const createdItems: ContractorIntegrationItem[] = [];
     for (const draft of checklistDrafts) {
@@ -2247,7 +3584,7 @@ export class IntegrationWorkflowService {
         ? 'Criação de Atualização Documental'
         : 'Criação de Integração de Terceiros',
       integration.id,
-      `Protocolo ${codigoProtocolo} criado para ${empresaNome} (${empresaCnpj}) com ${createdItems.length} itens documentais.`
+      `Protocolo ${codigoProtocolo} criado para ${empresaNome} (${empresaCnpj}) com ${createdItems.length} itens documentais${simpleSummarySuffix}.`
     );
 
     return this.getIntegrationDetail(actor, integration.id);
@@ -2309,6 +3646,622 @@ export class IntegrationWorkflowService {
     );
 
     return this.getIntegrationDetail(actor, updated.id);
+  }
+
+  // --------------------------------------------------------------------------
+  // ATIVIDADE SIMPLES (SECTION 9.1): ADD / UPDATE / ATTACH DOCS / ADMIN REVIEW
+  // --------------------------------------------------------------------------
+
+  async addSimpleActivity(
+    actor: IntegrationWorkflowActor,
+    integrationId: string,
+    input: CreateSimpleActivityInput & { expectedVersion?: number }
+  ): Promise<
+    IntegrationDetailResult & {
+      simpleActivity: SimpleActivityEntry;
+      createdItems: ContractorIntegrationItem[];
+    }
+  > {
+    this.assertNotAuditor(actor, 'cadastrar atividade simples na integração');
+
+    return this.withIntegrationLock(integrationId, async () => {
+      const integration = await this.repo.getIntegrationById(integrationId);
+      if (!integration) {
+        throw new IntegrationWorkflowError('Integração não encontrada.', 404, 'INTEGRATION_NOT_FOUND');
+      }
+      this.assertCompanyScopeAccess(actor, integration);
+      this.assertConcurrencyVersion(integration, input.expectedVersion);
+
+      if (!EDITABLE_UPLOAD_STATUSES.includes(integration.status)) {
+        throw new IntegrationWorkflowError(
+          `Não é possível adicionar Atividade Simples no status "${integration.status}".`,
+          409,
+          'INTEGRATION_NOT_EDITABLE'
+        );
+      }
+
+      const now = this.nowIso();
+      const [sanitized] = this.sanitizeSimpleActivitiesInput(
+        actor,
+        [input],
+        integration.empresaId,
+        now
+      );
+      const entry: SimpleActivityEntry = {
+        ...sanitized.entry,
+        integrationId: integration.id,
+      };
+
+      const existingItems = await this.repo.listItemsByIntegration(integration.id);
+      const createdItems: ContractorIntegrationItem[] = [];
+
+      if (sanitized.documentos.length > 0) {
+        const drafts = await this.buildDynamicChecklistDrafts({
+          tipo: 'ATUALIZACAO_DOCUMENTAL',
+          empresaId: integration.empresaId,
+          empresaNome: integration.empresaNome,
+          atividadeIds: [],
+          atividadesSimples: [{ entry, documentos: sanitized.documentos }],
+          colaboradoresCandidatos: integration.colaboradoresCandidatos || [],
+        });
+
+        for (const draft of drafts) {
+          const alreadyExists = existingItems.find(
+            (ex) =>
+              ex.categoria === draft.categoria &&
+              (ex.colaboradorId || '') === (draft.colaboradorId || '') &&
+              (ex.colaboradorCandidateId || '') === (draft.colaboradorCandidateId || '') &&
+              normalizeCanonicalCode(ex.documentoCodigoCanonico) ===
+                normalizeCanonicalCode(draft.documentoCodigoCanonico) &&
+              ex.origemColecao === draft.origemColecao
+          );
+          if (alreadyExists) {
+            if (!alreadyExists.simpleActivityId) {
+              await this.repo.updateItem(alreadyExists.id, {
+                simpleActivityId: entry.id,
+                simpleActivityNome: entry.nome,
+                updatedAt: now,
+              });
+            }
+            continue;
+          }
+          const created = await this.repo.createItem({
+            ...draft,
+            integrationId: integration.id,
+          });
+          createdItems.push(created);
+          existingItems.push(created);
+        }
+      }
+
+      const updatedSimpleList = [...(integration.atividadesSimples || []), entry];
+      const summary = computeSummaryCounts(existingItems);
+
+      await this.repo.updateIntegration(integration.id, {
+        atividadesSimples: updatedSimpleList,
+        resumoItens: summary,
+        dataUltimaAtualizacao: now,
+        updatedAt: now,
+        versaoConcorrencia: integration.versaoConcorrencia + 1,
+        historicoWorkflow: [
+          ...integration.historicoWorkflow,
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: 'ADICAO_ATIVIDADE_SIMPLES',
+            statusAnterior: integration.status,
+            statusNovo: integration.status,
+            detalhes: `Atividade Simples "${entry.nome}" vinculada ao protocolo ${integration.codigoProtocolo} com ${createdItems.length} novo(s) requisito(s) documental(is).`,
+          },
+        ],
+      });
+
+      await this.logAudit(
+        actor,
+        'Cadastro de Atividade Simples',
+        integration.id,
+        `Atividade Simples "${entry.nome}" adicionada ao protocolo ${integration.codigoProtocolo} (${integration.empresaNome}) por ${actor.nome}.`
+      );
+
+      const detail = await this.getIntegrationDetail(actor, integration.id);
+      return { ...detail, simpleActivity: entry, createdItems };
+    });
+  }
+
+  async updateSimpleActivity(
+    actor: IntegrationWorkflowActor,
+    integrationId: string,
+    simpleActivityId: string,
+    input: UpdateSimpleActivityInput
+  ): Promise<IntegrationDetailResult & { simpleActivity: SimpleActivityEntry }> {
+    this.assertNotAuditor(actor, 'editar atividade simples na integração');
+
+    return this.withIntegrationLock(integrationId, async () => {
+      const integration = await this.repo.getIntegrationById(integrationId);
+      if (!integration) {
+        throw new IntegrationWorkflowError('Integração não encontrada.', 404, 'INTEGRATION_NOT_FOUND');
+      }
+      this.assertCompanyScopeAccess(actor, integration);
+      this.assertConcurrencyVersion(integration, input.expectedVersion);
+
+      if (!EDITABLE_UPLOAD_STATUSES.includes(integration.status)) {
+        throw new IntegrationWorkflowError(
+          `Não é possível editar Atividade Simples no status "${integration.status}".`,
+          409,
+          'INTEGRATION_NOT_EDITABLE'
+        );
+      }
+
+      const currentList = integration.atividadesSimples || [];
+      const targetIdx = currentList.findIndex((sa) => sa.id === simpleActivityId);
+      if (targetIdx === -1) {
+        throw new IntegrationWorkflowError(
+          'Atividade Simples não encontrada nesta integração.',
+          404,
+          'SIMPLE_ACTIVITY_NOT_FOUND'
+        );
+      }
+
+      const existing = currentList[targetIdx];
+      const nextNome =
+        input.nome !== undefined ? String(input.nome).trim() : existing.nome;
+      const nextDescricao =
+        input.descricaoServico !== undefined
+          ? String(input.descricaoServico).trim()
+          : existing.descricaoServico;
+      const nextObservacoes =
+        input.observacoes !== undefined
+          ? String(input.observacoes).trim() || undefined
+          : existing.observacoes;
+
+      if (nextNome.length < 2 || nextNome.length > 160) {
+        throw new IntegrationWorkflowError(
+          'Informe um nome válido para a Atividade Simples (entre 2 e 160 caracteres).',
+          400,
+          'INVALID_SIMPLE_ACTIVITY'
+        );
+      }
+      if (nextDescricao.length < 5 || nextDescricao.length > 2000) {
+        throw new IntegrationWorkflowError(
+          'Descreva o serviço que será executado na Atividade Simples (mínimo de 5 caracteres).',
+          400,
+          'INVALID_SIMPLE_ACTIVITY'
+        );
+      }
+
+      const now = this.nowIso();
+      // Anti-tampering: Solicitante/edit NEVER self-approves; returns to PENDENTE_ANALISE for Admin EHS review
+      const nextStatus: SimpleActivityStatus = 'PENDENTE_ANALISE';
+      const updatedEntry: SimpleActivityEntry = {
+        ...existing,
+        nome: nextNome,
+        descricaoServico: nextDescricao,
+        observacoes: nextObservacoes,
+        status: nextStatus,
+        atualizadoEm: now,
+        historico: [
+          ...(existing.historico || []),
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: 'ATUALIZACAO_ATIVIDADE_SIMPLES',
+            statusAnterior: existing.status,
+            statusNovo: nextStatus,
+            detalhes: `Atividade Simples "${nextNome}" atualizada por ${actor.nome} e encaminhada para nova conferência do Administrador EHS.`,
+          },
+        ],
+      };
+
+      const nextList = [...currentList];
+      nextList[targetIdx] = updatedEntry;
+
+      if (nextNome !== existing.nome) {
+        const items = await this.repo.listItemsByIntegration(integration.id);
+        for (const it of items) {
+          if (it.simpleActivityId === simpleActivityId) {
+            await this.repo.updateItem(it.id, {
+              simpleActivityNome: nextNome,
+              activityNome: `Atividade Simples: ${nextNome}`,
+              updatedAt: now,
+            });
+          }
+        }
+      }
+
+      await this.repo.updateIntegration(integration.id, {
+        atividadesSimples: nextList,
+        dataUltimaAtualizacao: now,
+        updatedAt: now,
+        versaoConcorrencia: integration.versaoConcorrencia + 1,
+        historicoWorkflow: [
+          ...integration.historicoWorkflow,
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: 'ATUALIZACAO_ATIVIDADE_SIMPLES',
+            statusAnterior: integration.status,
+            statusNovo: integration.status,
+            detalhes: `Atividade Simples "${nextNome}" atualizada por ${actor.nome}.`,
+          },
+        ],
+      });
+
+      await this.logAudit(
+        actor,
+        'Atualização de Atividade Simples',
+        integration.id,
+        `Atividade Simples "${nextNome}" atualizada no protocolo ${integration.codigoProtocolo} por ${actor.nome}.`
+      );
+
+      const detail = await this.getIntegrationDetail(actor, integration.id);
+      return { ...detail, simpleActivity: updatedEntry };
+    });
+  }
+
+  async addSimpleActivityDocuments(
+    actor: IntegrationWorkflowActor,
+    integrationId: string,
+    simpleActivityId: string,
+    input: { documentos: SimpleActivityDocumentInput[]; expectedVersion?: number }
+  ): Promise<IntegrationDetailResult & { createdItems: ContractorIntegrationItem[] }> {
+    this.assertNotAuditor(actor, 'vincular documentos à atividade simples');
+
+    return this.withIntegrationLock(integrationId, async () => {
+      const integration = await this.repo.getIntegrationById(integrationId);
+      if (!integration) {
+        throw new IntegrationWorkflowError('Integração não encontrada.', 404, 'INTEGRATION_NOT_FOUND');
+      }
+      this.assertCompanyScopeAccess(actor, integration);
+      this.assertConcurrencyVersion(integration, input.expectedVersion);
+
+      if (!EDITABLE_UPLOAD_STATUSES.includes(integration.status)) {
+        throw new IntegrationWorkflowError(
+          `Não é possível adicionar documentos à Atividade Simples no status "${integration.status}".`,
+          409,
+          'INTEGRATION_NOT_EDITABLE'
+        );
+      }
+
+      const currentList = integration.atividadesSimples || [];
+      const targetIdx = currentList.findIndex((sa) => sa.id === simpleActivityId);
+      if (targetIdx === -1) {
+        throw new IntegrationWorkflowError(
+          'Atividade Simples não encontrada nesta integração.',
+          404,
+          'SIMPLE_ACTIVITY_NOT_FOUND'
+        );
+      }
+
+      const rawDocs = Array.isArray(input.documentos) ? input.documentos : [];
+      const validDocs = rawDocs
+        .filter((d) => String(d?.nomeDocumento || '').trim().length > 0)
+        .map((d) => ({
+          nomeDocumento: String(d.nomeDocumento).trim().slice(0, 180),
+          documentoCodigoCanonico: d.documentoCodigoCanonico
+            ? String(d.documentoCodigoCanonico).trim().slice(0, 80)
+            : undefined,
+          escopo: d.escopo === 'colaborador' ? ('colaborador' as const) : ('empresa' as const),
+          colaboradorId: d.colaboradorId ? String(d.colaboradorId).trim() : undefined,
+          colaboradorCandidateId: d.colaboradorCandidateId
+            ? String(d.colaboradorCandidateId).trim()
+            : undefined,
+          obrigatorio: d.obrigatorio !== undefined ? Boolean(d.obrigatorio) : true,
+          observacoes: d.observacoes ? String(d.observacoes).trim().slice(0, 500) : undefined,
+        }));
+
+      if (validDocs.length === 0) {
+        throw new IntegrationWorkflowError(
+          'Informe ao menos um documento válido para vincular à Atividade Simples.',
+          400,
+          'INVALID_SIMPLE_ACTIVITY_DOCUMENTS'
+        );
+      }
+
+      const targetActivity = currentList[targetIdx];
+      const now = this.nowIso();
+      const existingItems = await this.repo.listItemsByIntegration(integration.id);
+
+      const drafts = await this.buildDynamicChecklistDrafts({
+        tipo: 'ATUALIZACAO_DOCUMENTAL',
+        empresaId: integration.empresaId,
+        empresaNome: integration.empresaNome,
+        atividadeIds: [],
+        atividadesSimples: [{ entry: targetActivity, documentos: validDocs }],
+        colaboradoresCandidatos: integration.colaboradoresCandidatos || [],
+      });
+
+      const createdItems: ContractorIntegrationItem[] = [];
+      for (const draft of drafts) {
+        const alreadyExists = existingItems.find(
+          (ex) =>
+            ex.categoria === draft.categoria &&
+            (ex.colaboradorId || '') === (draft.colaboradorId || '') &&
+            (ex.colaboradorCandidateId || '') === (draft.colaboradorCandidateId || '') &&
+            normalizeCanonicalCode(ex.documentoCodigoCanonico) ===
+              normalizeCanonicalCode(draft.documentoCodigoCanonico) &&
+            ex.origemColecao === draft.origemColecao
+        );
+        if (alreadyExists) {
+          if (!alreadyExists.simpleActivityId) {
+            await this.repo.updateItem(alreadyExists.id, {
+              simpleActivityId: targetActivity.id,
+              simpleActivityNome: targetActivity.nome,
+              updatedAt: now,
+            });
+          }
+          continue;
+        }
+        const created = await this.repo.createItem({
+          ...draft,
+          integrationId: integration.id,
+        });
+        createdItems.push(created);
+        existingItems.push(created);
+      }
+
+      const nextStatus: SimpleActivityStatus =
+        targetActivity.status === 'RECUSADA' ||
+        targetActivity.status === 'COMPLEMENTACAO_SOLICITADA'
+          ? 'PENDENTE_ANALISE'
+          : targetActivity.status;
+
+      const updatedEntry: SimpleActivityEntry = {
+        ...targetActivity,
+        status: nextStatus,
+        atualizadoEm: now,
+        historico: [
+          ...(targetActivity.historico || []),
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: 'DOCUMENTO_ADICIONADO',
+            statusAnterior: targetActivity.status,
+            statusNovo: nextStatus,
+            detalhes: `${validDocs.length} documento(s) vinculado(s) à Atividade Simples "${targetActivity.nome}": ${validDocs
+              .map((d) => d.nomeDocumento)
+              .join(', ')}.`,
+          },
+        ],
+      };
+
+      const nextList = [...currentList];
+      nextList[targetIdx] = updatedEntry;
+
+      await this.repo.updateIntegration(integration.id, {
+        atividadesSimples: nextList,
+        resumoItens: computeSummaryCounts(existingItems),
+        dataUltimaAtualizacao: now,
+        updatedAt: now,
+        versaoConcorrencia: integration.versaoConcorrencia + 1,
+        historicoWorkflow: [
+          ...integration.historicoWorkflow,
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: 'DOCUMENTOS_ATIVIDADE_SIMPLES',
+            statusAnterior: integration.status,
+            statusNovo: integration.status,
+            detalhes: `${createdItems.length} novo(s) item(ns) documental(is) vinculado(s) à Atividade Simples "${targetActivity.nome}".`,
+          },
+        ],
+      });
+
+      const detail = await this.getIntegrationDetail(actor, integration.id);
+      return { ...detail, createdItems };
+    });
+  }
+
+  async reviewSimpleActivity(
+    actor: IntegrationWorkflowActor,
+    integrationId: string,
+    simpleActivityId: string,
+    input: ReviewSimpleActivityInput
+  ): Promise<IntegrationDetailResult & { simpleActivity: SimpleActivityEntry }> {
+    // STRICT RBAC: Solicitante and Auditor can NEVER approve, reject, or request complementation on simple activities
+    this.assertAdmin(
+      actor,
+      'analisar, aprovar, recusar ou solicitar complementação em Atividades Simples'
+    );
+
+    return this.withIntegrationLock(integrationId, async () => {
+      const integration = await this.repo.getIntegrationById(integrationId);
+      if (!integration) {
+        throw new IntegrationWorkflowError('Integração não encontrada.', 404, 'INTEGRATION_NOT_FOUND');
+      }
+      this.assertSubmittedForAdmin(integration, 'analisar atividade simples');
+      this.assertConcurrencyVersion(integration, input.expectedVersion);
+
+      const currentList = integration.atividadesSimples || [];
+      const targetIdx = currentList.findIndex((sa) => sa.id === simpleActivityId);
+      if (targetIdx === -1) {
+        throw new IntegrationWorkflowError(
+          'Atividade Simples não encontrada nesta integração.',
+          404,
+          'SIMPLE_ACTIVITY_NOT_FOUND'
+        );
+      }
+
+      const decisao = input.decisao;
+      if (
+        decisao !== 'APROVAR' &&
+        decisao !== 'RECUSAR' &&
+        decisao !== 'SOLICITAR_COMPLEMENTACAO'
+      ) {
+        throw new IntegrationWorkflowError(
+          'Decisão inválida. Informe APROVAR, RECUSAR ou SOLICITAR_COMPLEMENTACAO.',
+          400,
+          'INVALID_DECISION'
+        );
+      }
+
+      const justificativa = String(input.justificativa || '').trim();
+      if ((decisao === 'RECUSAR' || decisao === 'SOLICITAR_COMPLEMENTACAO') && justificativa.length < 3) {
+        throw new IntegrationWorkflowError(
+          decisao === 'RECUSAR'
+            ? 'Informe uma justificativa obrigatória para recusar a Atividade Simples.'
+            : 'Informe uma justificativa obrigatória descrevendo a complementação solicitada.',
+          400,
+          'JUSTIFICATION_REQUIRED'
+        );
+      }
+
+      const existing = currentList[targetIdx];
+      const now = this.nowIso();
+      const nextStatus: SimpleActivityStatus =
+        decisao === 'APROVAR'
+          ? 'APROVADA'
+          : decisao === 'RECUSAR'
+          ? 'RECUSADA'
+          : 'COMPLEMENTACAO_SOLICITADA';
+
+      const historyAction: SimpleActivityHistoryEntry['acao'] =
+        decisao === 'APROVAR'
+          ? 'APROVACAO_ATIVIDADE_SIMPLES'
+          : decisao === 'RECUSAR'
+          ? 'RECUSA_ATIVIDADE_SIMPLES'
+          : 'SOLICITACAO_COMPLEMENTACAO';
+
+      const updatedEntry: SimpleActivityEntry = {
+        ...existing,
+        status: nextStatus,
+        analisadoPorId: actor.id,
+        analisadoPorNome: actor.nome,
+        dataAnalise: now,
+        justificativaAnalise: justificativa || undefined,
+        atualizadoEm: now,
+        historico: [
+          ...(existing.historico || []),
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: historyAction,
+            statusAnterior: existing.status,
+            statusNovo: nextStatus,
+            detalhes:
+              decisao === 'APROVAR'
+                ? `Atividade Simples "${existing.nome}" APROVADA pelo Administrador EHS ${actor.nome}.`
+                : decisao === 'RECUSAR'
+                ? `Atividade Simples "${existing.nome}" RECUSADA pelo Administrador EHS ${actor.nome}: ${justificativa}`
+                : `Complementação solicitada para Atividade Simples "${existing.nome}" pelo Administrador EHS ${actor.nome}: ${justificativa}`,
+            justificativa: justificativa || undefined,
+          },
+        ],
+      };
+
+      const nextList = [...currentList];
+      nextList[targetIdx] = updatedEntry;
+
+      let nextIntegrationStatus: IntegrationWorkflowStatus = integration.status;
+      if (
+        decisao === 'SOLICITAR_COMPLEMENTACAO' &&
+        ['ENVIADA', 'AGUARDANDO_ANALISE', 'EM_ANALISE', 'REENVIADA'].includes(integration.status)
+      ) {
+        nextIntegrationStatus = 'PENDENTE_CORRECAO';
+      } else if (
+        (decisao === 'APROVAR' || decisao === 'RECUSAR') &&
+        ['ENVIADA', 'AGUARDANDO_ANALISE', 'REENVIADA'].includes(integration.status)
+      ) {
+        nextIntegrationStatus = 'EM_ANALISE';
+      }
+
+      await this.repo.updateIntegration(integration.id, {
+        status: nextIntegrationStatus,
+        atividadesSimples: nextList,
+        analisadoPorId: actor.id,
+        analisadoPorNome: actor.nome,
+        dataAnalise: now,
+        ...(decisao === 'SOLICITAR_COMPLEMENTACAO'
+          ? {
+              motivoReprovacaoOuDevolucao: `Complementação solicitada na Atividade Simples "${existing.nome}": ${justificativa}`,
+            }
+          : {}),
+        dataUltimaAtualizacao: now,
+        updatedAt: now,
+        versaoConcorrencia: integration.versaoConcorrencia + 1,
+        historicoWorkflow: [
+          ...integration.historicoWorkflow,
+          {
+            dataHora: now,
+            usuarioId: actor.id,
+            usuarioNome: actor.nome,
+            usuarioRole: actor.role,
+            acao: historyAction,
+            statusAnterior: integration.status,
+            statusNovo: nextIntegrationStatus,
+            detalhes:
+              decisao === 'APROVAR'
+                ? `Atividade Simples "${existing.nome}" aprovada por ${actor.nome}.`
+                : decisao === 'RECUSAR'
+                ? `Atividade Simples "${existing.nome}" recusada por ${actor.nome}.`
+                : `Complementação solicitada na Atividade Simples "${existing.nome}" por ${actor.nome} (protocolo devolvido para ajustes).`,
+            justificativa: justificativa || undefined,
+          },
+        ],
+      });
+
+      await this.logAudit(
+        actor,
+        decisao === 'APROVAR'
+          ? 'Aprovação de Atividade Simples'
+          : decisao === 'RECUSAR'
+          ? 'Recusa de Atividade Simples'
+          : 'Solicitação de Complementação — Atividade Simples',
+        integration.id,
+        `Protocolo ${integration.codigoProtocolo} — Atividade Simples "${existing.nome}": ${nextStatus}${justificativa ? ` (${justificativa})` : ''}.`
+      );
+
+      await this.emitNotification({
+        recipientRole: 'solicitante',
+        recipientUserId:
+          integration.solicitadoPorRole === 'solicitante'
+            ? integration.solicitadoPorId
+            : undefined,
+        empresaId: integration.empresaId,
+        empresaNome: integration.empresaNome,
+        type:
+          decisao === 'APROVAR'
+            ? 'INTEGRACAO_APROVADA'
+            : decisao === 'RECUSAR'
+            ? 'DOCUMENTO_REPROVADO'
+            : 'INTEGRACAO_DEVOLVIDA',
+        severity: decisao === 'APROVAR' ? 'success' : decisao === 'RECUSAR' ? 'error' : 'warning',
+        title:
+          decisao === 'APROVAR'
+            ? `Atividade Simples aprovada — ${integration.codigoProtocolo}`
+            : decisao === 'RECUSAR'
+            ? `Atividade Simples recusada — ${integration.codigoProtocolo}`
+            : `Complementação solicitada — ${integration.codigoProtocolo}`,
+        message:
+          decisao === 'APROVAR'
+            ? `A Atividade Simples "${existing.nome}" (${integration.empresaNome}) foi aprovada pelo Administrador EHS ${actor.nome}.`
+            : decisao === 'RECUSAR'
+            ? `A Atividade Simples "${existing.nome}" (${integration.empresaNome}) foi recusada por ${actor.nome}. Motivo: ${justificativa}`
+            : `O Administrador EHS ${actor.nome} solicitou complementação para a Atividade Simples "${existing.nome}" (${integration.empresaNome}): ${justificativa}`,
+        actionLabel: 'Abrir integração',
+        actionTab: 'gestao_integracao',
+        integrationId: integration.id,
+        companyId: integration.empresaId,
+        createdById: actor.id,
+        createdByNome: actor.nome,
+        createdByRole: actor.role,
+        idempotencyKey: `sa-review:${integration.id}:${existing.id}:${nextStatus}:${integration.versaoConcorrencia + 1}`,
+      });
+
+      const detail = await this.getIntegrationDetail(actor, integration.id);
+      return { ...detail, simpleActivity: updatedEntry };
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -2403,28 +4356,78 @@ export class IntegrationWorkflowService {
     storageKey: string;
   }> {
     const safeFileName = (params.fileInput.arquivoNome || '').trim();
-    let validated: ReturnType<typeof validateUploadedFile>;
-    try {
-      validated = validateUploadedFile({
-        fileName: safeFileName,
-        mimeType: inferMimeTypeFromFile(safeFileName, params.fileInput.arquivoBase64),
-        dataUrl: params.fileInput.arquivoBase64,
-      });
-    } catch (err: any) {
-      throw new IntegrationWorkflowError(
-        err?.message || `Arquivo inválido: ${params.fileInput.arquivoNome}`,
-        err?.statusCode || 400,
-        err?.code || 'INVALID_FILE'
-      );
-    }
+    const hasBinaryBuffer = Boolean(
+      params.fileInput.arquivoBuffer && params.fileInput.arquivoBuffer.length > 0
+    );
 
-    const binaryBuffer = Buffer.from(validated.base64Data, 'base64');
-    if (!validateBinaryMagicBytes(binaryBuffer, validated.mimeType)) {
-      throw new IntegrationWorkflowError(
-        `O conteúdo binário do arquivo "${safeFileName}" não corresponde ao formato declarado (${validated.mimeType}). Envie um PDF, JPG ou PNG íntegro.`,
-        400,
-        'INVALID_FILE_SIGNATURE'
-      );
+    let validated: ReturnType<typeof validateUploadedFile>;
+    let binaryBuffer: Buffer;
+
+    if (hasBinaryBuffer) {
+      binaryBuffer = params.fileInput.arquivoBuffer!;
+      if (binaryBuffer.length <= 0) {
+        throw new IntegrationWorkflowError(
+          `O arquivo "${safeFileName}" está vazio (0 bytes).`,
+          400,
+          'EMPTY_FILE'
+        );
+      }
+      if (binaryBuffer.length > MAX_UPLOAD_FILE_BYTES) {
+        throw new IntegrationWorkflowError(
+          `O arquivo "${safeFileName}" excede o tamanho máximo permitido de 4 MB.`,
+          413,
+          'FILE_TOO_LARGE'
+        );
+      }
+      const realMime = detectRealMimeFromBuffer(binaryBuffer);
+      if (!realMime) {
+        throw new IntegrationWorkflowError(
+          `O conteúdo binário do arquivo "${safeFileName}" não é um PDF, JPG ou PNG íntegro.`,
+          400,
+          'INVALID_FILE_SIGNATURE'
+        );
+      }
+      const declaredMime = normalizeDeclaredMime(params.fileInput.arquivoMimeType);
+      if (declaredMime && declaredMime !== realMime) {
+        throw new IntegrationWorkflowError(
+          `O conteúdo binário do arquivo "${safeFileName}" não corresponde ao formato declarado (${declaredMime}). Envie um PDF, JPG ou PNG íntegro.`,
+          400,
+          'INVALID_FILE_SIGNATURE'
+        );
+      }
+      const sha256 = computeBufferSha256(binaryBuffer);
+      const base64Data = params.fileInput.runSmartDocsAi ? binaryBuffer.toString('base64') : '';
+      validated = {
+        mimeType: realMime,
+        sizeBytes: binaryBuffer.length,
+        sha256,
+        base64Data,
+        buffer: binaryBuffer,
+        cleanDataUrl: '',
+      };
+    } else {
+      try {
+        validated = validateUploadedFile({
+          fileName: safeFileName,
+          mimeType: inferMimeTypeFromFile(safeFileName, params.fileInput.arquivoBase64 || ''),
+          dataUrl: params.fileInput.arquivoBase64 || '',
+        });
+      } catch (err: any) {
+        throw new IntegrationWorkflowError(
+          err?.message || `Arquivo inválido: ${params.fileInput.arquivoNome}`,
+          err?.statusCode || 400,
+          err?.code || 'INVALID_FILE'
+        );
+      }
+
+      binaryBuffer = Buffer.from(validated.base64Data, 'base64');
+      if (!validateBinaryMagicBytes(binaryBuffer, validated.mimeType)) {
+        throw new IntegrationWorkflowError(
+          `O conteúdo binário do arquivo "${safeFileName}" não corresponde ao formato declarado (${validated.mimeType}). Envie um PDF, JPG ou PNG íntegro.`,
+          400,
+          'INVALID_FILE_SIGNATURE'
+        );
+      }
     }
 
     const arquivoId = crypto.randomUUID();
@@ -2738,6 +4741,9 @@ export class IntegrationWorkflowService {
 
     const savedItem = await this.repo.updateItem(targetItem.id, {
       status: 'ENVIADO',
+      reaproveitado: false,
+      situacaoDocumentoExistente: undefined,
+      documentoExistenteAviso: undefined,
       categoriaOrganizacional: resolvedGroup,
       versaoAtual: nextVersionNum,
       versoes: [...updatedPreviousVersions, newVersion],
@@ -2803,9 +4809,11 @@ export class IntegrationWorkflowService {
         );
       }
 
-      if (!fileInput || !fileInput.arquivoNome || !fileInput.arquivoBase64) {
+      const hasBinary = Boolean(fileInput?.arquivoBuffer && fileInput.arquivoBuffer.length > 0);
+      const hasBase64 = Boolean(fileInput?.arquivoBase64 && String(fileInput.arquivoBase64).trim());
+      if (!fileInput || !fileInput.arquivoNome || (!hasBinary && !hasBase64)) {
         throw new IntegrationWorkflowError(
-          'Arquivo ausente. Informe arquivoNome e arquivoBase64 (PDF, JPG ou PNG).',
+          'Arquivo ausente. Envie um arquivo binário (PDF, JPG ou PNG) válido para anexar ao documento.',
           400,
           'MISSING_FILE_PAYLOAD'
         );
@@ -2825,17 +4833,54 @@ export class IntegrationWorkflowService {
       const summary = computeSummaryCounts(existingItems);
       const readiness = await this.evaluateSubmissionReadiness(integration, existingItems);
       let nextStatus: IntegrationWorkflowStatus = integration.status;
-      if (integration.status !== 'PENDENTE_CORRECAO') {
+      const isCorrectionCycle =
+        integration.status === 'PENDENTE_CORRECAO' || integration.status === 'REPROVADA';
+      if (!isCorrectionCycle) {
         nextStatus = readiness.podeSubmeter ? 'EM_ENVIO' : 'PENDENTE_DOCUMENTACAO';
       }
 
-      const updatedPendingCorrections =
-        integration.status === 'PENDENTE_CORRECAO'
-          ? this.buildPendingCorrectionItems(existingItems)
-          : integration.itensPendentesCorrecao;
+      const updatedPendingCorrections = isCorrectionCycle
+        ? this.buildPendingCorrectionItems(existingItems)
+        : integration.itensPendentesCorrecao;
+
+      // If this uploaded document belongs to a Simple Activity that was RECUSADA or COMPLEMENTACAO_SOLICITADA,
+      // automatically move that Simple Activity back to PENDENTE_ANALISE for Admin EHS re-review.
+      let updatedSimpleActivities: SimpleActivityEntry[] | undefined;
+      if (uploaded.savedItem.simpleActivityId && Array.isArray(integration.atividadesSimples)) {
+        let changed = false;
+        updatedSimpleActivities = integration.atividadesSimples.map((sa) => {
+          if (
+            sa.id === uploaded.savedItem.simpleActivityId &&
+            (sa.status === 'RECUSADA' || sa.status === 'COMPLEMENTACAO_SOLICITADA')
+          ) {
+            changed = true;
+            return {
+              ...sa,
+              status: 'PENDENTE_ANALISE' as SimpleActivityStatus,
+              atualizadoEm: now,
+              historico: [
+                ...(sa.historico || []),
+                {
+                  dataHora: now,
+                  usuarioId: actor.id,
+                  usuarioNome: actor.nome,
+                  usuarioRole: actor.role,
+                  acao: 'DOCUMENTO_ADICIONADO' as const,
+                  statusAnterior: sa.status,
+                  statusNovo: 'PENDENTE_ANALISE' as SimpleActivityStatus,
+                  detalhes: `Documento "${uploaded.savedItem.nomeExibicao}" (v${uploaded.versao}) enviado por ${actor.nome}; Atividade Simples encaminhada para nova análise.`,
+                },
+              ],
+            };
+          }
+          return sa;
+        });
+        if (!changed) updatedSimpleActivities = undefined;
+      }
 
       const updatedIntegration = await this.repo.updateIntegration(integration.id, {
         status: nextStatus,
+        ...(updatedSimpleActivities ? { atividadesSimples: updatedSimpleActivities } : {}),
         itensPendentesCorrecao: updatedPendingCorrections,
         dataUltimaAtualizacao: now,
         updatedAt: now,
@@ -2863,6 +4908,26 @@ export class IntegrationWorkflowService {
         updatedIntegration.id,
         `Documento "${uploaded.savedItem.nomeExibicao}" (${uploaded.safeFileName}, v${uploaded.versao}) enviado no protocolo ${updatedIntegration.codigoProtocolo}.`
       );
+
+      if (isCorrectionCycle) {
+        await this.emitNotification({
+          recipientRole: 'admin',
+          empresaId: updatedIntegration.empresaId,
+          empresaNome: updatedIntegration.empresaNome,
+          type: 'DOCUMENTO_CORRIGIDO',
+          severity: 'info',
+          title: `Documento corrigido — ${updatedIntegration.codigoProtocolo}`,
+          message: `${actor.nome} enviou a versão v${uploaded.versao} do documento "${uploaded.savedItem.nomeExibicao}" (${updatedIntegration.empresaNome}) para nova verificação.`,
+          actionTab: 'gestao_integracoes',
+          actionLabel: 'Verificar correção',
+          integrationId: updatedIntegration.id,
+          documentId: uploaded.savedItem.id,
+          createdById: actor.id,
+          createdByNome: actor.nome,
+          createdByRole: actor.role,
+          idempotencyKey: `doc-corrigido:${updatedIntegration.id}:${uploaded.savedItem.id}:v${uploaded.versao}`,
+        });
+      }
 
       const detail = await this.getIntegrationDetail(actor, updatedIntegration.id);
       const sanitizedItem =
@@ -2980,10 +5045,11 @@ export class IntegrationWorkflowService {
       }
 
       let nextStatus: IntegrationWorkflowStatus = integration.status;
+      const isCorrectionCycle =
+        integration.status === 'PENDENTE_CORRECAO' || integration.status === 'REPROVADA';
       if (input.autoSubmit) {
-        nextStatus =
-          integration.status === 'PENDENTE_CORRECAO' ? 'REENVIADA' : 'AGUARDANDO_ANALISE';
-      } else if (integration.status !== 'PENDENTE_CORRECAO') {
+        nextStatus = isCorrectionCycle ? 'REENVIADA' : 'AGUARDANDO_ANALISE';
+      } else if (!isCorrectionCycle) {
         nextStatus = readiness.podeSubmeter ? 'EM_ENVIO' : 'PENDENTE_DOCUMENTACAO';
       }
 
@@ -2992,7 +5058,7 @@ export class IntegrationWorkflowService {
         dataEnvio: input.autoSubmit ? now : integration.dataEnvio,
         itensPendentesCorrecao: input.autoSubmit
           ? []
-          : integration.status === 'PENDENTE_CORRECAO'
+          : isCorrectionCycle
           ? this.buildPendingCorrectionItems(existingItems)
           : integration.itensPendentesCorrecao,
         dataUltimaAtualizacao: now,
@@ -3380,7 +5446,9 @@ export class IntegrationWorkflowService {
 
       const now = this.nowIso();
       const nextStatus: IntegrationWorkflowStatus =
-        integration.status === 'PENDENTE_CORRECAO' ? 'REENVIADA' : 'AGUARDANDO_ANALISE';
+        integration.status === 'PENDENTE_CORRECAO' || integration.status === 'REPROVADA'
+          ? 'REENVIADA'
+          : 'AGUARDANDO_ANALISE';
       const summary = computeSummaryCounts(items);
 
       await this.repo.updateIntegration(integration.id, {
@@ -3416,6 +5484,59 @@ export class IntegrationWorkflowService {
         integration.id,
         `Protocolo ${integration.codigoProtocolo} enviado (${nextStatus}) por ${actor.nome} com ${readiness.obrigatoriosConfirmados}/${readiness.totalObrigatorios} documento(s) obrigatório(s) confirmado(s).`
       );
+
+      // In-app notifications for Admin EHS and Solicitante
+      const submitVersion = integration.versaoConcorrencia + 1;
+      await this.emitNotification({
+        recipientRole: 'admin',
+        empresaId: integration.empresaId,
+        empresaNome: integration.empresaNome,
+        type: nextStatus === 'REENVIADA' ? 'INTEGRACAO_REENVIADA' : 'INTEGRACAO_ENVIADA',
+        severity: nextStatus === 'REENVIADA' ? 'warning' : 'info',
+        title:
+          nextStatus === 'REENVIADA'
+            ? `PACOTE REENVIADO PARA ANÁLISE (${integration.codigoProtocolo})`
+            : `NOVA INTEGRAÇÃO RECEBIDA (${integration.codigoProtocolo})`,
+        message:
+          nextStatus === 'REENVIADA'
+            ? `A contratada ${integration.empresaNome} corrigiu e reenviou o pacote documental (${readiness.obrigatoriosConfirmados} obrigatórios confirmados) para nova análise.`
+            : `A contratada ${integration.empresaNome} enviou um novo pacote de integração completo com ${readiness.obrigatoriosConfirmados} documento(s) obrigatório(s) aguardando decisão.`,
+        actionLabel: 'Analisar integração',
+        actionTab: 'gestao_integracoes',
+        integrationId: integration.id,
+        companyId: integration.empresaId,
+        createdById: actor.id,
+        createdByNome: actor.nome,
+        createdByRole: actor.role,
+        idempotencyKey: `integ-submit-adm-${integration.id}-v${submitVersion}`,
+        isDemo: integration.isDemo,
+        createdAt: now,
+      });
+
+      await this.emitNotification({
+        recipientRole: 'solicitante',
+        recipientUserId: integration.solicitadoPorRole === 'solicitante' ? integration.solicitadoPorId : undefined,
+        empresaId: integration.empresaId,
+        empresaNome: integration.empresaNome,
+        type: 'INTEGRACAO_ENVIADA',
+        severity: 'info',
+        title:
+          nextStatus === 'REENVIADA'
+            ? `INTEGRAÇÃO REENVIADA PARA ANÁLISE (${integration.codigoProtocolo})`
+            : `INTEGRAÇÃO RECEBIDA PARA ANÁLISE (${integration.codigoProtocolo})`,
+        message:
+          'Seu pacote documental completo foi enviado e recebido pela equipe de Administração EHS. Você será notificado assim que a análise for concluída.',
+        actionLabel: 'Visualizar integração',
+        actionTab: 'gestao_integracao',
+        integrationId: integration.id,
+        companyId: integration.empresaId,
+        createdById: actor.id,
+        createdByNome: actor.nome,
+        createdByRole: actor.role,
+        idempotencyKey: `integ-submit-sol-${integration.id}-v${submitVersion}`,
+        isDemo: integration.isDemo,
+        createdAt: now,
+      });
 
       return this.getIntegrationDetail(actor, integration.id);
     });
@@ -3726,6 +5847,74 @@ export class IntegrationWorkflowService {
         );
       }
 
+      if (item.officialRecordId && this.repo.updateExam) {
+        const allExams = await this.repo.listExams();
+        const existingExam = allExams.find((e) => e.id === item.officialRecordId);
+        if (existingExam) {
+          const nextVersao = (existingExam.versao || 1) + (existingExam.situacao === 'aprovado' ? 1 : 0);
+          const preservedHistory: DocumentVersion[] = [
+            ...(existingExam.historicoVersoes || [
+              {
+                versao: existingExam.versao || 1,
+                arquivoUrl: existingExam.anexoUrl || '',
+                arquivoNome: existingExam.anexoNome || 'versao-anterior',
+                dataEnvio: existingExam.createdAt || now,
+                responsavelEnvio: item.enviadoPorNome || integration.solicitadoPorNome,
+                situacao: existingExam.situacao,
+                analisadoPor: existingExam.analisadoPor,
+                dataAnalise: existingExam.dataAnalise,
+              },
+            ]),
+          ];
+          const lastIdx = preservedHistory.length - 1;
+          if (existingExam.situacao === 'pendente' && lastIdx >= 0) {
+            preservedHistory[lastIdx] = {
+              ...preservedHistory[lastIdx],
+              situacao: 'aprovado',
+              analisadoPor: actor.nome,
+              dataAnalise: now,
+            };
+          } else {
+            preservedHistory.push({
+              versao: nextVersao,
+              arquivoUrl: protectedFileRef || existingExam.anexoUrl || '',
+              arquivoNome: item.arquivoNome || existingExam.anexoNome || 'aso',
+              dataEnvio: item.dataEnvio || now,
+              responsavelEnvio: item.enviadoPorNome || integration.solicitadoPorNome,
+              situacao: 'aprovado',
+              analisadoPor: actor.nome,
+              dataAnalise: now,
+            });
+          }
+
+          await this.repo.updateExam(existingExam.id, {
+            tipoExame: item.nomeExibicao || existingExam.tipoExame,
+            tipoDocumentoCanonico: item.documentoCodigoCanonico || existingExam.tipoDocumentoCanonico || 'ASO',
+            aptidoesEspecificas:
+              aptidoesEspecificas.length > 0 ? aptidoesEspecificas : existingExam.aptidoesEspecificas || [],
+            dataRealizacao: dataEmissao || existingExam.dataRealizacao,
+            dataValidade: semValidade ? '' : dataValidade || existingExam.dataValidade,
+            semValidade,
+            conclusao: conclusaoAso,
+            anexoUrl: protectedFileRef || existingExam.anexoUrl,
+            anexoNome: item.arquivoNome || existingExam.anexoNome,
+            observacoes:
+              observacoes ||
+              existingExam.observacoes ||
+              `Aprovado via Central de Integração (${integration.codigoProtocolo}, v${item.versaoAtual}).`,
+            situacao: 'aprovado',
+            motivoReprovacao: '',
+            analisadoPor: actor.nome,
+            dataAnalise: now,
+            versao: nextVersao,
+            historicoVersoes: preservedHistory,
+            versaoPendente: null,
+            updatedAt: now,
+          });
+          return { officialCollection: 'exams', officialRecordId: existingExam.id };
+        }
+      }
+
       // Preserve prior ASO records in `exams` collection; create new approved record for this version
       const createdExam = await this.repo.createExam({
         tipoExame: item.nomeExibicao || 'ASO Periódico',
@@ -3752,6 +5941,19 @@ export class IntegrationWorkflowService {
         situacao: 'aprovado',
         analisadoPor: actor.nome,
         dataAnalise: now,
+        versao: 1,
+        historicoVersoes: [
+          {
+            versao: 1,
+            arquivoUrl: protectedFileRef,
+            arquivoNome: item.arquivoNome || '',
+            dataEnvio: item.dataEnvio || now,
+            responsavelEnvio: item.enviadoPorNome || integration.solicitadoPorNome,
+            situacao: 'aprovado',
+            analisadoPor: actor.nome,
+            dataAnalise: now,
+          },
+        ],
         createdAt: now,
         updatedAt: now,
       });
@@ -3766,6 +5968,72 @@ export class IntegrationWorkflowService {
           400,
           'EMPLOYEE_REQUIRED_FOR_TRAINING'
         );
+      }
+
+      if (item.officialRecordId && this.repo.updateTraining) {
+        const allTrainings = await this.repo.listTrainings();
+        const existingTraining = allTrainings.find((t) => t.id === item.officialRecordId);
+        if (existingTraining) {
+          const nextVersao =
+            (existingTraining.versao || 1) + (existingTraining.situacao === 'aprovado' ? 1 : 0);
+          const preservedHistory: DocumentVersion[] = [
+            ...(existingTraining.historicoVersoes || [
+              {
+                versao: existingTraining.versao || 1,
+                arquivoUrl: existingTraining.certificadoUrl || '',
+                arquivoNome: existingTraining.certificadoNome || 'versao-anterior',
+                dataEnvio: existingTraining.createdAt || now,
+                responsavelEnvio: item.enviadoPorNome || integration.solicitadoPorNome,
+                situacao: existingTraining.situacao,
+                analisadoPor: existingTraining.analisadoPor,
+                dataAnalise: existingTraining.dataAnalise,
+              },
+            ]),
+          ];
+          const lastIdx = preservedHistory.length - 1;
+          if (existingTraining.situacao === 'pendente' && lastIdx >= 0) {
+            preservedHistory[lastIdx] = {
+              ...preservedHistory[lastIdx],
+              situacao: 'aprovado',
+              analisadoPor: actor.nome,
+              dataAnalise: now,
+            };
+          } else {
+            preservedHistory.push({
+              versao: nextVersao,
+              arquivoUrl: protectedFileRef || existingTraining.certificadoUrl || '',
+              arquivoNome: item.arquivoNome || existingTraining.certificadoNome || 'certificado',
+              dataEnvio: item.dataEnvio || now,
+              responsavelEnvio: item.enviadoPorNome || integration.solicitadoPorNome,
+              situacao: 'aprovado',
+              analisadoPor: actor.nome,
+              dataAnalise: now,
+            });
+          }
+
+          await this.repo.updateTraining(existingTraining.id, {
+            nomeTreinamento: item.nomeExibicao || existingTraining.nomeTreinamento,
+            tipoDocumentoCanonico: item.documentoCodigoCanonico || existingTraining.tipoDocumentoCanonico,
+            dataRealizacao: dataEmissao || existingTraining.dataRealizacao,
+            dataValidade: semValidade ? '' : dataValidade || existingTraining.dataValidade,
+            semValidade,
+            certificadoUrl: protectedFileRef || existingTraining.certificadoUrl,
+            certificadoNome: item.arquivoNome || existingTraining.certificadoNome,
+            observacoes:
+              observacoes ||
+              existingTraining.observacoes ||
+              `Aprovado via Central de Integração (${integration.codigoProtocolo}, v${item.versaoAtual}).`,
+            situacao: 'aprovado',
+            motivoReprovacao: '',
+            analisadoPor: actor.nome,
+            dataAnalise: now,
+            versao: nextVersao,
+            historicoVersoes: preservedHistory,
+            versaoPendente: null,
+            updatedAt: now,
+          });
+          return { officialCollection: 'trainings', officialRecordId: existingTraining.id };
+        }
       }
 
       // Preserve prior Training records; create new approved record for this version
@@ -3787,6 +6055,19 @@ export class IntegrationWorkflowService {
         situacao: 'aprovado',
         analisadoPor: actor.nome,
         dataAnalise: now,
+        versao: 1,
+        historicoVersoes: [
+          {
+            versao: 1,
+            arquivoUrl: protectedFileRef,
+            arquivoNome: item.arquivoNome || '',
+            dataEnvio: item.dataEnvio || now,
+            responsavelEnvio: item.enviadoPorNome || integration.solicitadoPorNome,
+            situacao: 'aprovado',
+            analisadoPor: actor.nome,
+            dataAnalise: now,
+          },
+        ],
         createdAt: now,
         updatedAt: now,
       });
@@ -4050,6 +6331,26 @@ export class IntegrationWorkflowService {
         `Documento "${item.nomeExibicao}" do protocolo ${integration.codigoProtocolo} reprovado. Motivo: ${motivo}`
       );
 
+      await this.emitNotification({
+        recipientRole: 'solicitante',
+        recipientUserId: integration.solicitadoPorId,
+        empresaId: integration.empresaId,
+        empresaNome: integration.empresaNome,
+        type: 'DOCUMENTO_REJEITADO',
+        severity: 'warning',
+        title: `Documento rejeitado — ${item.nomeExibicao}`,
+        message: `O documento "${item.nomeExibicao}"${item.colaboradorNome ? ` (${item.colaboradorNome})` : ''} no protocolo ${integration.codigoProtocolo} foi reprovado pelo EHS. Motivo: ${motivo}`,
+        actionTab: 'gestao_integracao',
+        actionLabel: 'Corrigir documento',
+        integrationId: integration.id,
+        employeeId: item.colaboradorId,
+        documentId: item.id,
+        createdById: actor.id,
+        createdByNome: actor.nome,
+        createdByRole: actor.role,
+        idempotencyKey: `doc-rejeitado:${integration.id}:${item.id}:v${item.versaoAtual}:${integration.versaoConcorrencia + 1}`,
+      });
+
       return this.getIntegrationDetail(actor, integration.id);
     }
 
@@ -4220,6 +6521,28 @@ export class IntegrationWorkflowService {
       item.id,
       approvalDetailMsg
     );
+
+    if (officialCollection && officialRecordId && resolvedEmpresaId) {
+      await this.syncOfficialDocumentDecision({
+        colecao: officialCollection as 'documents' | 'exams' | 'trainings',
+        registroId: officialRecordId,
+        empresaId: resolvedEmpresaId,
+        colaboradorId: resolvedColaboradorId,
+        tipoDocumentoCanonico: item.documentoCodigoCanonico,
+        nomeDocumento: item.nomeExibicao,
+        decisao: 'aprovado',
+        arquivoUrl: item.storageKey ? `ehs-direct://${item.storageKey}` : undefined,
+        arquivoNome: item.arquivoNome,
+        dataEmissao: finalDataEmissao,
+        dataValidade: finalDataValidade,
+        semValidade: finalSemValidade,
+        conclusaoAso: finalConclusaoAso,
+        versao: item.versaoAtual,
+        analisadoPorId: actor.id,
+        analisadoPorNome: actor.nome,
+        dataAnalise: now,
+      });
+    }
 
     return this.getIntegrationDetail(actor, integration.id);
   }
@@ -4428,6 +6751,24 @@ export class IntegrationWorkflowService {
       `Protocolo ${integration.codigoProtocolo} devolvido para correção (${pendingCorrectionItems.length} pendência(s): ${exactDocsSummary}; ${approvedCount} aprovado(s) preservado(s)). Justificativa: ${justificativa}`
     );
 
+    await this.emitNotification({
+      recipientRole: 'solicitante',
+      recipientUserId: integration.solicitadoPorId,
+      empresaId: integration.empresaId,
+      empresaNome: integration.empresaNome,
+      type: 'INTEGRACAO_AGUARDANDO_COMPLEMENTACAO',
+      severity: 'warning',
+      title: `Integração aguardando complementação — ${integration.codigoProtocolo}`,
+      message: `${pendingCorrectionItems.length} documento(s) precisam de correção na integração ${integration.codigoProtocolo}. Orientação EHS: ${justificativa}`,
+      actionTab: 'gestao_integracao',
+      actionLabel: 'Complementar documentos',
+      integrationId: integration.id,
+      createdById: actor.id,
+      createdByNome: actor.nome,
+      createdByRole: actor.role,
+      idempotencyKey: `int-complementacao:${integration.id}:v${integration.versaoConcorrencia + 1}`,
+    });
+
     return this.getIntegrationDetail(actor, integration.id);
   }
 
@@ -4484,42 +6825,177 @@ export class IntegrationWorkflowService {
     }
 
     const mandatoryItems = items.filter((i) => i.obrigatorio);
-    const incompleteMandatory = mandatoryItems.filter((i) => i.status !== 'APROVADO');
-    if (incompleteMandatory.length > 0) {
+    const now = this.nowIso();
+
+    // Gate for ATIVIDADE SIMPLES: rejected or complementation-requested activities ALWAYS block final approval
+    const currentSimpleActivities = integration.atividadesSimples || [];
+    const rejectedOrPendingCompSimple = currentSimpleActivities.filter(
+      (sa) => sa.status === 'RECUSADA' || sa.status === 'COMPLEMENTACAO_SOLICITADA'
+    );
+    if (rejectedOrPendingCompSimple.length > 0) {
       throw new IntegrationWorkflowError(
-        `Aprovação final bloqueada (aprovação parcial não permitida): existem ${incompleteMandatory.length} documento(s) obrigatório(s) ainda não aprovado(s): ${incompleteMandatory
-          .map((i) => `${i.nomeExibicao} (${i.status})`)
+        `Aprovação final bloqueada: existem ${rejectedOrPendingCompSimple.length} Atividade(s) Simples recusada(s) ou aguardando complementação: ${rejectedOrPendingCompSimple
+          .map((sa) => `${sa.nome} (${sa.status})`)
           .join(', ')}.`,
         422,
-        'MANDATORY_ITEMS_INCOMPLETE',
+        'SIMPLE_ACTIVITY_NOT_APPROVED',
         {
-          pendingMandatoryItemIds: incompleteMandatory.map((i) => i.id),
-          pendingMandatoryNames: incompleteMandatory.map((i) => i.nomeExibicao),
+          blockingSimpleActivityIds: rejectedOrPendingCompSimple.map((sa) => sa.id),
         }
       );
     }
 
-    // Also block if any approved mandatory item is already expired
-    const now = this.nowIso();
-    const expiredMandatory = mandatoryItems.filter(
-      (i) => !i.semValidade && i.dataValidade && isIsoDateExpired(i.dataValidade, now)
-    );
-    if (expiredMandatory.length > 0) {
-      throw new IntegrationWorkflowError(
-        `Aprovação final bloqueada: documento(s) obrigatório(s) com validade expirada: ${expiredMandatory
-          .map((i) => `${i.nomeExibicao} (venceu em ${i.dataValidade})`)
-          .join(', ')}.`,
-        422,
-        'MANDATORY_ITEM_EXPIRED',
-        { expiredMandatoryItemIds: expiredMandatory.map((i) => i.id) }
+    let approvedSimpleActivitiesForSave: SimpleActivityEntry[] | undefined;
+
+    if (opts?.approveWholePackage) {
+      // Whole-package Admin approval: ensure every mandatory item has a valid uploaded file and is not rejected/expired
+      const blockingMissingOrRejected = mandatoryItems.filter(
+        (i) => i.status === 'PENDENTE_ENVIO' || i.status === 'REPROVADO' || i.versaoAtual < 1
       );
+      if (blockingMissingOrRejected.length > 0) {
+        throw new IntegrationWorkflowError(
+          `Aprovação do pacote bloqueada: existem ${blockingMissingOrRejected.length} documento(s) obrigatório(s) ausente(s) ou reprovado(s): ${blockingMissingOrRejected
+            .map((i) => `${i.nomeExibicao} (${i.status})`)
+            .join(', ')}.`,
+          422,
+          'MANDATORY_ITEMS_INCOMPLETE',
+          {
+            pendingMandatoryItemIds: blockingMissingOrRejected.map((i) => i.id),
+            pendingMandatoryNames: blockingMissingOrRejected.map((i) => i.nomeExibicao),
+          }
+        );
+      }
+
+      const expiredMandatory = mandatoryItems.filter(
+        (i) => !i.semValidade && i.dataValidade && isIsoDateExpired(i.dataValidade, now)
+      );
+      if (expiredMandatory.length > 0) {
+        throw new IntegrationWorkflowError(
+          `Aprovação final bloqueada: documento(s) obrigatório(s) com validade expirada: ${expiredMandatory
+            .map((i) => `${i.nomeExibicao} (venceu em ${i.dataValidade})`)
+            .join(', ')}.`,
+          422,
+          'MANDATORY_ITEM_EXPIRED',
+          { expiredMandatoryItemIds: expiredMandatory.map((i) => i.id) }
+        );
+      }
+
+      // Atomically approve any pending Simple Activities when Admin approves the whole package
+      if (currentSimpleActivities.some((sa) => sa.status === 'PENDENTE_ANALISE')) {
+        approvedSimpleActivitiesForSave = currentSimpleActivities.map((sa) =>
+          sa.status === 'PENDENTE_ANALISE'
+            ? {
+                ...sa,
+                status: 'APROVADA' as SimpleActivityStatus,
+                analisadoPorId: actor.id,
+                analisadoPorNome: actor.nome,
+                dataAnalise: now,
+                atualizadoEm: now,
+                historico: [
+                  ...(sa.historico || []),
+                  {
+                    dataHora: now,
+                    usuarioId: actor.id,
+                    usuarioNome: actor.nome,
+                    usuarioRole: actor.role,
+                    acao: 'APROVACAO_ATIVIDADE_SIMPLES' as const,
+                    statusAnterior: sa.status,
+                    statusNovo: 'APROVADA' as SimpleActivityStatus,
+                    detalhes: `Atividade Simples "${sa.nome}" aprovada em conjunto pelo Administrador EHS ${actor.nome} na aprovação final da integração.`,
+                  },
+                ],
+              }
+            : sa
+        );
+      }
+
+      // Atomically mark all uploaded items (ENVIADO / EM_ANALISE) as APROVADO as part of whole-package approval
+      for (const item of items) {
+        if ((item.status === 'ENVIADO' || item.status === 'EM_ANALISE') && item.versaoAtual > 0) {
+          const updatedVersions: IntegrationDocumentVersion[] = (item.versoes || []).map((v) =>
+            v.versao === item.versaoAtual
+              ? {
+                  ...v,
+                  status: 'APROVADO',
+                  analisadoPorId: actor.id,
+                  analisadoPorNome: actor.nome,
+                  dataAnalise: now,
+                  motivoReprovacao: '',
+                }
+              : v
+          );
+          await this.repo.updateItem(item.id, {
+            status: 'APROVADO',
+            analisadoPorId: actor.id,
+            analisadoPorNome: actor.nome,
+            dataAnalise: now,
+            motivoReprovacao: '',
+            versoes: updatedVersions,
+            updatedAt: now,
+          });
+          item.status = 'APROVADO';
+          item.analisadoPorId = actor.id;
+          item.analisadoPorNome = actor.nome;
+          item.dataAnalise = now;
+        }
+      }
+    } else {
+      const pendingSimpleActivities = currentSimpleActivities.filter(
+        (sa) => sa.status !== 'APROVADA'
+      );
+      if (pendingSimpleActivities.length > 0) {
+        throw new IntegrationWorkflowError(
+          `Aprovação final bloqueada: existem ${pendingSimpleActivities.length} Atividade(s) Simples aguardando aprovação explícita do Administrador EHS: ${pendingSimpleActivities
+            .map((sa) => `${sa.nome} (${sa.status})`)
+            .join(', ')}.`,
+          422,
+          'SIMPLE_ACTIVITY_PENDING_APPROVAL',
+          {
+            pendingSimpleActivityIds: pendingSimpleActivities.map((sa) => sa.id),
+          }
+        );
+      }
+
+      const incompleteMandatory = mandatoryItems.filter((i) => i.status !== 'APROVADO');
+      if (incompleteMandatory.length > 0) {
+        throw new IntegrationWorkflowError(
+          `Aprovação final bloqueada (aprovação parcial não permitida): existem ${incompleteMandatory.length} documento(s) obrigatório(s) ainda não aprovado(s): ${incompleteMandatory
+            .map((i) => `${i.nomeExibicao} (${i.status})`)
+            .join(', ')}.`,
+          422,
+          'MANDATORY_ITEMS_INCOMPLETE',
+          {
+            pendingMandatoryItemIds: incompleteMandatory.map((i) => i.id),
+            pendingMandatoryNames: incompleteMandatory.map((i) => i.nomeExibicao),
+          }
+        );
+      }
+
+      // Also block if any approved mandatory item is already expired
+      const expiredMandatory = mandatoryItems.filter(
+        (i) => !i.semValidade && i.dataValidade && isIsoDateExpired(i.dataValidade, now)
+      );
+      if (expiredMandatory.length > 0) {
+        throw new IntegrationWorkflowError(
+          `Aprovação final bloqueada: documento(s) obrigatório(s) com validade expirada: ${expiredMandatory
+            .map((i) => `${i.nomeExibicao} (venceu em ${i.dataValidade})`)
+            .join(', ')}.`,
+          422,
+          'MANDATORY_ITEM_EXPIRED',
+          { expiredMandatoryItemIds: expiredMandatory.map((i) => i.id) }
+        );
+      }
     }
 
     // Complete Officialization: only now that 100% of mandatory docs are approved & valid,
     // officialize new company/collaborators and publish all approved items into official SST collections.
     const approvedItemsToOfficialize = items.filter(
-      (i) => i.status === 'APROVADO' && !i.officialRecordId
+      (i) =>
+        i.status === 'APROVADO' &&
+        (!i.officialRecordId || i.situacaoDocumentoExistente === 'PENDENTE_APROVACAO')
     );
+    const newlyOfficializedEvents: OfficialDocumentReviewedEvent[] = [];
+
     for (const approvedItem of approvedItemsToOfficialize) {
       const currentInteg = (await this.repo.getIntegrationById(integration.id))!;
       const currentItem = (await this.repo.getItemById(approvedItem.id)) || approvedItem;
@@ -4557,8 +7033,39 @@ export class IntegrationWorkflowService {
         colaboradorNome: resolvedEntities.colaboradorNome,
         officialCollection: officialIntegration.officialCollection,
         officialRecordId: officialIntegration.officialRecordId,
+        situacaoDocumentoExistente: 'REAPROVEITADO_VALIDO',
         updatedAt: now,
       });
+
+      if (
+        officialIntegration.officialCollection === 'documents' ||
+        officialIntegration.officialCollection === 'exams' ||
+        officialIntegration.officialCollection === 'trainings'
+      ) {
+        newlyOfficializedEvents.push({
+          colecao: officialIntegration.officialCollection,
+          registroId: officialIntegration.officialRecordId,
+          empresaId: resolvedEntities.empresaId,
+          colaboradorId: resolvedEntities.colaboradorId,
+          tipoDocumentoCanonico: currentItem.documentoCodigoCanonico,
+          nomeDocumento: currentItem.nomeExibicao,
+          decisao: 'aprovado',
+          arquivoUrl: currentItem.storageKey ? `ehs-direct://${currentItem.storageKey}` : undefined,
+          arquivoNome: currentItem.arquivoNome,
+          dataEmissao: currentItem.dataEmissao || now.slice(0, 10),
+          dataValidade: currentItem.semValidade ? '' : currentItem.dataValidade || '',
+          semValidade: Boolean(currentItem.semValidade),
+          conclusaoAso: currentItem.conclusaoAso || 'apto',
+          versao: currentItem.versaoAtual || 1,
+          analisadoPorId: actor.id,
+          analisadoPorNome: actor.nome,
+          dataAnalise: now,
+        });
+      }
+    }
+
+    for (const ev of newlyOfficializedEvents) {
+      await this.syncOfficialDocumentDecision(ev);
     }
 
     // Ensure any candidate collaborator not yet linked via an approved employee item is also officialized on complete approval
@@ -4596,6 +7103,7 @@ export class IntegrationWorkflowService {
 
     await this.repo.updateIntegration(integration.id, {
       status: 'APROVADA',
+      ...(approvedSimpleActivitiesForSave ? { atividadesSimples: approvedSimpleActivitiesForSave } : {}),
       aprovadoPorId: actor.id,
       aprovadoPorNome: actor.nome,
       dataAprovacao: now,
@@ -4631,6 +7139,30 @@ export class IntegrationWorkflowService {
       `Protocolo ${integration.codigoProtocolo} (${finalIntegrationState.empresaNome}) APROVADO por ${actor.nome} com oficialização completa de ${approvedItemsToOfficialize.length} documento(s).`
     );
 
+    await this.emitNotification({
+      recipientRole: 'solicitante',
+      recipientUserId:
+        finalIntegrationState.solicitadoPorRole === 'solicitante'
+          ? finalIntegrationState.solicitadoPorId
+          : undefined,
+      empresaId: finalIntegrationState.empresaId,
+      empresaNome: finalIntegrationState.empresaNome,
+      type: 'INTEGRACAO_APROVADA',
+      severity: 'success',
+      title: `INTEGRAÇÃO APROVADA (${integration.codigoProtocolo})`,
+      message: `Sua integração da empresa ${finalIntegrationState.empresaNome} foi aprovada integralmente pelo Administrador EHS ${actor.nome}. Os cadastros e documentos foram oficializados com histórico preservado.`,
+      actionLabel: 'Visualizar integração',
+      actionTab: 'gestao_integracao',
+      integrationId: integration.id,
+      companyId: finalIntegrationState.empresaId,
+      createdById: actor.id,
+      createdByNome: actor.nome,
+      createdByRole: actor.role,
+      idempotencyKey: `integ-approved-${integration.id}-v${finalIntegrationState.versaoConcorrencia + 1}`,
+      isDemo: finalIntegrationState.isDemo,
+      createdAt: now,
+    });
+
       return this.getIntegrationDetail(actor, integration.id);
     });
   }
@@ -4663,8 +7195,50 @@ export class IntegrationWorkflowService {
     this.assertConcurrencyVersion(integration, opts?.expectedVersion);
 
     const items = await this.repo.listItemsByIntegration(integration.id);
-    const pendingCorrectionItems = this.buildPendingCorrectionItems(items);
     const now = this.nowIso();
+
+    // Optional targeted documents flagged by Admin for correction (preserves previous versions)
+    const targetedIds = new Set(
+      Array.isArray(opts?.rejectedItemIds)
+        ? opts.rejectedItemIds.map((id) => String(id).trim()).filter(Boolean)
+        : []
+    );
+    if (targetedIds.size > 0) {
+      for (const item of items) {
+        if (targetedIds.has(item.id)) {
+          const itemReason = (opts?.itemReasons?.[item.id] || '').trim() || justificativa;
+          const updatedVersions: IntegrationDocumentVersion[] = (item.versoes || []).map((v) =>
+            v.versao === item.versaoAtual
+              ? {
+                  ...v,
+                  status: 'REPROVADO',
+                  analisadoPorId: actor.id,
+                  analisadoPorNome: actor.nome,
+                  dataAnalise: now,
+                  motivoReprovacao: itemReason,
+                }
+              : v
+          );
+          await this.repo.updateItem(item.id, {
+            status: 'REPROVADO',
+            analisadoPorId: actor.id,
+            analisadoPorNome: actor.nome,
+            dataAnalise: now,
+            motivoReprovacao: itemReason,
+            versoes: updatedVersions,
+            updatedAt: now,
+          });
+          item.status = 'REPROVADO';
+          item.motivoReprovacao = itemReason;
+          item.analisadoPorId = actor.id;
+          item.analisadoPorNome = actor.nome;
+          item.dataAnalise = now;
+        }
+      }
+    }
+
+    const pendingCorrectionItems = this.buildPendingCorrectionItems(items);
+    const summary = computeSummaryCounts(items);
 
     await this.repo.updateIntegration(integration.id, {
       status: 'REPROVADA',
@@ -4673,6 +7247,7 @@ export class IntegrationWorkflowService {
       dataAnalise: now,
       motivoReprovacaoOuDevolucao: justificativa,
       itensPendentesCorrecao: pendingCorrectionItems,
+      resumoItens: summary,
       dataUltimaAtualizacao: now,
       updatedAt: now,
       versaoConcorrencia: integration.versaoConcorrencia + 1,
@@ -4688,7 +7263,7 @@ export class IntegrationWorkflowService {
           statusNovo: 'REPROVADA',
           detalhes:
             pendingCorrectionItems.length > 0
-              ? `Integração reprovada pelo Admin EHS ${actor.nome}. Documentos não conformes identificados: ${pendingCorrectionItems
+              ? `Integração reprovada pelo Admin EHS ${actor.nome}. Documentos apontados para correção: ${pendingCorrectionItems
                   .map((p) => `${p.documentoCodigoCanonico} (${p.nomeExibicao})`)
                   .join(', ')}.`
               : `Integração reprovada pelo Admin EHS ${actor.nome}.`,
@@ -4703,6 +7278,36 @@ export class IntegrationWorkflowService {
       integration.id,
       `Protocolo ${integration.codigoProtocolo} reprovado por ${actor.nome}. Justificativa: ${justificativa}`
     );
+
+    const flaggedListText =
+      pendingCorrectionItems.length > 0
+        ? ` Documentos apontados para correção: ${pendingCorrectionItems
+            .map((p) => p.nomeExibicao)
+            .slice(0, 6)
+            .join(', ')}.`
+        : '';
+
+    await this.emitNotification({
+      recipientRole: 'solicitante',
+      recipientUserId:
+        integration.solicitadoPorRole === 'solicitante' ? integration.solicitadoPorId : undefined,
+      empresaId: integration.empresaId,
+      empresaNome: integration.empresaNome,
+      type: 'INTEGRACAO_REPROVADA',
+      severity: 'critical',
+      title: `INTEGRAÇÃO REPROVADA (${integration.codigoProtocolo})`,
+      message: `A documentação enviada precisa de correções. Justificativa do Administrador EHS (${actor.nome}): ${justificativa}.${flaggedListText}`,
+      actionLabel: 'Visualizar integração',
+      actionTab: 'gestao_integracao',
+      integrationId: integration.id,
+      companyId: integration.empresaId,
+      createdById: actor.id,
+      createdByNome: actor.nome,
+      createdByRole: actor.role,
+      idempotencyKey: `integ-rejected-${integration.id}-v${integration.versaoConcorrencia + 1}`,
+      isDemo: integration.isDemo,
+      createdAt: now,
+    });
 
     return this.getIntegrationDetail(actor, integration.id);
   }
@@ -4724,6 +7329,9 @@ export class IntegrationWorkflowService {
     const now = this.nowIso();
     await this.repo.updateIntegration(integration.id, {
       status: 'ENCERRADA',
+      analisadoPorId: actor.id,
+      analisadoPorNome: actor.nome,
+      dataAnalise: now,
       dataUltimaAtualizacao: now,
       updatedAt: now,
       versaoConcorrencia: integration.versaoConcorrencia + 1,
@@ -4751,5 +7359,231 @@ export class IntegrationWorkflowService {
     );
 
     return this.getIntegrationDetail(actor, integration.id);
+  }
+
+  // --------------------------------------------------------------------------
+  // PROPAGATE OFFICIAL DOCUMENT APPROVAL / REJECTION TO ALL OPEN INTEGRATIONS
+  // --------------------------------------------------------------------------
+
+  async syncOfficialDocumentDecision(
+    event: OfficialDocumentReviewedEvent
+  ): Promise<{ updatedIntegrationIds: string[]; updatedItemIds: string[] }> {
+    const now = event.dataAnalise || event.analisadoEm || this.nowIso();
+    const reviewerId = event.analisadoPorId || event.actor?.id || 'admin-ehs';
+    const reviewerNome = event.analisadoPorNome || event.actor?.nome || 'Administrador EHS';
+    const closedStatuses = new Set<IntegrationWorkflowStatus>(['APROVADA', 'REPROVADA', 'ENCERRADA']);
+    const [allIntegrations, allItems, allEmployees] = await Promise.all([
+      this.repo.listIntegrations(),
+      this.repo.listAllItems(),
+      this.repo.listEmployees(),
+    ]);
+
+    const openIntegrations = allIntegrations.filter(
+      (integ) => integ.empresaId === event.empresaId && !closedStatuses.has(integ.status)
+    );
+    if (openIntegrations.length === 0) {
+      return { updatedIntegrationIds: [], updatedItemIds: [] };
+    }
+
+    const eventColabId = (event.colaboradorId || '').trim();
+    const eventEmp = eventColabId
+      ? allEmployees.find((e) => e.id === eventColabId && e.empresaId === event.empresaId)
+      : undefined;
+    const eventEmpCpfDigits = eventEmp ? digitsOnly(eventEmp.cpf) : '';
+
+    // Verify stored binary when approving
+    let verifiedStorage: {
+      storageKey: string;
+      arquivoMimeType: 'application/pdf' | 'image/jpeg' | 'image/png';
+      arquivoTamanhoBytes: number;
+      arquivoHashSha256: string;
+    } | null = null;
+
+    if (event.decisao === 'aprovado') {
+      const expired =
+        !event.semValidade && Boolean(event.dataValidade) && isIsoDateExpired(event.dataValidade, now);
+      if (expired) {
+        return { updatedIntegrationIds: [], updatedItemIds: [] };
+      }
+      const resolvedKey = this.resolveStorageKeyFromOfficialUrl(event.arquivoUrl, allItems).storageKey;
+      if (resolvedKey) {
+        try {
+          const stored = await this.fileStorage.getObject(resolvedKey);
+          if (stored && stored.buffer && stored.buffer.length > 0) {
+            verifiedStorage = {
+              storageKey: resolvedKey,
+              arquivoMimeType:
+                detectRealMimeFromBuffer(stored.buffer) || 'application/pdf',
+              arquivoTamanhoBytes: stored.buffer.length,
+              arquivoHashSha256: computeBufferSha256(stored.buffer),
+            };
+          }
+        } catch {
+          verifiedStorage = null;
+        }
+      }
+    }
+
+    const updatedIntegrationIds: string[] = [];
+    const updatedItemIds: string[] = [];
+
+    for (const integ of openIntegrations) {
+      const integItems = allItems.filter((it) => it.integrationId === integ.id);
+      let integChanged = false;
+
+      for (const item of integItems) {
+        const directLinkMatch =
+          item.officialRecordId === event.registroId ||
+          item.documentoExistenteId === event.registroId;
+
+        let scopeAndTypeMatch = false;
+        if (!directLinkMatch && item.origemColecao === event.colecao) {
+          const isCompanyEvent = eventColabId === '';
+          if (isCompanyEvent && item.categoria === 'empresa') {
+            scopeAndTypeMatch = this.doesCanonicalOrTitleMatchRequirement({
+              recordCanonical: event.tipoDocumentoCanonico,
+              recordTitle: event.nomeDocumento,
+              reqCanonical: item.documentoCodigoCanonico,
+              reqKeywords: [item.nomeExibicao],
+            });
+          } else if (!isCompanyEvent && item.categoria === 'colaborador') {
+            const itemCpfDigits = digitsOnly(item.colaboradorCpf);
+            const exactEmployeeMatch =
+              item.colaboradorId === eventColabId ||
+              (eventEmpCpfDigits.length === 11 && itemCpfDigits === eventEmpCpfDigits);
+            if (exactEmployeeMatch) {
+              scopeAndTypeMatch = this.doesCanonicalOrTitleMatchRequirement({
+                recordCanonical: event.tipoDocumentoCanonico,
+                recordTitle: event.nomeDocumento,
+                reqCanonical: item.documentoCodigoCanonico,
+                reqKeywords: [item.nomeExibicao],
+              });
+            }
+          }
+        }
+
+        if (!directLinkMatch && !scopeAndTypeMatch) continue;
+
+        if (event.decisao === 'aprovado') {
+          if (!verifiedStorage) continue;
+          if (
+            event.colecao === 'exams' &&
+            item.exigeAptoASO &&
+            event.conclusaoAso &&
+            event.conclusaoAso !== 'apto'
+          ) {
+            continue;
+          }
+          // Skip if already identically approved & pointing to same version + storageKey
+          if (
+            item.status === 'APROVADO' &&
+            item.officialRecordId === event.registroId &&
+            item.storageKey === verifiedStorage.storageKey &&
+            item.dataValidade === (event.semValidade ? '' : event.dataValidade || '')
+          ) {
+            continue;
+          }
+
+          const nextVersion = Math.max(item.versaoAtual || 0, event.versao || 1, 1);
+          const nextVersions: IntegrationDocumentVersion[] = [
+            ...(item.versoes || []).filter((v) => v.versao !== nextVersion),
+            {
+              versao: nextVersion,
+              arquivoNome: event.arquivoNome || item.arquivoNome || `${item.nomeExibicao}.pdf`,
+              arquivoMimeType: verifiedStorage.arquivoMimeType,
+              arquivoTamanhoBytes: verifiedStorage.arquivoTamanhoBytes,
+              arquivoHashSha256: verifiedStorage.arquivoHashSha256,
+              storageKey: verifiedStorage.storageKey,
+              hasStoredFile: true,
+              enviadoPorId: reviewerId,
+              enviadoPorNome: 'Base Oficial EHS (Sincronizado)',
+              enviadoEm: now,
+              dataEmissao: event.dataEmissao || item.dataEmissao,
+              dataValidade: event.semValidade ? '' : event.dataValidade || '',
+              semValidade: Boolean(event.semValidade),
+              conclusaoAso: event.conclusaoAso || item.conclusaoAso,
+              status: 'APROVADO',
+              analisadoPorId: reviewerId,
+              analisadoPorNome: reviewerNome,
+              analisadoEm: now,
+            },
+          ];
+
+          const reuseSource: IntegrationDocumentReuseSource = {
+            colecao: event.colecao,
+            registroId: event.registroId,
+            versao: nextVersion,
+            aprovadoPor: reviewerNome,
+            dataAprovacao: now,
+            dataValidade: event.semValidade ? '' : event.dataValidade || '',
+            semValidade: Boolean(event.semValidade),
+            storageKey: verifiedStorage.storageKey,
+            arquivoNome: event.arquivoNome || item.arquivoNome,
+          };
+
+          await this.repo.updateItem(item.id, {
+            status: 'APROVADO',
+            reaproveitado: true,
+            reaproveitadoDe: reuseSource,
+            situacaoDocumentoExistente: 'REAPROVEITADO_VALIDO',
+            documentoExistenteAviso: `Documento aprovado pelo Admin EHS ${reviewerNome} e atualizado automaticamente nesta integração.`,
+            documentoExistenteId: event.registroId,
+            documentoExistenteColecao: event.colecao,
+            officialCollection: event.colecao,
+            officialRecordId: event.registroId,
+            storageKey: verifiedStorage.storageKey,
+            hasStoredFile: true,
+            arquivoNome: event.arquivoNome || item.arquivoNome,
+            arquivoMimeType: verifiedStorage.arquivoMimeType,
+            arquivoTamanhoBytes: verifiedStorage.arquivoTamanhoBytes,
+            arquivoHashSha256: verifiedStorage.arquivoHashSha256,
+            dataEmissao: event.dataEmissao || item.dataEmissao,
+            dataValidade: event.semValidade ? '' : event.dataValidade || '',
+            semValidade: Boolean(event.semValidade),
+            conclusaoAso: event.conclusaoAso || item.conclusaoAso,
+            versaoAtual: nextVersion,
+            versoes: nextVersions,
+            analisadoPorId: reviewerId,
+            analisadoPorNome: reviewerNome,
+            dataAnalise: now,
+            motivoReprovacao: '',
+            updatedAt: now,
+          });
+          updatedItemIds.push(item.id);
+          integChanged = true;
+        } else if (event.decisao === 'reprovado') {
+          if (item.status === 'APROVADO') continue;
+          const motivo = event.motivo || 'Documento recusado pelo Administrador EHS.';
+          await this.repo.updateItem(item.id, {
+            status: 'REPROVADO',
+            reaproveitado: false,
+            situacaoDocumentoExistente: 'RECUSADO',
+            documentoExistenteAviso: `Documento recusado pelo Admin EHS (${motivo}). Anexe uma versão corrigida.`,
+            documentoExistenteId: event.registroId,
+            documentoExistenteColecao: event.colecao,
+            analisadoPorId: reviewerId,
+            analisadoPorNome: reviewerNome,
+            dataAnalise: now,
+            motivoReprovacao: motivo,
+            updatedAt: now,
+          });
+          updatedItemIds.push(item.id);
+          integChanged = true;
+        }
+      }
+
+      if (integChanged) {
+        const refreshedItems = await this.repo.listItemsByIntegration(integ.id);
+        const summary = computeSummaryCounts(refreshedItems);
+        await this.repo.updateIntegration(integ.id, {
+          resumoItens: summary,
+          dataUltimaAtualizacao: now,
+          updatedAt: now,
+        });
+        updatedIntegrationIds.push(integ.id);
+      }
+    }
+
+    return { updatedIntegrationIds, updatedItemIds };
   }
 }

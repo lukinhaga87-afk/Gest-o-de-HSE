@@ -7,6 +7,9 @@ import {
 } from '../types/sst';
 import { isMasterAdminIdentifier } from '../utils/cryptoAuth';
 
+export const DEMO_COMPANY_ID = 'demo-empresa-ficticia';
+export const DEMO_COMPANY_NAME = 'Construtora Exemplo Demo Ltda (Fictícia)';
+
 interface AuthContextType {
   user: User | null;
   profile: UserProfile | null;
@@ -15,7 +18,10 @@ interface AuthContextType {
   activeRole: UserRole;
   activeEmpresaId: string | null;
   activeEmpresaNome: string | null;
+  authorizedEmpresaIds: string[];
+  syncProfileLocally: (updatedProfile: UserProfile) => void;
   isSimulatingRole: boolean;
+  isDemoMode: boolean;
   loginWithCredentials: (cpfOrIdentifier: string, password: string) => Promise<{ success: boolean; message?: string }>;
   changeOwnPassword: (
     newPassword: string,
@@ -546,15 +552,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSimulatedEmpresaNome(null);
   };
 
+  const syncProfileLocally = (updatedProfile: UserProfile) => {
+    const safeUser = stripSensitiveProfileFields(updatedProfile);
+    setProfile(safeUser);
+    safeStorageSet(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(safeUser));
+  };
+
+  const isSimulatingRole = profile?.role === 'admin' && !!simulatedRole;
+  const isDemoMode = isSimulatingRole && simulatedRole === 'solicitante';
   const activeRole: UserRole =
     profile?.role === 'admin' && simulatedRole ? simulatedRole : profile?.role || 'auditor';
+  const authorizedEmpresaIds: string[] = React.useMemo(() => {
+    if (profile?.role === 'admin' && simulatedRole === 'solicitante') {
+      return [simulatedEmpresaId || DEMO_COMPANY_ID];
+    }
+    const set = new Set<string>();
+    if (Array.isArray(profile?.empresaIds)) {
+      for (const id of profile.empresaIds) {
+        if (typeof id === 'string' && id.trim()) set.add(id.trim());
+      }
+    }
+    if (profile?.empresaId && profile.empresaId.trim()) {
+      set.add(profile.empresaId.trim());
+    }
+    return Array.from(set);
+  }, [profile?.role, profile?.empresaId, profile?.empresaIds, simulatedRole, simulatedEmpresaId]);
+
   const activeEmpresaId: string | null =
     profile?.role === 'admin' && simulatedRole === 'solicitante'
-      ? simulatedEmpresaId || profile?.empresaId || null
-      : profile?.empresaId || null;
+      ? simulatedEmpresaId || DEMO_COMPANY_ID
+      : profile?.empresaId || authorizedEmpresaIds[0] || null;
   const activeEmpresaNome: string | null =
     profile?.role === 'admin' && simulatedRole === 'solicitante'
-      ? simulatedEmpresaNome || profile?.empresaNome || 'Construtora Alvorada Ltda'
+      ? simulatedEmpresaNome || DEMO_COMPANY_NAME
       : profile?.empresaNome || null;
 
   const isAdmin = activeRole === 'admin';
@@ -604,10 +634,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const authorizedFetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const token: string | null = apiToken || safeStorageGet(LOCAL_STORAGE_API_TOKEN_KEY);
 
+    const isFormDataBody = typeof FormData !== 'undefined' && init.body instanceof FormData;
+
     const buildHeaders = (tok: string | null): HeadersInit => {
-      const base: Record<string, string> = { 'Content-Type': 'application/json' };
+      const base: Record<string, string> = isFormDataBody
+        ? {}
+        : { 'Content-Type': 'application/json' };
       if (init.headers && !(init.headers instanceof Headers) && !Array.isArray(init.headers)) {
         Object.assign(base, init.headers);
+      }
+      if (isFormDataBody) {
+        delete base['Content-Type'];
+        delete base['content-type'];
       }
       if (tok) {
         base.Authorization = `Bearer ${tok}`;
@@ -632,7 +670,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeRole,
         activeEmpresaId,
         activeEmpresaNome,
-        isSimulatingRole: profile?.role === 'admin' && !!simulatedRole,
+        authorizedEmpresaIds,
+        syncProfileLocally,
+        isSimulatingRole,
+        isDemoMode,
         loginWithCredentials,
         changeOwnPassword,
         adminChangeUserPassword,

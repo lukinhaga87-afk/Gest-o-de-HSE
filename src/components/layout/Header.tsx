@@ -13,7 +13,7 @@ import {
   CheckCircle2,
   AlertCircle,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth, DEMO_COMPANY_ID, DEMO_COMPANY_NAME } from '../../context/AuthContext';
 import { useSST } from '../../context/SSTContext';
 import { UserRole } from '../../types/sst';
 import { formatCPF } from '../../utils/trafficLight';
@@ -21,6 +21,7 @@ import { formatCPF } from '../../utils/trafficLight';
 interface HeaderProps {
   onToggleSidebar: () => void;
   onOpenAlertsModal?: () => void;
+  onOpenNotificationsDrawer?: () => void;
   isPasswordModalOpen?: boolean;
   onOpenPasswordModal?: () => void;
   onClosePasswordModal?: () => void;
@@ -29,6 +30,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   onToggleSidebar,
   onOpenAlertsModal,
+  onOpenNotificationsDrawer,
   isPasswordModalOpen: controlledPasswordModalOpen,
   onOpenPasswordModal,
   onClosePasswordModal,
@@ -37,6 +39,7 @@ export const Header: React.FC<HeaderProps> = ({
     profile,
     activeRole,
     isSimulatingRole,
+    isDemoMode,
     logout,
     setSimulatedRole,
     resetSimulatedRole,
@@ -45,7 +48,7 @@ export const Header: React.FC<HeaderProps> = ({
     changeOwnPassword,
   } = useAuth();
 
-  const { companies, contractorIntegrationItems } = useSST();
+  const { contractorIntegrationItems, unreadNotificationsCount } = useSST();
 
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
@@ -193,8 +196,7 @@ export const Header: React.FC<HeaderProps> = ({
 
                   <button
                     onClick={() => {
-                      const firstComp = companies[0];
-                      setSimulatedRole('solicitante', firstComp?.id, firstComp?.razaoSocial);
+                      setSimulatedRole('solicitante', DEMO_COMPANY_ID, DEMO_COMPANY_NAME);
                       setRoleMenuOpen(false);
                     }}
                     className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between ${
@@ -206,8 +208,10 @@ export const Header: React.FC<HeaderProps> = ({
                     <div className="flex items-center gap-2">
                       <Building size={14} className="text-amber-400" />
                       <div>
-                        <p className="font-medium">SOLICITANTE / CONTRATADA</p>
-                        <p className="text-[10px] text-slate-400">Restrito à própria empresa</p>
+                        <p className="font-medium">MODO DEMO — SOLICITANTE</p>
+                        <p className="text-[10px] text-slate-400">
+                          Empresa fictícia isolada (não afeta dados reais)
+                        </p>
                       </div>
                     </div>
                   </button>
@@ -257,18 +261,46 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
-        {/* Notifications / Pending indicator */}
+        {/* Pending analysis quick pill for Admin */}
         {totalPending > 0 && isAdmin && (
           <button
             type="button"
             onClick={() => onOpenAlertsModal?.()}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-medium cursor-pointer transition-colors"
+            className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-medium cursor-pointer transition-colors"
             title={`${totalPending} documento(s) aguardando análise EHS`}
           >
-            <Bell size={14} className="animate-pulse text-amber-400" />
-            <span className="hidden sm:inline font-bold">{totalPending} em Análise</span>
-            <span className="sm:hidden font-bold">{totalPending}</span>
+            <span className="font-bold">{totalPending} em Análise</span>
           </button>
+        )}
+
+        {/* Central de Notificações (Visível para Administrador EHS e Solicitante) */}
+        <button
+          type="button"
+          onClick={() => onOpenNotificationsDrawer?.()}
+          className={`relative flex items-center justify-center h-9 w-9 rounded-lg border transition-colors cursor-pointer ${
+            unreadNotificationsCount > 0
+              ? 'bg-blue-600/15 border-blue-500/40 text-blue-300 hover:bg-blue-600/25'
+              : 'bg-slate-800/80 border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800'
+          }`}
+          title={
+            unreadNotificationsCount > 0
+              ? `${unreadNotificationsCount} notificação(ões) não lida(s)`
+              : 'Central de Notificações'
+          }
+          aria-label="Abrir Central de Notificações"
+        >
+          <Bell size={16} className={unreadNotificationsCount > 0 ? 'text-blue-400' : ''} />
+          {unreadNotificationsCount > 0 && (
+            <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center border-2 border-slate-900">
+              {unreadNotificationsCount > 99 ? '99+' : unreadNotificationsCount}
+            </span>
+          )}
+        </button>
+
+        {isDemoMode && (
+          <span className="hidden lg:inline-flex items-center px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-bold text-amber-300">
+            DEMO
+          </span>
         )}
 
         {/* User Auth Info / Profile & Logout */}

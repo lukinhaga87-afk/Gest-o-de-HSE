@@ -36,10 +36,13 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
   const {
     employees,
     companies,
+    authorizedCompanies,
+    effectiveAuthorizedEmpresaIds,
     documents,
     exams,
     trainings,
     activityProfiles,
+    contractorIntegrations,
     addEmployee,
     updateEmployee,
     deleteEmployee,
@@ -104,7 +107,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
   const filteredEmployees = useMemo(() => {
     let list = employees;
     if (isSolicitante) {
-      list = activeEmpresaId ? list.filter((e) => e.empresaId === activeEmpresaId) : [];
+      const allowedSet = new Set(effectiveAuthorizedEmpresaIds);
+      list = list.filter((e) => allowedSet.has(e.empresaId));
     }
     if (companyFilter !== 'todos') {
       list = list.filter((e) => e.empresaId === companyFilter);
@@ -125,16 +129,17 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
       );
     }
     return list;
-  }, [employees, isSolicitante, activeEmpresaId, companyFilter, statusFilter, searchTerm]);
+  }, [employees, isSolicitante, effectiveAuthorizedEmpresaIds, companyFilter, statusFilter, searchTerm]);
 
   const docCountByEmployee = useMemo(() => {
-    const map = new Map<string, { total: number; pending: number; rejected: number }>();
+    const map = new Map<string, { total: number; approved: number; pending: number; rejected: number }>();
     const bump = (empId: string | undefined, situacao: string) => {
       if (!empId) return;
-      const cur = map.get(empId) || { total: 0, pending: 0, rejected: 0 };
+      const cur = map.get(empId) || { total: 0, approved: 0, pending: 0, rejected: 0 };
       cur.total += 1;
-      if (situacao === 'pendente') cur.pending += 1;
-      if (situacao === 'reprovado') cur.rejected += 1;
+      if (situacao === 'aprovado') cur.approved += 1;
+      else if (situacao === 'pendente') cur.pending += 1;
+      else if (situacao === 'reprovado') cur.rejected += 1;
       map.set(empId, cur);
     };
     documents.forEach((d) => bump(d.colaboradorId, d.situacao));
@@ -143,13 +148,65 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
     return map;
   }, [documents, exams, trainings]);
 
+  const integrationStatusByEmployee = useMemo(() => {
+    const map = new Map<string, { label: string; toneClass: string }>();
+    for (const emp of employees) {
+      const normCpf = emp.cpf.replace(/\D/g, '');
+      const related = contractorIntegrations.filter(
+        (integ) =>
+          (integ.colaboradorIds || []).includes(emp.id) ||
+          (integ.colaboradoresCandidatos || []).some(
+            (nc) =>
+              nc.aprovadoEmployeeId === emp.id ||
+              nc.colaboradorId === emp.id ||
+              (normCpf && nc.cpf && nc.cpf.replace(/\D/g, '') === normCpf)
+          )
+      );
+      if (related.length === 0) {
+        map.set(emp.id, {
+          label: 'Sem Integração',
+          toneClass: 'bg-slate-800 text-slate-400 border border-slate-700',
+        });
+        continue;
+      }
+      if (related.some((r) => r.status === 'APROVADA')) {
+        map.set(emp.id, {
+          label: 'Integrado',
+          toneClass: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30',
+        });
+      } else if (related.some((r) => r.status === 'REPROVADA' || r.status === 'PENDENTE_CORRECAO')) {
+        map.set(emp.id, {
+          label: 'Correção Necessária',
+          toneClass: 'bg-rose-500/15 text-rose-300 border border-rose-500/30',
+        });
+      } else if (related.some((r) => r.status === 'AGUARDANDO_ANALISE' || r.status === 'EM_ANALISE')) {
+        map.set(emp.id, {
+          label: 'Em Análise EHS',
+          toneClass: 'bg-sky-500/15 text-sky-300 border border-sky-500/30',
+        });
+      } else {
+        map.set(emp.id, {
+          label: 'Rascunho / Pendente',
+          toneClass: 'bg-amber-500/15 text-amber-300 border border-amber-500/30',
+        });
+      }
+    }
+    return map;
+  }, [employees, contractorIntegrations]);
+
   const handleOpenAddModal = () => {
     setFeedback(null);
     setEditingEmployee(null);
+    const selectableCompanies = isSolicitante ? authorizedCompanies : companies;
     const defaultEmp =
-      isSolicitante && activeEmpresaId
-        ? companies.find((c) => c.id === activeEmpresaId)
-        : companies.find((c) => c.situacao === 'ativa') || companies[0];
+      (isSolicitante && companyFilter !== 'todos'
+        ? selectableCompanies.find((c) => c.id === companyFilter)
+        : undefined) ||
+      (isSolicitante && activeEmpresaId
+        ? selectableCompanies.find((c) => c.id === activeEmpresaId)
+        : undefined) ||
+      selectableCompanies.find((c) => c.situacao === 'ativa') ||
+      selectableCompanies[0];
 
     setFormData({
       empresaId: defaultEmp?.id || '',
@@ -248,14 +305,17 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
     }
 
     try {
-      const targetEmpresaId =
-        isSolicitante && activeEmpresaId ? activeEmpresaId : formData.empresaId;
+      const targetEmpresaId = isSolicitante
+        ? effectiveAuthorizedEmpresaIds.includes(formData.empresaId)
+          ? formData.empresaId
+          : effectiveAuthorizedEmpresaIds[0] || ''
+        : formData.empresaId;
       const selectedComp = companies.find((c) => c.id === targetEmpresaId);
       if (!selectedComp) {
         setFeedback({
           type: 'error',
           message:
-            'Vincule obrigatoriamente o colaborador terceirizado a uma empresa contratada cadastrada.',
+            'Vincule obrigatoriamente o colaborador terceirizado a uma empresa contratada cadastrada e autorizada.',
         });
         return;
       }
@@ -341,7 +401,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
           </p>
         </div>
 
-        {(isAdmin || (isSolicitante && Boolean(activeEmpresaId))) && (
+        {(isAdmin || (isSolicitante && effectiveAuthorizedEmpresaIds.length > 0)) && (
           <button
             type="button"
             onClick={handleOpenAddModal}
@@ -386,14 +446,16 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {!isSolicitante && (
+          {(!isSolicitante || authorizedCompanies.length > 1) && (
             <select
               value={companyFilter}
               onChange={(e) => setCompanyFilter(e.target.value)}
-              className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500 max-w-[200px]"
+              className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500 max-w-[220px]"
             >
-              <option value="todos">Todas as Empresas</option>
-              {companies.map((c) => (
+              <option value="todos">
+                {isSolicitante ? 'Todas as Minhas Empresas' : 'Todas as Empresas'}
+              </option>
+              {(isSolicitante ? authorizedCompanies : companies).map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.nomeFantasia || c.razaoSocial}
                 </option>
@@ -433,8 +495,10 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
                   <th className="py-3 px-4">Colaborador</th>
                   <th className="py-3 px-4">CPF / Matrícula</th>
                   <th className="py-3 px-4">Cargo / Setor</th>
-                  {!isSolicitante && <th className="py-3 px-4">Empresa</th>}
-                  <th className="py-3 px-4">Situação</th>
+                  {(!isSolicitante || authorizedCompanies.length > 1) && (
+                    <th className="py-3 px-4">Empresa</th>
+                  )}
+                  <th className="py-3 px-4">Situação / Integração</th>
                   <th className="py-3 px-4">Documentação</th>
                   <th className="py-3 px-4 text-right">Ações</th>
                 </tr>
@@ -443,10 +507,16 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
                 {filteredEmployees.map((emp) => {
                   const counts = docCountByEmployee.get(emp.id) || {
                     total: 0,
+                    approved: 0,
                     pending: 0,
                     rejected: 0,
                   };
-                  const canEditOwn = isSolicitante && activeEmpresaId === emp.empresaId;
+                  const integStatus = integrationStatusByEmployee.get(emp.id) || {
+                    label: 'Sem Integração',
+                    toneClass: 'bg-slate-800 text-slate-400 border border-slate-700',
+                  };
+                  const canEditOwn =
+                    isSolicitante && effectiveAuthorizedEmpresaIds.includes(emp.empresaId);
 
                   return (
                     <tr
@@ -492,31 +562,36 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
                         <div className="text-[11px] text-slate-400">{emp.setor || '—'}</div>
                       </td>
 
-                      {!isSolicitante && (
+                      {(!isSolicitante || authorizedCompanies.length > 1) && (
                         <td className="py-3 px-4 text-slate-300 max-w-[180px] truncate">
                           {emp.empresaNome}
                         </td>
                       )}
 
                       <td className="py-3 px-4 whitespace-nowrap">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                            emp.situacaoCadastral === 'ativo'
-                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                              : emp.situacaoCadastral === 'ferias'
-                              ? 'bg-blue-500/10 text-blue-300 border border-blue-500/20'
-                              : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
-                          }`}
-                        >
-                          {emp.situacaoCadastral}
-                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              emp.situacaoCadastral === 'ativo'
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : emp.situacaoCadastral === 'ferias'
+                                ? 'bg-blue-500/10 text-blue-300 border border-blue-500/20'
+                                : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                            }`}
+                          >
+                            {emp.situacaoCadastral}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${integStatus.toneClass}`}>
+                            {integStatus.label}
+                          </span>
+                        </div>
                       </td>
 
                       <td className="py-3 px-4 whitespace-nowrap">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span className="inline-flex items-center gap-1 text-slate-300 tabular-nums">
                             <FileText size={13} className="text-slate-400" />
-                            {counts.total} doc(s)
+                            {counts.approved}/{counts.total} aprov.
                           </span>
                           {counts.pending > 0 && (
                             <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[10px] font-bold">
@@ -717,13 +792,12 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
                   <label className="block text-xs font-medium text-slate-300 mb-1">
                     Empresa Contratada <span className="text-red-400">*</span>
                   </label>
-                  {isSolicitante ? (
+                  {isSolicitante && authorizedCompanies.length <= 1 ? (
                     <div className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Building2 size={15} className="text-blue-400 shrink-0" />
                         <span className="font-semibold text-white">
-                          {companies.find((c) => c.id === (activeEmpresaId || formData.empresaId))
-                            ?.razaoSocial ||
+                          {authorizedCompanies[0]?.razaoSocial ||
                             formData.empresaNome ||
                             'Sua Empresa'}
                         </span>
@@ -737,7 +811,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
                       required
                       value={formData.empresaId}
                       onChange={(e) => {
-                        const sel = companies.find((c) => c.id === e.target.value);
+                        const pool = isSolicitante ? authorizedCompanies : companies;
+                        const sel = pool.find((c) => c.id === e.target.value);
                         setFormData({
                           ...formData,
                           empresaId: e.target.value,
@@ -748,7 +823,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({ initialEmployeeId 
                       className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                     >
                       <option value="">Selecione a empresa vinculada...</option>
-                      {companies.map((c) => (
+                      {(isSolicitante ? authorizedCompanies : companies).map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.razaoSocial} (CNPJ: {c.cnpj})
                         </option>

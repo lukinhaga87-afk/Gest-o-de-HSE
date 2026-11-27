@@ -15,8 +15,9 @@ import { ExpirationsControlView } from './components/views/ExpirationsControlVie
 import { AdminExpirationsControlView } from './components/views/AdminExpirationsControlView';
 import { ActivityMatrixView } from './components/views/ActivityMatrixView';
 import { UsersPermissionsView } from './components/views/UsersPermissionsView';
+import { NotificationCenterDrawer } from './components/notifications/NotificationCenterDrawer';
 import { formatCPF } from './utils/trafficLight';
-import { Shield, Loader2, X, KeyRound, User, Building2 } from 'lucide-react';
+import { Shield, Loader2, X, KeyRound, User, Building2, FlaskConical, RotateCcw } from 'lucide-react';
 
 const SOLICITANTE_ALLOWED_TABS: NavItemKey[] = [
   'painel_contratada',
@@ -57,6 +58,9 @@ const MainAppShell: React.FC = () => {
     isSolicitante,
     isAdmin,
     isAuditor,
+    isDemoMode,
+    activeEmpresaNome,
+    resetSimulatedRole,
   } = useAuth();
   const { loading: sstLoading } = useSST();
 
@@ -69,6 +73,7 @@ const MainAppShell: React.FC = () => {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isUserProfileOpen, setIsUserProfileOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
 
   // Reset landing tab and transient UI state whenever authenticated user changes or logs out
   useEffect(() => {
@@ -144,7 +149,7 @@ const MainAppShell: React.FC = () => {
         case 'painel_contratada':
           return <ContractorPanelView onNavigate={handleNavigate} />;
         case 'empresas':
-          return <CompaniesView initialCompanyId={targetCompanyId} />;
+          return <CompaniesView initialCompanyId={targetCompanyId} onNavigate={handleNavigate} />;
         case 'colaboradores':
           return <EmployeesView initialEmployeeId={targetEmployeeId} />;
         case 'envio_documentos':
@@ -152,6 +157,7 @@ const MainAppShell: React.FC = () => {
             <CentralIntegracaoView
               initialSection="nova"
               initialIntegrationId={targetIntegrationId}
+              initialCompanyId={targetCompanyId}
             />
           );
         case 'gestao_integracao':
@@ -159,6 +165,7 @@ const MainAppShell: React.FC = () => {
             <CentralIntegracaoView
               initialSection="acompanhamento"
               initialIntegrationId={targetIntegrationId}
+              initialCompanyId={targetCompanyId}
             />
           );
         case 'pendencias_vencimentos':
@@ -173,7 +180,7 @@ const MainAppShell: React.FC = () => {
       case 'dashboard':
         return <DashboardView onNavigate={handleNavigate} />;
       case 'empresas':
-        return <CompaniesView initialCompanyId={targetCompanyId} />;
+        return <CompaniesView initialCompanyId={targetCompanyId} onNavigate={handleNavigate} />;
       case 'colaboradores':
         return <EmployeesView initialEmployeeId={targetEmployeeId} />;
       case 'gestao_integracoes':
@@ -208,10 +215,31 @@ const MainAppShell: React.FC = () => {
           onOpenAlertsModal={() =>
             handleNavigate(isSolicitante ? 'pendencias_vencimentos' : 'analise_documental')
           }
+          onOpenNotificationsDrawer={() => setIsNotificationsOpen(true)}
           isPasswordModalOpen={isPasswordModalOpen}
           onOpenPasswordModal={() => setIsPasswordModalOpen(true)}
           onClosePasswordModal={() => setIsPasswordModalOpen(false)}
         />
+
+        {isDemoMode && (
+          <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-500/15 border-b border-amber-500/40 px-4 py-2 text-xs text-amber-200">
+            <div className="flex items-center gap-2 font-semibold">
+              <FlaskConical size={15} className="text-amber-400 shrink-0" />
+              <span>MODO DE DEMONSTRAÇÃO — DADOS FICTÍCIOS</span>
+              <span className="hidden sm:inline font-normal text-amber-300/80">
+                ({activeEmpresaNome || 'Empresa Fictícia Isolada'} — ambiente isolado sem impacto em empresas reais)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={resetSimulatedRole}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 px-2.5 py-1 text-[11px] font-bold text-amber-100 transition-colors cursor-pointer"
+            >
+              <RotateCcw size={12} />
+              Voltar para Administrador EHS
+            </button>
+          </div>
+        )}
 
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 custom-scrollbar">
           {sstLoading ? (
@@ -226,6 +254,12 @@ const MainAppShell: React.FC = () => {
           )}
         </main>
       </div>
+
+      <NotificationCenterDrawer
+        isOpen={isNotificationsOpen}
+        onClose={() => setIsNotificationsOpen(false)}
+        onNavigate={handleNavigate}
+      />
 
       {/* User Profile Summary Modal */}
       {isUserProfileOpen && profile && (

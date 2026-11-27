@@ -28,12 +28,17 @@ import { formatCNPJ, formatDateBR, getTrafficLightStatus } from '../../utils/tra
 import { evaluateActivityCompliance } from '../../utils/activityComplianceEngine';
 import { ComplianceChecklistPanel } from './ComplianceChecklistPanel';
 import { ProtectedDocumentButton } from '../common/ProtectedDocumentButton';
+import type { NavItemKey } from '../layout/Sidebar';
 
 interface CompaniesViewProps {
   initialCompanyId?: string | null;
+  onNavigate?: (
+    tab: NavItemKey,
+    opts?: { integrationId?: string; companyId?: string; employeeId?: string }
+  ) => void;
 }
 
-const MAX_DIRECT_FILE_BYTES = 700 * 1024; // 700KB safe Firestore inline limit
+const MAX_DIRECT_FILE_BYTES = 4 * 1024 * 1024; // 4 MB verified private backend storage
 
 const CHANGE_FIELD_LABELS: Record<keyof CompanyEditableFields, string> = {
   razaoSocial: 'Razão Social',
@@ -84,9 +89,14 @@ function formatFieldValue(key: keyof CompanyEditableFields, value: unknown): str
   return value ? String(value) : '—';
 }
 
-export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }) => {
+export const CompaniesView: React.FC<CompaniesViewProps> = ({
+  initialCompanyId,
+  onNavigate,
+}) => {
   const {
     companies,
+    authorizedCompanies,
+    effectiveAuthorizedEmpresaIds,
     employees,
     documents,
     trainings,
@@ -97,24 +107,32 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
     activityDocumentRequirements,
     smartDocs,
     auditLogs,
+    userProfiles,
     addCompany,
     updateCompany,
+    updateCompanySolicitanteLinks,
     deleteCompany,
     requestCompanyChange,
     approveCompanyChange,
     rejectCompanyChange,
+    uploadDirectDocument,
     addDocument,
     updateDocument,
     approveDocument,
     rejectDocument,
   } = useSST();
-  const { isAdmin, isSolicitante, activeEmpresaId, profile } = useAuth();
+  const { isAdmin, isSolicitante, profile } = useAuth();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'todos' | 'ativa' | 'inativa'>('todos');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCompany, setEditingCompany] = useState<Company | null>(null);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
+  const [activeSolicitanteCompanyId, setActiveSolicitanteCompanyId] = useState<string | null>(
+    initialCompanyId || null
+  );
+  const [linkedSolicitanteDraft, setLinkedSolicitanteDraft] = useState<string[]>([]);
+  const [savingLinks, setSavingLinks] = useState(false);
   const [detailTab, setDetailTab] = useState<
     'dados' | 'documentos' | 'alteracoes' | 'conformidade' | 'historico'
   >('dados');
@@ -135,6 +153,7 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
   const [docForm, setDocForm] = useState({
     nomeDocumento: '',
     categoria: COMPANY_DOC_CATEGORIES[0],
+    tipoDocumentoCanonico: '',
     numeroDocumento: '',
     dataEmissao: new Date().toISOString().slice(0, 10),
     dataValidade: '',
@@ -143,6 +162,7 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
     arquivoNome: '',
     arquivoUrl: '',
   });
+  const [selectedDocFile, setSelectedDocFile] = useState<File | null>(null);
   const [submittingDoc, setSubmittingDoc] = useState(false);
 
   // Admin: Reject justification modal (for Company Document OR Company Change Request)
@@ -154,18 +174,47 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
   const [rejectReason, setRejectReason] = useState('');
   const [submittingDecision, setSubmittingDecision] = useState(false);
 
-  // Auto-open dossier when navigated with initialCompanyId
+  // Auto-open dossier or select active company when navigated with initialCompanyId
   useEffect(() => {
     if (initialCompanyId && companies.some((c) => c.id === initialCompanyId)) {
-      setSelectedCompanyId(initialCompanyId);
-      setDetailTab('dados');
+      if (isSolicitante) {
+        setActiveSolicitanteCompanyId(initialCompanyId);
+      } else {
+        setSelectedCompanyId(initialCompanyId);
+        setDetailTab('dados');
+      }
     }
-  }, [initialCompanyId, companies]);
+  }, [initialCompanyId, companies, isSolicitante]);
 
   const selectedCompanyDetail = useMemo(
     () => (selectedCompanyId ? companies.find((c) => c.id === selectedCompanyId) || null : null),
     [companies, selectedCompanyId]
   );
+
+  const solicitanteUsers = useMemo(
+    () =>
+      userProfiles
+        .filter((u) => u.role === 'solicitante')
+        .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')),
+    [userProfiles]
+  );
+
+  useEffect(() => {
+    if (!selectedCompanyDetail) {
+      setLinkedSolicitanteDraft([]);
+      return;
+    }
+    const linked = new Set<string>(selectedCompanyDetail.solicitantesAutorizadosIds || []);
+    for (const u of solicitanteUsers) {
+      if (
+        u.empresaId === selectedCompanyDetail.id ||
+        (Array.isArray(u.empresaIds) && u.empresaIds.includes(selectedCompanyDetail.id))
+      ) {
+        linked.add(u.id);
+      }
+    }
+    setLinkedSolicitanteDraft(Array.from(linked));
+  }, [selectedCompanyDetail, solicitanteUsers]);
 
   // Form states (Admin create/edit or Solicitante initial registration)
   const [formData, setFormData] = useState<Omit<Company, 'id'>>({
@@ -236,10 +285,7 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
   ]);
 
   const filteredCompanies = useMemo(() => {
-    let list = companies;
-    if (isSolicitante) {
-      list = activeEmpresaId ? list.filter((c) => c.id === activeEmpresaId) : [];
-    }
+    let list = isSolicitante ? authorizedCompanies : companies;
     if (statusFilter !== 'todos') {
       list = list.filter((c) => c.situacao === statusFilter);
     }
@@ -254,7 +300,7 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
       );
     }
     return list;
-  }, [companies, isSolicitante, activeEmpresaId, statusFilter, searchTerm]);
+  }, [companies, authorizedCompanies, isSolicitante, statusFilter, searchTerm]);
 
   const handleOpenAddModal = () => {
     setFeedback(null);
@@ -372,14 +418,21 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
     }
   };
 
-  const handleOpenUploadDocModal = (comp: Company, existingDoc?: DocumentSST) => {
+  const handleOpenUploadDocModal = (
+    comp: Company,
+    existingDoc?: DocumentSST,
+    preset?: { nomeDocumento?: string; categoria?: string; tipoDocumentoCanonico?: string }
+  ) => {
     setFeedback(null);
     setUploadCompany(comp);
+    setSelectedDocFile(null);
     if (existingDoc) {
       setResubmitDoc(existingDoc);
       setDocForm({
         nomeDocumento: existingDoc.nomeDocumento,
         categoria: existingDoc.categoria || COMPANY_DOC_CATEGORIES[0],
+        tipoDocumentoCanonico:
+          existingDoc.tipoDocumentoCanonico || preset?.tipoDocumentoCanonico || '',
         numeroDocumento: existingDoc.numeroDocumento || '',
         dataEmissao: existingDoc.dataEmissao || new Date().toISOString().slice(0, 10),
         dataValidade: existingDoc.semValidade ? '' : existingDoc.dataValidade || '',
@@ -391,8 +444,9 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
     } else {
       setResubmitDoc(null);
       setDocForm({
-        nomeDocumento: '',
-        categoria: COMPANY_DOC_CATEGORIES[0],
+        nomeDocumento: preset?.nomeDocumento || '',
+        categoria: preset?.categoria || COMPANY_DOC_CATEGORIES[0],
+        tipoDocumentoCanonico: preset?.tipoDocumentoCanonico || '',
         numeroDocumento: '',
         dataEmissao: new Date().toISOString().slice(0, 10),
         dataValidade: '',
@@ -410,22 +464,15 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
     if (file.size > MAX_DIRECT_FILE_BYTES) {
       setFeedback({
         type: 'error',
-        message:
-          'O arquivo excede o limite de 700 KB para envio direto no cadastro. Comprima o PDF/imagem ou utilize a Gestão de Integração (até 4 MB).',
+        message: 'O arquivo excede o limite de 4 MB permitido para armazenamento seguro (PDF, JPG ou PNG).',
       });
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      if (ev.target?.result) {
-        setDocForm((prev) => ({
-          ...prev,
-          arquivoNome: file.name,
-          arquivoUrl: String(ev.target?.result),
-        }));
-      }
-    };
-    reader.readAsDataURL(file);
+    setSelectedDocFile(file);
+    setDocForm((prev) => ({
+      ...prev,
+      arquivoNome: file.name,
+    }));
   };
 
   const handleSubmitCompanyDoc = async (e: React.FormEvent) => {
@@ -446,6 +493,36 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
     setSubmittingDoc(true);
     setFeedback(null);
     try {
+      if (selectedDocFile) {
+        const res = await uploadDirectDocument({
+          kind: 'documento',
+          recordId: resubmitDoc?.id,
+          empresaId: uploadCompany.id,
+          nomeDocumento: docForm.nomeDocumento.trim(),
+          categoria: docForm.categoria,
+          tipoDocumentoCanonico: docForm.tipoDocumentoCanonico || undefined,
+          numeroDocumento: docForm.numeroDocumento.trim(),
+          dataEmissao: docForm.dataEmissao,
+          dataValidade: docForm.semValidade ? '' : docForm.dataValidade,
+          semValidade: docForm.semValidade,
+          observacoes: docForm.observacoes.trim(),
+          arquivoNome: selectedDocFile.name || docForm.arquivoNome || `${docForm.nomeDocumento.trim()}.pdf`,
+          file: selectedDocFile,
+        });
+        setFeedback({
+          type: 'success',
+          message: isAdmin
+            ? `Documento "${docForm.nomeDocumento}" armazenado com verificação de integridade (v${res.versao}) e aprovado na base oficial.`
+            : resubmitDoc?.situacao === 'aprovado'
+            ? `Nova versão (v${res.versao}) de "${docForm.nomeDocumento}" enviada para análise do EHS. A versão aprovada anterior permanece válida até aprovação.`
+            : `Documento "${docForm.nomeDocumento}" armazenado com verificação de integridade (v${res.versao}) e enviado para análise do Administrador EHS.`,
+        });
+        setUploadCompany(null);
+        setResubmitDoc(null);
+        setSelectedDocFile(null);
+        return;
+      }
+
       if (resubmitDoc) {
         await updateDocument(resubmitDoc.id, {
           nomeDocumento: docForm.nomeDocumento.trim(),
@@ -608,8 +685,16 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
         await updateCompany(editingCompany.id, payload);
         setFeedback({ type: 'success', message: `Empresa "${payload.razaoSocial}" atualizada.` });
       } else {
-        await addCompany(payload);
-        setFeedback({ type: 'success', message: `Empresa "${payload.razaoSocial}" cadastrada.` });
+        const createdId = await addCompany(payload);
+        if (isSolicitante) {
+          setActiveSolicitanteCompanyId(createdId);
+        }
+        setFeedback({
+          type: 'success',
+          message: isSolicitante
+            ? `Empresa "${payload.razaoSocial}" cadastrada e vinculada automaticamente ao seu perfil em Minhas Empresas.`
+            : `Empresa "${payload.razaoSocial}" cadastrada.`,
+        });
       }
       setIsModalOpen(false);
     } catch (err: any) {
@@ -618,6 +703,26 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
         type: 'error',
         message: err?.message || 'Erro ao salvar os dados da empresa.',
       });
+    }
+  };
+
+  const handleSaveCompanyLinks = async () => {
+    if (!isAdmin || !selectedCompanyDetail) return;
+    setSavingLinks(true);
+    setFeedback(null);
+    try {
+      await updateCompanySolicitanteLinks(selectedCompanyDetail.id, linkedSolicitanteDraft);
+      setFeedback({
+        type: 'success',
+        message: `Vínculos de solicitantes atualizados para "${selectedCompanyDetail.razaoSocial}" (${linkedSolicitanteDraft.length} autorizado(s)).`,
+      });
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err?.message || 'Não foi possível salvar os vínculos de solicitantes.',
+      });
+    } finally {
+      setSavingLinks(false);
     }
   };
 
@@ -689,7 +794,29 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
     return companyComplianceMap.get(selectedCompanyDetail.id) || null;
   }, [selectedCompanyDetail, companyComplianceMap]);
 
-  const myCompany = isSolicitante ? filteredCompanies[0] || null : null;
+  const myCompany = isSolicitante
+    ? filteredCompanies.find((c) => c.id === activeSolicitanteCompanyId) ||
+      filteredCompanies[0] ||
+      null
+    : null;
+
+  const corporateMatrixRequirements = useMemo(() => {
+    if (!myCompany) return [];
+    const authorizedActs = myCompany.atividadesAutorizadasIds || [];
+    const allCorpReqs = activityDocumentRequirements.filter(
+      (req) => req.ativo && req.escopo === 'empresa'
+    );
+    const scoped =
+      authorizedActs.length > 0
+        ? allCorpReqs.filter((r) => authorizedActs.includes(r.activityId))
+        : allCorpReqs;
+    const dedup = new Map<string, typeof allCorpReqs[number]>();
+    for (const r of scoped.length > 0 ? scoped : allCorpReqs) {
+      const key = (r.documentoCodigoCanonico || r.nomeExibicao).trim().toLowerCase();
+      if (!dedup.has(key)) dedup.set(key, r);
+    }
+    return Array.from(dedup.values());
+  }, [myCompany, activityDocumentRequirements]);
 
   return (
     <div className="space-y-6">
@@ -698,18 +825,28 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Building2 className="text-blue-500" />
-            {isSolicitante ? 'Minha Empresa' : 'Empresas Contratadas'}
+            {isSolicitante ? 'Minhas Empresas' : 'Empresas Contratadas'}
           </h2>
           <p className="text-xs text-slate-400 mt-1">
             {isSolicitante
-              ? 'Consulte seus dados cadastrais, envie documentos empresariais diretamente e solicite alterações cadastrais ao Administrador EHS.'
-              : 'Visualização em lista de empresas contratadas. Selecione uma empresa para abrir o cadastro, dossiê documental, solicitações de alteração e histórico.'}
+              ? 'Gerencie suas empresas vinculadas, envie documentos empresariais da Matriz EHS diretamente nesta tela e inicie integrações com dados reaproveitados automaticamente.'
+              : 'Visualização em lista de empresas contratadas. Selecione uma empresa para abrir o cadastro, dossiê documental, vínculos de solicitantes, solicitações de alteração e histórico.'}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {isSolicitante && myCompany && (
             <>
+              {onNavigate && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate('envio_documentos', { companyId: myCompany.id })}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/20 transition-all"
+                >
+                  <ShieldCheck size={15} />
+                  Iniciar Integração
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => handleOpenUploadDocModal(myCompany)}
@@ -729,14 +866,18 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
             </>
           )}
 
-          {(isAdmin || (isSolicitante && filteredCompanies.length === 0)) && (
+          {(isAdmin || isSolicitante) && (
             <button
               type="button"
               onClick={handleOpenAddModal}
               className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all"
             >
               <Plus size={16} />
-              {isSolicitante ? 'Cadastrar Minha Empresa' : 'Adicionar Empresa Contratada'}
+              {isSolicitante
+                ? filteredCompanies.length === 0
+                  ? 'Cadastrar Minha Empresa'
+                  : 'Cadastrar Nova Empresa'
+                : 'Adicionar Empresa Contratada'}
             </button>
           )}
         </div>
@@ -790,9 +931,46 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
         </div>
       )}
 
-      {/* SOLICITANTE: Dedicated Minha Empresa Summary + Direct Documents & Change Requests */}
+      {/* SOLICITANTE: Multi-Company Selector + Selected Company Summary + Inline EHS Matrix Docs */}
       {isSolicitante && myCompany ? (
         <div className="space-y-6">
+          {filteredCompanies.length > 1 && (
+            <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-white">
+                  Empresas Vinculadas ao Seu Perfil ({filteredCompanies.length})
+                </span>
+                <span className="text-[11px] text-slate-400">
+                  Selecione uma empresa para gerenciar seus documentos ou iniciar integração
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {filteredCompanies.map((comp) => {
+                  const isSelected = comp.id === myCompany.id;
+                  return (
+                    <button
+                      key={comp.id}
+                      type="button"
+                      onClick={() => setActiveSolicitanteCompanyId(comp.id)}
+                      className={`px-3.5 py-2 rounded-xl border text-left transition-all ${
+                        isSelected
+                          ? 'bg-blue-600/20 border-blue-500 text-white shadow-sm'
+                          : 'bg-slate-950/70 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <span className="text-xs font-bold block">
+                        {comp.nomeFantasia || comp.razaoSocial}
+                      </span>
+                      <span className="text-[10px] font-mono text-slate-400">
+                        {formatCNPJ(comp.cnpj)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-5 space-y-4">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
               <div className="flex items-center gap-3">
@@ -876,7 +1054,7 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                   Documentos da Empresa
                 </h3>
                 <p className="text-[11px] text-slate-400 mt-0.5">
-                  Envie e acompanhe documentos empresariais diretamente aqui. O retorno de aprovação ou recusa do Administrador EHS aparece em tempo real.
+                  Envie cada documento uma única vez — após aprovação do Administrador EHS, ele será reaproveitado automaticamente em todas as integrações, sem novo upload.
                 </p>
               </div>
               <button
@@ -888,6 +1066,115 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                 Enviar Documento
               </button>
             </div>
+
+            {/* Inline EHS Matrix Corporate Checklist directly inside Minhas Empresas */}
+            {corporateMatrixRequirements.length > 0 && (
+              <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/40 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-blue-300 flex items-center gap-1.5">
+                    <Layers size={13} />
+                    Checklist Documental da Empresa (Matriz EHS)
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    Arquivos PDF/JPG/PNG até 4 MB • Aprovação exclusiva pelo Administrador EHS
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                  {corporateMatrixRequirements.map((req) => {
+                    const reqKey = (req.documentoCodigoCanonico || req.nomeExibicao).toLowerCase();
+                    const matchedDoc = documents
+                      .filter((d) => d.empresaId === myCompany.id && !d.colaboradorId)
+                      .sort((a, b) =>
+                        (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '')
+                      )
+                      .find(
+                        (d) =>
+                          (d.tipoDocumentoCanonico || '').toLowerCase() === reqKey ||
+                          d.nomeDocumento.toLowerCase().includes(req.nomeExibicao.toLowerCase()) ||
+                          req.nomeExibicao.toLowerCase().includes(d.nomeDocumento.toLowerCase())
+                      );
+                    const statusLabel = !matchedDoc
+                      ? 'Pendente de envio'
+                      : matchedDoc.situacao === 'aprovado'
+                      ? 'Aprovado (Base Oficial)'
+                      : matchedDoc.situacao === 'reprovado'
+                      ? 'Recusado — Corrigir'
+                      : 'Enviado — Aguardando Análise';
+                    const statusBadge = !matchedDoc
+                      ? 'bg-slate-800 text-slate-300 border-slate-700'
+                      : matchedDoc.situacao === 'aprovado'
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      : matchedDoc.situacao === 'reprovado'
+                      ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                      : 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+
+                    return (
+                      <div
+                        key={req.id}
+                        className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2.5"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-xs font-semibold text-white truncate">
+                              {req.nomeExibicao}
+                            </span>
+                            {req.obrigatorioParaLiberacao && (
+                              <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+                                Obrigatório
+                              </span>
+                            )}
+                          </div>
+                          <span
+                            className={`inline-block mt-1 px-2 py-0.5 rounded text-[10px] font-bold border ${statusBadge}`}
+                          >
+                            {statusLabel}
+                          </span>
+                          {matchedDoc?.motivoReprovacao && (
+                            <p className="text-[10px] text-rose-300 mt-1 line-clamp-2">
+                              Motivo: {matchedDoc.motivoReprovacao}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {matchedDoc?.arquivoUrl && (
+                            <ProtectedDocumentButton
+                              url={matchedDoc.arquivoUrl}
+                              fileName={matchedDoc.arquivoNome || matchedDoc.nomeDocumento}
+                              title={`Visualizar ${matchedDoc.nomeDocumento}`}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-blue-300"
+                            />
+                          )}
+                          {(!matchedDoc || matchedDoc.situacao === 'reprovado') && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleOpenUploadDocModal(
+                                  myCompany,
+                                  matchedDoc?.situacao === 'reprovado' ? matchedDoc : undefined,
+                                  {
+                                    nomeDocumento: req.nomeExibicao,
+                                    categoria: COMPANY_DOC_CATEGORIES[0],
+                                    tipoDocumentoCanonico: req.documentoCodigoCanonico,
+                                  }
+                                )
+                              }
+                              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-white ${
+                                matchedDoc?.situacao === 'reprovado'
+                                  ? 'bg-amber-600 hover:bg-amber-500'
+                                  : 'bg-blue-600 hover:bg-blue-500'
+                              }`}
+                            >
+                              <Upload size={12} />
+                              {matchedDoc?.situacao === 'reprovado' ? 'Substituir' : 'Enviar'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {(() => {
               const myCompanyDocs = documents
@@ -919,6 +1206,9 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                             <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">
                               {doc.categoria}
                             </span>
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 font-mono text-[10px]">
+                              v{doc.versao || 1}
+                            </span>
                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${farol.badgeClass}`}>
                               {doc.situacao === 'pendente'
                                 ? 'Aguardando Avaliação EHS'
@@ -926,11 +1216,24 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                                 ? 'Recusado — Reenvio Necessário'
                                 : farol.label}
                             </span>
+                            {doc.versaoPendente && (
+                              <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
+                                Atualização v{doc.versaoPendente.versao} em análise
+                              </span>
+                            )}
                           </div>
                           <p className="text-[11px] text-slate-400">
                             Validade: {doc.semValidade ? 'Sem vencimento' : formatDateBR(doc.dataValidade)}
                             {doc.analisadoPor ? ` · Avaliado por ${doc.analisadoPor} em ${formatDateTimeBR(doc.dataAnalise)}` : ''}
+                            {doc.situacao === 'aprovado' && farol.status !== 'vermelho'
+                              ? ' · Reaproveitado automaticamente nas integrações'
+                              : ''}
                           </p>
+                          {doc.versaoPendente && (
+                            <p className="text-[11px] text-amber-200 bg-amber-500/10 border border-amber-500/25 rounded px-2.5 py-1 mt-1">
+                              Nova versão v{doc.versaoPendente.versao} ({doc.versaoPendente.arquivoNome}) aguardando aprovação do EHS. A versão aprovada atual permanece válida até aprovação.
+                            </p>
+                          )}
                           {doc.motivoReprovacao && (
                             <p className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded px-2.5 py-1.5 mt-1">
                               <strong>Motivo da recusa:</strong> {doc.motivoReprovacao}
@@ -948,7 +1251,7 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 font-medium"
                             />
                           )}
-                          {doc.situacao === 'reprovado' && (
+                          {doc.situacao === 'reprovado' ? (
                             <button
                               type="button"
                               onClick={() => handleOpenUploadDocModal(myCompany, doc)}
@@ -956,6 +1259,16 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                             >
                               <RefreshCw size={12} />
                               Corrigir e Reenviar
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenUploadDocModal(myCompany, doc)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold"
+                              title="Enviar nova versão deste documento sem invalidar a versão aprovada vigente"
+                            >
+                              <RefreshCw size={12} />
+                              Atualizar Versão
                             </button>
                           )}
                         </div>
@@ -1631,7 +1944,11 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
               <div>
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <Upload size={18} className="text-blue-400" />
-                  {resubmitDoc ? 'Corrigir e Reenviar Documento' : 'Enviar Documento da Empresa'}
+                  {resubmitDoc
+                    ? resubmitDoc.situacao === 'aprovado'
+                      ? 'Atualizar Versão do Documento'
+                      : 'Corrigir e Reenviar Documento'
+                    : 'Enviar Documento da Empresa'}
                 </h3>
                 <p className="text-[11px] text-slate-400 mt-0.5">{uploadCompany.razaoSocial}</p>
               </div>
@@ -1646,6 +1963,12 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                 <X size={18} />
               </button>
             </div>
+
+            {resubmitDoc?.situacao === 'aprovado' && isSolicitante && (
+              <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-200">
+                A versão aprovada vigente (v{resubmitDoc.versao || 1}) continuará válida e reaproveitada nas integrações até que o Administrador EHS aprove a nova versão enviada.
+              </div>
+            )}
 
             <div className="space-y-3 text-xs">
               <div>
@@ -1730,7 +2053,7 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
 
               <div>
                 <label className="block font-medium text-slate-300 mb-1">
-                  Anexo (PDF, JPG ou PNG — até 700 KB)
+                  Anexo (PDF, JPG ou PNG — até 4 MB)
                 </label>
                 <input
                   type="file"
@@ -1813,7 +2136,8 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {isSolicitante && activeEmpresaId === selectedCompanyDetail.id && (
+                {isSolicitante &&
+                  effectiveAuthorizedEmpresaIds.includes(selectedCompanyDetail.id) && (
                   <button
                     type="button"
                     onClick={() => handleOpenChangeRequestModal(selectedCompanyDetail)}
@@ -1923,6 +2247,72 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                       <span className="text-slate-200">{selectedCompanyDetail.endereco || '—'}</span>
                     </div>
                   </div>
+
+                  {/* Admin EHS: Manage Authorized Solicitantes Links for this Company */}
+                  {isAdmin && (
+                    <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <Users size={14} className="text-blue-400" />
+                            Solicitantes Autorizados para esta Empresa ({linkedSolicitanteDraft.length})
+                          </h4>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            Um solicitante pode gerenciar múltiplas empresas e uma empresa pode ter múltiplos solicitantes autorizados.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={savingLinks}
+                          onClick={handleSaveCompanyLinks}
+                          className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-xs font-semibold"
+                        >
+                          {savingLinks ? 'Salvando...' : 'Salvar Vínculos'}
+                        </button>
+                      </div>
+
+                      {solicitanteUsers.length === 0 ? (
+                        <p className="text-[11px] text-slate-400">
+                          Nenhum usuário com perfil Solicitante ativo cadastrado.
+                        </p>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {solicitanteUsers.map((u) => {
+                            const checked = linkedSolicitanteDraft.includes(u.id);
+                            return (
+                              <label
+                                key={u.id}
+                                className={`flex items-center gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                                  checked
+                                    ? 'bg-blue-500/15 border-blue-500/40 text-white'
+                                    : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() =>
+                                    setLinkedSolicitanteDraft((prev) =>
+                                      prev.includes(u.id)
+                                        ? prev.filter((id) => id !== u.id)
+                                        : [...prev, u.id]
+                                    )
+                                  }
+                                  className="rounded bg-slate-950 border-slate-700 text-blue-600"
+                                />
+                                <div className="min-w-0">
+                                  <span className="text-xs font-semibold block truncate">{u.nome}</span>
+                                  <span className="text-[10px] text-slate-400 truncate block">
+                                    {u.email}
+                                  </span>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1932,7 +2322,9 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                     <p className="text-slate-400">
                       Documentos vinculados à empresa, com abertura de arquivo e decisão de aprovação/recusa do Administrador EHS.
                     </p>
-                    {(isAdmin || (isSolicitante && activeEmpresaId === selectedCompanyDetail.id)) && (
+                    {(isAdmin ||
+                      (isSolicitante &&
+                        effectiveAuthorizedEmpresaIds.includes(selectedCompanyDetail.id))) && (
                       <button
                         type="button"
                         onClick={() => handleOpenUploadDocModal(selectedCompanyDetail)}
@@ -2058,7 +2450,8 @@ export const CompaniesView: React.FC<CompaniesViewProps> = ({ initialCompanyId }
                     <p className="text-slate-400">
                       Solicitações de alteração cadastral enviadas pela contratada para validação do Administrador EHS.
                     </p>
-                    {isSolicitante && activeEmpresaId === selectedCompanyDetail.id && (
+                    {isSolicitante &&
+                      effectiveAuthorizedEmpresaIds.includes(selectedCompanyDetail.id) && (
                       <button
                         type="button"
                         onClick={() => handleOpenChangeRequestModal(selectedCompanyDetail)}

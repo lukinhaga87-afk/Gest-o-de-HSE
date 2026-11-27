@@ -187,10 +187,20 @@ const EMPTY_REQUIREMENT_FORM: RequirementFormState = {
   ativo: true,
 };
 
+const SIMPLE_ACTIVITY_CATEGORY_ID = '__ATIVIDADE_SIMPLES__';
+
+const SIMPLE_STATUS_LABEL: Record<string, { label: string; textClass: string }> = {
+  PENDENTE_ANALISE: { label: 'Pendente de Análise EHS', textClass: 'text-amber-400' },
+  APROVADA: { label: 'Aprovada', textClass: 'text-emerald-400' },
+  RECUSADA: { label: 'Recusada', textClass: 'text-rose-400' },
+  COMPLEMENTACAO_SOLICITADA: { label: 'Complementação Solicitada', textClass: 'text-orange-400' },
+};
+
 export const ActivityMatrixView: React.FC = () => {
   const {
     activityProfiles,
     activityDocumentRequirements,
+    contractorIntegrations,
     addActivityProfile,
     updateActivityProfile,
     deactivateActivityProfile,
@@ -300,9 +310,45 @@ export const ActivityMatrixView: React.FC = () => {
     return list;
   }, [activityProfiles, activityStatusFilter, searchTerm]);
 
+  // Registered Simple Activities aggregated from integrations for Matrix visibility
+  const registeredSimpleActivities = useMemo(() => {
+    const entries: Array<{
+      id: string;
+      nome: string;
+      descricaoServico: string;
+      observacoes?: string;
+      status: string;
+      empresaNome: string;
+      codigoProtocolo: string;
+      criadoPorNome: string;
+      criadoEm: string;
+      analisadoPorNome?: string;
+      justificativaAnalise?: string;
+    }> = [];
+    for (const integ of contractorIntegrations) {
+      for (const sa of integ.atividadesSimples || []) {
+        entries.push({
+          id: `${integ.id}-${sa.id}`,
+          nome: sa.nome,
+          descricaoServico: sa.descricaoServico,
+          observacoes: sa.observacoes,
+          status: sa.status,
+          empresaNome: integ.empresaNome,
+          codigoProtocolo: integ.codigoProtocolo,
+          criadoPorNome: sa.criadoPorNome,
+          criadoEm: sa.criadoEm,
+          analisadoPorNome: sa.analisadoPorNome,
+          justificativaAnalise: sa.justificativaAnalise,
+        });
+      }
+    }
+    return entries.sort((a, b) => (b.criadoEm || '').localeCompare(a.criadoEm || ''));
+  }, [contractorIntegrations]);
+
   // Keep a valid selected activity whenever list updates
   useEffect(() => {
     if (isSolicitante) return;
+    if (selectedActivityId === SIMPLE_ACTIVITY_CATEGORY_ID) return;
     if (filteredActivities.length === 0) {
       if (selectedActivityId && !activityProfiles.some((a) => a.id === selectedActivityId)) {
         setSelectedActivityId(null);
@@ -314,8 +360,13 @@ export const ActivityMatrixView: React.FC = () => {
     }
   }, [isSolicitante, filteredActivities, activityProfiles, selectedActivityId]);
 
+  const isSimpleActivityCategorySelected = selectedActivityId === SIMPLE_ACTIVITY_CATEGORY_ID;
+
   const selectedActivity = useMemo(
-    () => activityProfiles.find((a) => a.id === selectedActivityId) || null,
+    () =>
+      selectedActivityId === SIMPLE_ACTIVITY_CATEGORY_ID
+        ? null
+        : activityProfiles.find((a) => a.id === selectedActivityId) || null,
     [activityProfiles, selectedActivityId]
   );
 
@@ -924,6 +975,35 @@ export const ActivityMatrixView: React.FC = () => {
           </div>
 
           <div className="divide-y divide-slate-800/80 max-h-[640px] overflow-y-auto custom-scrollbar">
+            {/* Dedicated ATIVIDADE SIMPLES category (Section 9.1) */}
+            <button
+              type="button"
+              onClick={() => setSelectedActivityId(SIMPLE_ACTIVITY_CATEGORY_ID)}
+              className={`w-full text-left px-4 py-3.5 transition-colors border-b border-slate-800 ${
+                isSimpleActivityCategorySelected
+                  ? 'bg-emerald-600/15 text-white'
+                  : 'hover:bg-slate-800/60 text-slate-200 bg-slate-900/80'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-sm font-bold leading-snug text-emerald-300">
+                  ATIVIDADE SIMPLES
+                </span>
+                <span className="text-[11px] font-semibold shrink-0 text-emerald-400">
+                  Solicitante
+                </span>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-400">
+                <span className="font-mono text-slate-300">ATIVIDADE_SIMPLES</span>
+                <span aria-hidden="true">·</span>
+                <span>Sem NR predefinida</span>
+                <span aria-hidden="true">·</span>
+                <span className="tabular-nums">
+                  {registeredSimpleActivities.length} registrada(s)
+                </span>
+              </div>
+            </button>
+
             {filteredActivities.length === 0 ? (
               <div className="p-6 text-center space-y-3">
                 <HardHat size={28} className="mx-auto text-slate-600" />
@@ -997,7 +1077,104 @@ export const ActivityMatrixView: React.FC = () => {
 
         {/* Right Column: Selected Activity Details + Mandatory Documents */}
         <section className="xl:col-span-8 space-y-6">
-          {!selectedActivity ? (
+          {isSimpleActivityCategorySelected ? (
+            <div className="space-y-5">
+              <div className="rounded-xl bg-slate-900 border border-slate-800 p-6 space-y-4">
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-400">
+                  <span className="font-mono text-emerald-300">ATIVIDADE_SIMPLES</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-emerald-400 font-semibold">Categoria Especial da Matriz</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Cadastro aberto ao Solicitante · Aprovação exclusiva do Admin EHS</span>
+                </div>
+                <h3 className="text-lg font-bold text-white">
+                  ATIVIDADE SIMPLES (Serviços sem NR predefinida)
+                </h3>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Permite que o perfil Solicitante cadastre atividades específicas que não estejam
+                  contempladas nas atividades NR predefinidas, descrevendo livremente o serviço e
+                  anexando os documentos relacionados diretamente na solicitação de integração. O
+                  cadastro de Atividades Simples <strong>não altera a Matriz NR predefinida</strong>{' '}
+                  nem concede permissão de edição de requisitos ao Solicitante.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2 border-t border-slate-800 text-xs">
+                  <div className="rounded-lg bg-slate-950 border border-slate-800 p-3 space-y-1">
+                    <p className="font-semibold text-white">Reaproveitamento Automático</p>
+                    <p className="text-slate-400">
+                      Documentos já aprovados, vigentes e aplicáveis da empresa ou colaborador são
+                      reaproveitados sem novo upload.
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-slate-950 border border-slate-800 p-3 space-y-1">
+                    <p className="font-semibold text-white">Aprovação Obrigatória EHS</p>
+                    <p className="text-slate-400">
+                      Toda Atividade Simples e seus anexos exigem aprovação do Administrador EHS
+                      (aprovar, recusar ou solicitar complementação).
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-slate-950 border border-slate-800 p-3 space-y-1">
+                    <p className="font-semibold text-white">Rastreabilidade Completa</p>
+                    <p className="text-slate-400">
+                      Histórico integral vinculado à empresa contratada e ao protocolo de
+                      integração.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-900 border border-slate-800 p-5 space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-sm font-bold text-white">
+                    Atividades Simples Registradas nas Integrações ({registeredSimpleActivities.length})
+                  </h4>
+                  <span className="text-xs text-slate-400">
+                    Análise e decisão na Gestão de Integrações
+                  </span>
+                </div>
+
+                {registeredSimpleActivities.length === 0 ? (
+                  <div className="rounded-lg bg-slate-950 border border-slate-800 p-6 text-center text-xs text-slate-400">
+                    Nenhuma Atividade Simples cadastrada em solicitações de integração até o momento.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden">
+                    {registeredSimpleActivities.map((item) => {
+                      const st = SIMPLE_STATUS_LABEL[item.status] || {
+                        label: item.status,
+                        textClass: 'text-slate-300',
+                      };
+                      return (
+                        <div key={item.id} className="p-4 bg-slate-950/60 space-y-1.5 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-semibold text-white">{item.nome}</span>
+                            <span className={`font-semibold ${st.textClass}`}>{st.label}</span>
+                          </div>
+                          <p className="text-slate-300 leading-relaxed">{item.descricaoServico}</p>
+                          {item.observacoes && (
+                            <p className="text-slate-400">Obs.: {item.observacoes}</p>
+                          )}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400 pt-1">
+                            <span>Empresa: <strong className="text-slate-200">{item.empresaNome}</strong></span>
+                            <span className="font-mono text-blue-300">{item.codigoProtocolo}</span>
+                            <span>Solicitante: {item.criadoPorNome}</span>
+                            {item.analisadoPorNome && (
+                              <span>Analisado por: {item.analisadoPorNome}</span>
+                            )}
+                          </div>
+                          {item.justificativaAnalise && (
+                            <p className="text-[11px] text-amber-300 pt-1">
+                              Parecer EHS: {item.justificativaAnalise}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : !selectedActivity ? (
             <div className="rounded-xl bg-slate-900 border border-slate-800 p-10 text-center space-y-3">
               <FileCheck2 size={32} className="mx-auto text-slate-600" />
               <h3 className="text-base font-semibold text-white">Selecione uma atividade</h3>

@@ -35,7 +35,7 @@ interface EmployeeDossierModalProps {
   onClose: () => void;
 }
 
-const MAX_DIRECT_FILE_BYTES = 700 * 1024;
+const MAX_DIRECT_FILE_BYTES = 4 * 1024 * 1024; // 4 MB verified backend private storage
 
 type DirectUploadKind = 'documento' | 'exame' | 'treinamento';
 
@@ -59,6 +59,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
 }) => {
   const {
     companies,
+    effectiveAuthorizedEmpresaIds,
     employees,
     documents,
     trainings,
@@ -70,6 +71,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
     smartDocs,
     auditLogs,
     contractorIntegrationItems,
+    uploadDirectDocument,
     addDocument,
     updateDocument,
     approveDocument,
@@ -83,7 +85,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
     approveTraining,
     rejectTraining,
   } = useSST();
-  const { isAdmin, isSolicitante, activeEmpresaId, profile } = useAuth();
+  const { isAdmin, isSolicitante, profile } = useAuth();
 
   const liveEmployee = useMemo(
     () => employees.find((e) => e.id === employee.id) || employee,
@@ -91,7 +93,8 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
   );
 
   const canUploadForEmployee =
-    isAdmin || (isSolicitante && Boolean(activeEmpresaId) && activeEmpresaId === liveEmployee.empresaId);
+    isAdmin ||
+    (isSolicitante && effectiveAuthorizedEmpresaIds.includes(liveEmployee.empresaId));
 
   const [activeTab, setActiveTab] = useState<
     'visao_geral' | 'conformidade_atividade' | 'documentos' | 'exames' | 'treinamentos' | 'historico'
@@ -264,8 +267,11 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
     );
   };
 
+  const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
+
   const openFreshUpload = (kind: DirectUploadKind) => {
     setResubmitTarget(null);
+    setSelectedUploadFile(null);
     setUploadKind(kind);
     setUploadForm({
       titulo: kind === 'exame' ? 'ASO Periódico' : '',
@@ -293,6 +299,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
       | { kind: 'treinamento'; item: Training }
   ) => {
     setResubmitTarget(target);
+    setSelectedUploadFile(null);
     setUploadKind(target.kind);
     if (target.kind === 'documento') {
       const d = target.item;
@@ -358,21 +365,15 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
     if (file.size > MAX_DIRECT_FILE_BYTES) {
       setFeedback({
         type: 'error',
-        text: 'O arquivo excede o limite de 700 KB para envio direto. Comprima o PDF/imagem e tente novamente.',
+        text: 'O arquivo excede o limite de 4 MB permitido para envio seguro (PDF, JPG ou PNG).',
       });
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      if (ev.target?.result) {
-        setUploadForm((prev) => ({
-          ...prev,
-          arquivoNome: file.name,
-          arquivoUrl: String(ev.target?.result),
-        }));
-      }
-    };
-    reader.readAsDataURL(file);
+    setSelectedUploadFile(file);
+    setUploadForm((prev) => ({
+      ...prev,
+      arquivoNome: file.name,
+    }));
   };
 
   const handleSubmitDirectUpload = async (e: React.FormEvent) => {
@@ -393,6 +394,48 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
     setSubmittingUpload(true);
     try {
       const targetStatus = isAdmin ? 'aprovado' : 'pendente';
+
+      if (selectedUploadFile) {
+        const res = await uploadDirectDocument({
+          kind: uploadKind,
+          recordId: resubmitTarget?.item?.id,
+          empresaId: liveEmployee.empresaId,
+          colaboradorId: liveEmployee.id,
+          nomeDocumento: uploadForm.titulo.trim(),
+          categoria: uploadForm.categoria,
+          numeroDocumento: uploadForm.numero.trim(),
+          dataEmissao: uploadForm.dataEmissao,
+          dataValidade: uploadForm.semValidade ? '' : uploadForm.dataValidade,
+          semValidade: uploadForm.semValidade,
+          conclusao: uploadForm.conclusao,
+          medicoResponsavel: uploadForm.medicoResponsavel.trim(),
+          crmMedico: uploadForm.crmMedico.trim(),
+          cargaHoraria: uploadForm.cargaHoraria.trim(),
+          instrutor: uploadForm.instrutor.trim(),
+          observacoes: uploadForm.observacoes.trim(),
+          arquivoNome: selectedUploadFile.name || uploadForm.arquivoNome || `${uploadForm.titulo.trim()}.pdf`,
+          file: selectedUploadFile,
+        });
+        setActiveTab(
+          uploadKind === 'documento'
+            ? 'documentos'
+            : uploadKind === 'exame'
+            ? 'exames'
+            : 'treinamentos'
+        );
+        setFeedback({
+          type: 'success',
+          text: isAdmin
+            ? `"${uploadForm.titulo}" armazenado com integridade verificada (v${res.versao}) e incluído no dossiê oficial.`
+            : resubmitTarget?.item?.situacao === 'aprovado'
+            ? `Nova versão (v${res.versao}) de "${uploadForm.titulo}" enviada para análise do EHS. A versão aprovada atual permanece válida até aprovação.`
+            : `"${uploadForm.titulo}" armazenado com integridade verificada (v${res.versao}) e encaminhado para análise do Administrador EHS.`,
+        });
+        setIsUploadModalOpen(false);
+        setResubmitTarget(null);
+        setSelectedUploadFile(null);
+        return;
+      }
 
       if (uploadKind === 'documento') {
         if (resubmitTarget && resubmitTarget.kind === 'documento') {
@@ -842,7 +885,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-slate-400">
-                  Documentos individuais do colaborador (envio livre sem mínimo de arquivos) e documentos recebidos via Integração.
+                  Envie cada documento uma única vez — após aprovação do EHS, ele será reaproveitado automaticamente em todas as integrações deste colaborador.
                 </p>
                 {canUploadForEmployee && (
                   <button
@@ -880,6 +923,9 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 text-[10px]">
                               {doc.categoria}
                             </span>
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 font-mono text-[10px]">
+                              v{doc.versao || 1}
+                            </span>
                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${farol.badgeClass}`}>
                               {doc.situacao === 'pendente'
                                 ? 'Aguardando Análise'
@@ -887,6 +933,11 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                                 ? 'Recusado'
                                 : farol.label}
                             </span>
+                            {doc.versaoPendente && (
+                              <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
+                                Atualização v{doc.versaoPendente.versao} em análise
+                              </span>
+                            )}
                           </div>
                           <p className="text-slate-400 text-[11px]">
                             Emissão: {formatDateBR(doc.dataEmissao)} · Validade:{' '}
@@ -895,6 +946,11 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                               ? ` · Avaliado por ${doc.analisadoPor} em ${formatDateTimeBR(doc.dataAnalise)}`
                               : ''}
                           </p>
+                          {doc.versaoPendente && (
+                            <p className="text-amber-200 text-[11px] bg-amber-500/10 border border-amber-500/25 rounded px-2.5 py-1 mt-1">
+                              Nova versão v{doc.versaoPendente.versao} ({doc.versaoPendente.arquivoNome}) em análise. A versão aprovada atual permanece válida até aprovação do EHS.
+                            </p>
+                          )}
                           {doc.motivoReprovacao && (
                             <p className="text-rose-300 text-[11px] bg-rose-500/10 border border-rose-500/25 rounded px-2.5 py-1.5 mt-1">
                               <strong>Motivo da Recusa:</strong> {doc.motivoReprovacao}
@@ -912,7 +968,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                               className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium"
                             />
                           )}
-                          {isAdmin && doc.situacao !== 'aprovado' && (
+                          {isAdmin && (doc.situacao !== 'aprovado' || Boolean(doc.versaoPendente)) && (
                             <button
                               type="button"
                               disabled={submittingDecision}
@@ -920,10 +976,10 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
                             >
                               <CheckCircle2 size={13} />
-                              Aceitar
+                              {doc.versaoPendente ? 'Aprovar Nova Versão' : 'Aceitar'}
                             </button>
                           )}
-                          {isAdmin && doc.situacao !== 'reprovado' && (
+                          {isAdmin && (doc.situacao !== 'reprovado' || Boolean(doc.versaoPendente)) && (
                             <button
                               type="button"
                               disabled={submittingDecision}
@@ -941,14 +997,18 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                               Recusar
                             </button>
                           )}
-                          {isSolicitante && canUploadForEmployee && doc.situacao === 'reprovado' && (
+                          {isSolicitante && canUploadForEmployee && (
                             <button
                               type="button"
                               onClick={() => openResubmit({ kind: 'documento', item: doc })}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold ${
+                                doc.situacao === 'reprovado'
+                                  ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                                  : 'bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200'
+                              }`}
                             >
                               <RefreshCw size={12} />
-                              Reenviar
+                              {doc.situacao === 'reprovado' ? 'Reenviar' : 'Atualizar Versão'}
                             </button>
                           )}
                         </div>
@@ -1007,7 +1067,9 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
           {activeTab === 'exames' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <p className="text-slate-400">Exames ocupacionais e ASOs vinculados ao colaborador.</p>
+                <p className="text-slate-400">
+                  Exames ocupacionais e ASOs do colaborador — após aprovação do EHS, são reaproveitados automaticamente em novas integrações enquanto vigentes.
+                </p>
                 {canUploadForEmployee && (
                   <button
                     type="button"
@@ -1052,6 +1114,11 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                               ? 'Recusado'
                               : farol.label}
                           </span>
+                          {ex.versaoPendente && (
+                            <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
+                              Atualização v{ex.versaoPendente.versao} em análise
+                            </span>
+                          )}
                         </div>
                         <p className="text-slate-400 text-[11px]">
                           Médico: {ex.medicoResponsavel || 'Não informado'} | CRM: {ex.crmMedico || '-'}
@@ -1063,6 +1130,11 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             ? ` · Avaliado por ${ex.analisadoPor} em ${formatDateTimeBR(ex.dataAnalise)}`
                             : ''}
                         </p>
+                        {ex.versaoPendente && (
+                          <p className="text-amber-200 text-[11px] bg-amber-500/10 border border-amber-500/25 rounded px-2.5 py-1 mt-1">
+                            Nova versão v{ex.versaoPendente.versao} ({ex.versaoPendente.arquivoNome}) em análise. A versão aprovada atual permanece válida até aprovação do EHS.
+                          </p>
+                        )}
                         {ex.motivoReprovacao && (
                           <p className="text-rose-300 text-[11px] bg-rose-500/10 border border-rose-500/25 rounded px-2.5 py-1.5 mt-1">
                             <strong>Motivo da Recusa:</strong> {ex.motivoReprovacao}
@@ -1080,7 +1152,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium"
                           />
                         )}
-                        {isAdmin && ex.situacao !== 'aprovado' && (
+                        {isAdmin && (ex.situacao !== 'aprovado' || Boolean(ex.versaoPendente)) && (
                           <button
                             type="button"
                             disabled={submittingDecision}
@@ -1088,10 +1160,10 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
                           >
                             <CheckCircle2 size={13} />
-                            Aceitar
+                            {ex.versaoPendente ? 'Aprovar Nova Versão' : 'Aceitar'}
                           </button>
                         )}
-                        {isAdmin && ex.situacao !== 'reprovado' && (
+                        {isAdmin && (ex.situacao !== 'reprovado' || Boolean(ex.versaoPendente)) && (
                           <button
                             type="button"
                             disabled={submittingDecision}
@@ -1105,14 +1177,18 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             Recusar
                           </button>
                         )}
-                        {isSolicitante && canUploadForEmployee && ex.situacao === 'reprovado' && (
+                        {isSolicitante && canUploadForEmployee && (
                           <button
                             type="button"
                             onClick={() => openResubmit({ kind: 'exame', item: ex })}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold ${
+                              ex.situacao === 'reprovado'
+                                ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                                : 'bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200'
+                            }`}
                           >
                             <RefreshCw size={12} />
-                            Reenviar
+                            {ex.situacao === 'reprovado' ? 'Reenviar' : 'Atualizar Versão'}
                           </button>
                         )}
                       </div>
@@ -1127,7 +1203,9 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
           {activeTab === 'treinamentos' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <p className="text-slate-400">Capacitações e certificados de Normas Regulamentadoras (NRs).</p>
+                <p className="text-slate-400">
+                  Certificados de NRs e treinamentos — enviados uma única vez e reaproveitados automaticamente nas integrações após aprovação do EHS.
+                </p>
                 {canUploadForEmployee && (
                   <button
                     type="button"
@@ -1163,6 +1241,11 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                               ? 'Recusado'
                               : farol.label}
                           </span>
+                          {tr.versaoPendente && (
+                            <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
+                              Atualização v{tr.versaoPendente.versao} em análise
+                            </span>
+                          )}
                         </div>
                         <p className="text-slate-400 text-[11px]">
                           Carga Horária: {tr.cargaHoraria || '-'} | Instrutor:{' '}
@@ -1175,6 +1258,11 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             ? ` · Avaliado por ${tr.analisadoPor} em ${formatDateTimeBR(tr.dataAnalise)}`
                             : ''}
                         </p>
+                        {tr.versaoPendente && (
+                          <p className="text-amber-200 text-[11px] bg-amber-500/10 border border-amber-500/25 rounded px-2.5 py-1 mt-1">
+                            Nova versão v{tr.versaoPendente.versao} ({tr.versaoPendente.arquivoNome}) em análise. A versão aprovada atual permanece válida até aprovação do EHS.
+                          </p>
+                        )}
                         {tr.motivoReprovacao && (
                           <p className="text-rose-300 text-[11px] bg-rose-500/10 border border-rose-500/25 rounded px-2.5 py-1.5 mt-1">
                             <strong>Motivo da Recusa:</strong> {tr.motivoReprovacao}
@@ -1195,7 +1283,7 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium"
                           />
                         )}
-                        {isAdmin && tr.situacao !== 'aprovado' && (
+                        {isAdmin && (tr.situacao !== 'aprovado' || Boolean(tr.versaoPendente)) && (
                           <button
                             type="button"
                             disabled={submittingDecision}
@@ -1205,10 +1293,10 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
                           >
                             <CheckCircle2 size={13} />
-                            Aceitar
+                            {tr.versaoPendente ? 'Aprovar Nova Versão' : 'Aceitar'}
                           </button>
                         )}
-                        {isAdmin && tr.situacao !== 'reprovado' && (
+                        {isAdmin && (tr.situacao !== 'reprovado' || Boolean(tr.versaoPendente)) && (
                           <button
                             type="button"
                             disabled={submittingDecision}
@@ -1226,14 +1314,18 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                             Recusar
                           </button>
                         )}
-                        {isSolicitante && canUploadForEmployee && tr.situacao === 'reprovado' && (
+                        {isSolicitante && canUploadForEmployee && (
                           <button
                             type="button"
                             onClick={() => openResubmit({ kind: 'treinamento', item: tr })}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold ${
+                              tr.situacao === 'reprovado'
+                                ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                                : 'bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200'
+                            }`}
                           >
                             <RefreshCw size={12} />
-                            Reenviar
+                            {tr.situacao === 'reprovado' ? 'Reenviar' : 'Atualizar Versão'}
                           </button>
                         )}
                       </div>
@@ -1527,9 +1619,15 @@ export const EmployeeDossierModal: React.FC<EmployeeDossierModalProps> = ({
                 <span>Sem data de validade</span>
               </label>
 
+              {resubmitTarget?.item?.situacao === 'aprovado' && isSolicitante && (
+                <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-200">
+                  A versão aprovada vigente continuará válida e reaproveitada nas integrações até que o Administrador EHS aprove a nova versão enviada.
+                </div>
+              )}
+
               <div>
                 <label className="block font-medium text-slate-300 mb-1">
-                  Arquivo (PDF, JPG ou PNG — até 700 KB)
+                  Arquivo (PDF, JPG ou PNG — até 4 MB)
                 </label>
                 <input
                   type="file"

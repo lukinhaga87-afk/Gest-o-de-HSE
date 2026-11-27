@@ -31,9 +31,10 @@ interface ContractorPanelViewProps {
 }
 
 export const ContractorPanelView: React.FC<ContractorPanelViewProps> = ({ onNavigate }) => {
-  const { profile, activeEmpresaId } = useAuth();
+  const { profile } = useAuth();
   const {
-    companies,
+    authorizedCompanies,
+    effectiveAuthorizedEmpresaIds,
     employees,
     contractorIntegrations,
     contractorIntegrationItems,
@@ -43,17 +44,12 @@ export const ContractorPanelView: React.FC<ContractorPanelViewProps> = ({ onNavi
 
   const [refreshing, setRefreshing] = useState(false);
 
-  const myCompany = useMemo(() => {
-    if (activeEmpresaId) {
-      return companies.find((c) => c.id === activeEmpresaId) || null;
-    }
-    return null;
-  }, [companies, activeEmpresaId]);
+  const myCompany = useMemo(() => authorizedCompanies[0] || null, [authorizedCompanies]);
 
   const myEmployees = useMemo(() => {
-    if (!activeEmpresaId) return [];
-    return employees.filter((e) => e.empresaId === activeEmpresaId);
-  }, [employees, activeEmpresaId]);
+    const allowedSet = new Set(effectiveAuthorizedEmpresaIds);
+    return employees.filter((e) => allowedSet.has(e.empresaId));
+  }, [employees, effectiveAuthorizedEmpresaIds]);
 
   const enrichedItems = useMemo(() => {
     return contractorIntegrationItems.map((item) => {
@@ -116,6 +112,72 @@ export const ContractorPanelView: React.FC<ContractorPanelViewProps> = ({ onNavi
   const pendingToSendCount = counts.NAO_ENVIADO + counts.PENDENTE_ENVIO;
   const underReviewCount = counts.AGUARDANDO_ANALISE + counts.EM_ANALISE;
   const expiringOrExpiredCount = counts.VENCIDO + counts.PROXIMO_VENCIMENTO;
+
+  // Visual Completion Indicator strictly based on Official Base (Approved) vs Sent (Awaiting Review)
+  const completionSummary = useMemo(() => {
+    const applicable = enrichedItems.filter(({ item }) => item.obrigatorio);
+    const baseList = applicable.length > 0 ? applicable : enrichedItems;
+    const total = baseList.length;
+    const approvedOfficial = baseList.filter(
+      ({ stdStatus }) => stdStatus === 'APROVADO' || stdStatus === 'PROXIMO_VENCIMENTO'
+    ).length;
+    const awaitingAnalysis = baseList.filter(
+      ({ stdStatus }) => stdStatus === 'AGUARDANDO_ANALISE' || stdStatus === 'EM_ANALISE'
+    ).length;
+    const pending = Math.max(0, total - approvedOfficial - awaitingAnalysis);
+    const percent = total === 0 ? 0 : Math.round((approvedOfficial / total) * 100);
+    const missingItems = baseList.filter(
+      ({ stdStatus }) =>
+        stdStatus === 'NAO_ENVIADO' ||
+        stdStatus === 'PENDENTE_ENVIO' ||
+        stdStatus === 'REPROVADO' ||
+        stdStatus === 'VENCIDO'
+    );
+
+    const collaboratorsWithPendenciesMap = new Map<
+      string,
+      { nome: string; count: number; rejected: number; missing: number }
+    >();
+    for (const row of missingItems) {
+      if (row.item.categoria === 'colaborador') {
+        const key = row.item.colaboradorId || row.item.colaboradorCandidateId || row.item.colaboradorNome || row.item.id;
+        const nome = row.item.colaboradorNome || 'Colaborador';
+        const existing = collaboratorsWithPendenciesMap.get(key) || {
+          nome,
+          count: 0,
+          rejected: 0,
+          missing: 0,
+        };
+        existing.count += 1;
+        if (row.stdStatus === 'REPROVADO') existing.rejected += 1;
+        else existing.missing += 1;
+        collaboratorsWithPendenciesMap.set(key, existing);
+      }
+    }
+
+    const integrationCounts = {
+      aprovadas: contractorIntegrations.filter((i) => i.status === 'APROVADA').length,
+      emAnalise: contractorIntegrations.filter((i) =>
+        ['ENVIADA', 'AGUARDANDO_ANALISE', 'EM_ANALISE', 'REENVIADA'].includes(i.status)
+      ).length,
+      pendentes: contractorIntegrations.filter((i) =>
+        ['RASCUNHO', 'PENDENTE_DOCUMENTACAO', 'EM_ENVIO', 'PENDENTE_CORRECAO', 'REPROVADA'].includes(
+          i.status
+        )
+      ).length,
+    };
+
+    return {
+      total,
+      approvedOfficial,
+      awaitingAnalysis,
+      pending,
+      percent,
+      missingItems,
+      collaboratorsWithPendencies: Array.from(collaboratorsWithPendenciesMap.values()),
+      integrationCounts,
+    };
+  }, [enrichedItems, contractorIntegrations]);
 
   return (
     <div className="space-y-6">
@@ -199,7 +261,7 @@ export const ContractorPanelView: React.FC<ContractorPanelViewProps> = ({ onNavi
             onClick={() => onNavigate('empresas')}
             className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 transition-colors"
           >
-            Minha Empresa
+            Minhas Empresas ({authorizedCompanies.length})
           </button>
           <button
             type="button"
@@ -216,6 +278,74 @@ export const ContractorPanelView: React.FC<ContractorPanelViewProps> = ({ onNavi
             Protocolos ({contractorIntegrations.length})
           </button>
         </div>
+      </div>
+
+      {/* Visual Documentation Completion Indicator */}
+      <div className="rounded-xl bg-slate-900 border border-slate-800 p-5 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <p className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+              Conformidade na Base Oficial (Somente Documentos Aprovados pelo EHS)
+            </p>
+            <h3 className="text-base font-bold text-white mt-0.5">
+              {completionSummary.total === 0
+                ? 'Nenhum requisito documental gerado ainda'
+                : `Conformidade Aprovada: ${completionSummary.percent}%`}
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {completionSummary.total === 0
+                ? 'Inicie uma nova integração para gerar automaticamente sua lista documental pela Matriz EHS.'
+                : `${completionSummary.approvedOfficial} aprovado(s) na base oficial · ${completionSummary.awaitingAnalysis} enviado(s) aguardando análise EHS · ${completionSummary.pending} pendência(s)/recusa(s) de ${completionSummary.total} obrigatório(s).`}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+              {completionSummary.integrationCounts.aprovadas} aprovada(s)
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-300 border border-sky-500/30 font-semibold">
+              {completionSummary.integrationCounts.emAnalise} em análise
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold">
+              {completionSummary.integrationCounts.pendentes} pendente(s)
+            </span>
+          </div>
+        </div>
+
+        <div className="w-full h-3 rounded-full bg-slate-800 overflow-hidden">
+          <div
+            className={`h-full transition-all duration-500 ${
+              completionSummary.percent === 100
+                ? 'bg-emerald-500'
+                : completionSummary.percent >= 60
+                ? 'bg-blue-500'
+                : 'bg-amber-500'
+            }`}
+            style={{ width: `${completionSummary.percent}%` }}
+          />
+        </div>
+
+        {completionSummary.collaboratorsWithPendencies.length > 0 && (
+          <div className="pt-2 border-t border-slate-800/80 space-y-2">
+            <p className="text-xs font-semibold text-amber-300 flex items-center gap-1.5">
+              <Users size={14} />
+              Colaboradores com pendência documental ({completionSummary.collaboratorsWithPendencies.length}):
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {completionSummary.collaboratorsWithPendencies.map((col) => (
+                <span
+                  key={col.nome}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-950 border border-amber-500/30 text-xs text-slate-200"
+                >
+                  <strong className="text-white">{col.nome}</strong>
+                  <span className="text-amber-300 font-semibold">
+                    {col.count} pendente(s)
+                    {col.rejected > 0 ? ` (${col.rejected} reprovado(s))` : ''}
+                  </span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Primary KPI Grid */}

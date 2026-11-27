@@ -83,6 +83,7 @@ export interface SanitizedUserProfile {
   role: UserRole;
   empresaId?: string;
   empresaNome?: string;
+  empresaIds?: string[];
   cargo?: string;
   telefone?: string;
   fotoPerfilUrl?: string;
@@ -231,6 +232,22 @@ export function sanitizeUserProfile(id: string, data: Partial<UserProfile>): San
 
   if (data.empresaId) safe.empresaId = data.empresaId;
   if (data.empresaNome) safe.empresaNome = data.empresaNome;
+  const mergedEmpresaIds = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(data.empresaIds) ? data.empresaIds : []),
+        ...(data.empresaId ? [data.empresaId] : []),
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+    )
+  );
+  if (mergedEmpresaIds.length > 0) {
+    safe.empresaIds = mergedEmpresaIds;
+    if (!safe.empresaId) {
+      safe.empresaId = mergedEmpresaIds[0];
+    }
+  }
   if (data.cargo) safe.cargo = data.cargo;
   if (data.telefone) safe.telefone = data.telefone;
   if (data.fotoPerfilUrl) safe.fotoPerfilUrl = data.fotoPerfilUrl;
@@ -244,6 +261,22 @@ export function sanitizeUserProfile(id: string, data: Partial<UserProfile>): San
   if (data.updatedAt) safe.updatedAt = data.updatedAt;
 
   return safe;
+}
+
+export function getProfileAuthorizedEmpresaIds(
+  profile?: { empresaId?: string; empresaIds?: string[] } | null
+): string[] {
+  if (!profile) return [];
+  return Array.from(
+    new Set(
+      [
+        ...(Array.isArray(profile.empresaIds) ? profile.empresaIds : []),
+        ...(profile.empresaId ? [profile.empresaId] : []),
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+    )
+  );
 }
 
 function base64UrlEncode(input: Buffer | string): string {

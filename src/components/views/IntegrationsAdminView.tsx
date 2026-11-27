@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Building2,
   Users,
@@ -232,6 +232,7 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
   const {
     companies,
     activityProfiles,
+    contractorIntegrations,
     listIntegrationsOnServer,
     getIntegrationDetailOnServer,
     fetchIntegrationItemFileBlobOnServer,
@@ -244,8 +245,9 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
   } = useSST();
 
   // Server-backed integration list (strictly from GET /api/integrations)
-  const [integrations, setIntegrations] = useState<ContractorIntegration[]>([]);
-  const [loadingList, setLoadingList] = useState(true);
+  const [integrations, setIntegrations] = useState<ContractorIntegration[]>(contractorIntegrations);
+  const [loadingList, setLoadingList] = useState(contractorIntegrations.length === 0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
 
   // Filters (Section 3)
@@ -272,23 +274,48 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
 
   const canAccessView = isAdmin || isAuditor;
 
+  // Keep latest context fetcher in a ref so SSTContext re-renders never re-trigger the mount effect
+  const listIntegrationsRef = useRef(listIntegrationsOnServer);
+  listIntegrationsRef.current = listIntegrationsOnServer;
+  const hasLoadedOnceRef = useRef(contractorIntegrations.length > 0);
+  const inFlightFetchRef = useRef(false);
+
   const fetchIntegrations = useCallback(async () => {
-    if (!canAccessView) return;
-    setLoadingList(true);
+    if (!canAccessView || inFlightFetchRef.current) return;
+    inFlightFetchRef.current = true;
+    if (!hasLoadedOnceRef.current) {
+      setLoadingList(true);
+    } else {
+      setIsRefreshing(true);
+    }
     setListError(null);
     try {
-      const data = await listIntegrationsOnServer();
+      const data = await listIntegrationsRef.current();
       setIntegrations(data);
+      hasLoadedOnceRef.current = true;
     } catch (err: any) {
       setListError(err?.message || 'Não foi possível carregar as integrações no servidor.');
     } finally {
+      inFlightFetchRef.current = false;
       setLoadingList(false);
+      setIsRefreshing(false);
     }
-  }, [canAccessView, listIntegrationsOnServer]);
+  }, [canAccessView]);
 
   useEffect(() => {
-    fetchIntegrations();
+    void fetchIntegrations();
   }, [fetchIntegrations]);
+
+  // Silently reflect background updates from SSTContext (e.g. window focus sync) without refetching or flashing skeletons
+  useEffect(() => {
+    if (contractorIntegrations.length > 0 || hasLoadedOnceRef.current) {
+      setIntegrations(contractorIntegrations);
+      if (contractorIntegrations.length > 0) {
+        hasLoadedOnceRef.current = true;
+        setLoadingList(false);
+      }
+    }
+  }, [contractorIntegrations]);
 
   // Cleanup Blob URL whenever document preview closes or changes
   useEffect(() => {
@@ -695,7 +722,12 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
     }
   };
 
-  const handleApproveIntegration = async () => {
+  const [isRejectModalOpen, setIsRejectModalOpen] = useState(false);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+  const [selectedRejectItemIds, setSelectedRejectItemIds] = useState<string[]>([]);
+  const [rejectItemReasons, setRejectItemReasons] = useState<Record<string, string>>({});
+
+  const handleApproveIntegration = async (approveWholePackage: boolean = true) => {
     if (!selectedDetail || !isAdmin) return;
     setBusyAction('approve');
     setFeedback(null);
@@ -703,6 +735,7 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
       const updated = await approveIntegrationOnServer(selectedDetail.integration.id, {
         justificativa: decisionNote.trim() || undefined,
         expectedVersion: selectedDetail.integration.versaoConcorrencia,
+        approveWholePackage,
       });
       setSelectedDetail(updated);
       syncIntegrationInList(updated.integration);
@@ -710,7 +743,7 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
       setDecisionNote('');
       setFeedback({
         type: 'success',
-        text: 'Integração APROVADA! Os documentos oficiais estão ativos no motor de conformidade (a liberação de atividades críticas continua exigindo PT/APR formal).',
+        text: 'Integração APROVADA INTEGRALMENTE! Todos os documentos válidos foram oficializados, a empresa/colaboradores foram consolidados e o Solicitante foi notificado.',
       });
     } catch (err: any) {
       setFeedback({ type: 'error', text: err?.message || 'Aprovação bloqueada pelo servidor.' });
@@ -719,9 +752,21 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
     }
   };
 
-  const handleRejectIntegration = async () => {
+  const openRejectPackageModal = () => {
     if (!selectedDetail || !isAdmin) return;
-    if (!decisionNote.trim()) {
+    setRejectReasonInput(decisionNote.trim());
+    const alreadyRejected = selectedDetail.items
+      .filter((it) => it.status === 'REPROVADO')
+      .map((it) => it.id);
+    setSelectedRejectItemIds(alreadyRejected);
+    setRejectItemReasons({});
+    setIsRejectModalOpen(true);
+  };
+
+  const handleConfirmRejectIntegration = async () => {
+    if (!selectedDetail || !isAdmin) return;
+    const motivo = rejectReasonInput.trim();
+    if (!motivo) {
       setFeedback({
         type: 'error',
         text: 'Informe a justificativa técnica obrigatória para reprovar o processo de integração.',
@@ -732,13 +777,24 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
     setFeedback(null);
     try {
       const updated = await rejectIntegrationOnServer(selectedDetail.integration.id, {
-        justificativa: decisionNote.trim(),
+        justificativa: motivo,
         expectedVersion: selectedDetail.integration.versaoConcorrencia,
+        rejectedItemIds: selectedRejectItemIds.length > 0 ? selectedRejectItemIds : undefined,
+        itemReasons:
+          Object.keys(rejectItemReasons).length > 0 ? rejectItemReasons : undefined,
       });
       setSelectedDetail(updated);
       syncIntegrationInList(updated.integration);
+      hydrateDraftsFromDetail(updated);
       setDecisionNote('');
-      setFeedback({ type: 'success', text: 'Integração reprovada com justificativa auditada.' });
+      setRejectReasonInput('');
+      setSelectedRejectItemIds([]);
+      setRejectItemReasons({});
+      setIsRejectModalOpen(false);
+      setFeedback({
+        type: 'success',
+        text: 'Integração reprovada com justificativa auditada. O Solicitante foi notificado e poderá corrigir e reenviar preservando o histórico de versões.',
+      });
     } catch (err: any) {
       setFeedback({ type: 'error', text: err?.message || 'Erro ao reprovar integração.' });
     } finally {
@@ -954,10 +1010,19 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
     return blockers;
   }, [selectedDetail]);
 
+  // Structural blockers that genuinely prevent whole-package approval (missing file, rejected, or expired)
+  const hardBlockersForWholePackage = useMemo(
+    () =>
+      blockingMandatoryItems.filter(
+        (b) => b.severity === 'missing' || b.severity === 'rejected' || b.severity === 'expired'
+      ),
+    [blockingMandatoryItems]
+  );
+
   const canFinalizeApproval =
     Boolean(selectedDetail) &&
     selectedDetail!.items.length > 0 &&
-    blockingMandatoryItems.length === 0 &&
+    hardBlockersForWholePackage.length === 0 &&
     ![
       'RASCUNHO',
       'PENDENTE_DOCUMENTACAO',
@@ -1040,6 +1105,16 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
               {item.versaoAtual > 0 && (
                 <span className="font-mono text-[11px] tabular-nums text-slate-400">
                   · v{item.versaoAtual}
+                </span>
+              )}
+              {item.reaproveitado && (
+                <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                  Reaproveitado da Base Oficial
+                </span>
+              )}
+              {!item.reaproveitado && item.situacaoDocumentoExistente === 'PENDENTE_APROVACAO' && (
+                <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                  Vinculado à Base (Pendente)
                 </span>
               )}
             </div>
@@ -1553,10 +1628,10 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
           <button
             type="button"
             onClick={fetchIntegrations}
-            disabled={loadingList}
+            disabled={loadingList || isRefreshing}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-200 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
           >
-            <RefreshCw size={14} className={loadingList ? 'animate-spin' : ''} />
+            <RefreshCw size={14} className={loadingList || isRefreshing ? 'animate-spin' : ''} />
             Atualizar Lista
           </button>
         </div>
@@ -2287,26 +2362,24 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
                   )}
                 </div>
 
-                {/* Admin Decision Footer (Section 6: Strict Final Approval Gate + Blocking List) */}
+                {/* Admin Decision Footer (Whole-Package Approval + Targeted Rejection) */}
                 {isAdmin && selectedDetail.integration.status !== 'ENCERRADA' && (
                   <div className="px-6 py-4 border-t border-slate-800 bg-slate-950/85 space-y-3">
-                    {blockingMandatoryItems.length > 0 ? (
+                    {hardBlockersForWholePackage.length > 0 ? (
                       <div className="rounded-lg bg-amber-950/25 border border-amber-500/30 p-3 space-y-1.5 text-xs">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="text-amber-300 font-semibold flex items-center gap-1.5">
                             <AlertTriangle size={14} className="shrink-0" />
-                            Aprovação final bloqueada —{' '}
-                            <strong className="tabular-nums">{blockingMandatoryItems.length}</strong>{' '}
-                            pendência(s) obrigatória(s) para regularizar:
+                            Aprovação bloqueada —{' '}
+                            <strong className="tabular-nums">{hardBlockersForWholePackage.length}</strong>{' '}
+                            documento(s) obrigatório(s) ausente(s), reprovado(s) ou vencido(s):
                           </span>
                           <span className="text-[11px] text-slate-400">
-                            {selectedDetail.integration.tipo === 'INTEGRACAO_INICIAL'
-                              ? 'Aprovação parcial desabilitada para cadastro inicial · PTs continuam exigindo liberação separada.'
-                              : 'Aprovar integração não libera PTs de atividades críticas automaticamente.'}
+                            PTs de atividades críticas continuam exigindo liberação separada.
                           </span>
                         </div>
                         <ul className="space-y-1 max-h-24 overflow-y-auto custom-scrollbar pr-1 text-[11px]">
-                          {blockingMandatoryItems.map((b) => (
+                          {hardBlockersForWholePackage.map((b) => (
                             <li
                               key={b.itemId}
                               className="flex flex-wrap items-center gap-x-2 text-slate-300"
@@ -2330,7 +2403,7 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
                       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="text-emerald-300 flex items-center gap-1.5 font-medium">
                           <CheckCircle2 size={14} />
-                          Todos os documentos obrigatórios estão aprovados e dentro da validade. Pronto para concluir a integração.
+                          Pacote completo recebido e dentro da validade. Você pode aprovar a integração integralmente em um clique.
                         </span>
                         <span className="text-[11px] text-slate-400">
                           Aprovar a integração não libera automaticamente PTs de atividades críticas.
@@ -2341,7 +2414,7 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
                     <div className="flex flex-col md:flex-row gap-2.5">
                       <input
                         type="text"
-                        placeholder="Justificativa / orientação para devolução parcial, reprovação ou aprovação final..."
+                        placeholder="Observação / justificativa (obrigatória para devolução ou reprovação)..."
                         value={decisionNote}
                         onChange={(e) => setDecisionNote(e.target.value)}
                         className="flex-1 rounded-xl bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white"
@@ -2353,12 +2426,12 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
                           onClick={handleReturnForCorrection}
                           className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
                         >
-                          <RotateCcw size={14} /> Devolver Somente Pendências
+                          <RotateCcw size={14} /> Devolver Pendências
                         </button>
                         <button
                           type="button"
                           disabled={busyAction !== null}
-                          onClick={handleRejectIntegration}
+                          onClick={openRejectPackageModal}
                           className="px-3.5 py-2 rounded-xl bg-rose-700 hover:bg-rose-600 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
                         >
                           <XCircle size={14} /> Reprovar Integração
@@ -2366,15 +2439,15 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
                         <button
                           type="button"
                           disabled={busyAction !== null || !canFinalizeApproval}
-                          onClick={handleApproveIntegration}
-                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
+                          onClick={() => void handleApproveIntegration(true)}
+                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0 shadow-md shadow-emerald-950/40"
                         >
                           {busyAction === 'approve' ? (
                             <Loader2 size={14} className="animate-spin" />
                           ) : (
                             <FileCheck2 size={14} />
                           )}
-                          Aprovar Integração
+                          Aprovar Integração Integralmente
                         </button>
                         <button
                           type="button"
@@ -2390,6 +2463,136 @@ export const IntegrationsAdminView: React.FC<IntegrationsAdminViewProps> = ({
                 )}
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Reprovar Integração com Seleção de Documentos para Correção */}
+      {isRejectModalOpen && selectedDetail && (
+        <div className="fixed inset-0 z-[55] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-xl rounded-2xl bg-slate-900 border border-rose-500/40 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <XCircle size={18} className="text-rose-400" />
+                <h3 className="text-sm font-bold text-white">
+                  Reprovar Integração — {selectedDetail.integration.codigoProtocolo}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsRejectModalOpen(false)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs max-h-[75vh] overflow-y-auto custom-scrollbar">
+              <p className="text-slate-300">
+                Informe a justificativa técnica obrigatória e, se desejar, selecione exatamente quais
+                documentos precisam ser corrigidos pelo Solicitante. Todas as versões anteriores
+                permanecem preservadas no histórico.
+              </p>
+
+              <div className="space-y-1.5">
+                <label className="block font-semibold text-rose-300">
+                  Justificativa Obrigatória da Reprovação *
+                </label>
+                <textarea
+                  rows={3}
+                  value={rejectReasonInput}
+                  onChange={(e) => setRejectReasonInput(e.target.value)}
+                  placeholder="Ex.: ASO de João Silva sem assinatura do médico coordenador e NR-35 ilegível..."
+                  className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-xs text-white focus:outline-none focus:border-rose-500"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="font-semibold text-slate-200">
+                    Documentos que exigem correção ({selectedRejectItemIds.length} selecionado(s))
+                  </label>
+                  <span className="text-[11px] text-slate-400">Opcional, recomendado</span>
+                </div>
+                <div className="space-y-1.5 max-h-56 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950 p-2.5">
+                  {selectedDetail.items
+                    .filter((it) => it.status !== 'APROVADO')
+                    .map((it) => {
+                      const checked = selectedRejectItemIds.includes(it.id);
+                      return (
+                        <div
+                          key={it.id}
+                          className={`rounded-lg border p-2.5 space-y-1.5 ${
+                            checked
+                              ? 'bg-rose-950/35 border-rose-500/40'
+                              : 'bg-slate-900/60 border-slate-800'
+                          }`}
+                        >
+                          <label className="flex items-start gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setSelectedRejectItemIds((prev) =>
+                                  prev.includes(it.id)
+                                    ? prev.filter((x) => x !== it.id)
+                                    : [...prev, it.id]
+                                )
+                              }
+                              className="mt-0.5 accent-rose-500"
+                            />
+                            <div className="min-w-0">
+                              <p className="font-semibold text-white truncate">
+                                [{it.documentoCodigoCanonico}] {it.nomeExibicao}
+                              </p>
+                              <p className="text-[11px] text-slate-400">
+                                {it.colaboradorNome || it.empresaNome} · v{it.versaoAtual || 0}
+                              </p>
+                            </div>
+                          </label>
+                          {checked && (
+                            <input
+                              type="text"
+                              value={rejectItemReasons[it.id] || ''}
+                              onChange={(e) =>
+                                setRejectItemReasons((prev) => ({
+                                  ...prev,
+                                  [it.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="Orientação específica para este documento (opcional)..."
+                              className="w-full rounded-lg bg-slate-950 border border-rose-500/30 px-2.5 py-1.5 text-[11px] text-white"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-slate-800 bg-slate-950/70 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsRejectModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={busyAction !== null || !rejectReasonInput.trim()}
+                onClick={() => void handleConfirmRejectIntegration()}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-40 cursor-pointer"
+              >
+                {busyAction === 'reject' ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <XCircle size={14} />
+                )}
+                Confirmar Reprovação e Notificar Solicitante
+              </button>
+            </div>
           </div>
         </div>
       )}

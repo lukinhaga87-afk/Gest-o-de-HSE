@@ -66,8 +66,9 @@ type BucketFilter =
   | 'APROVADO';
 
 export const ExpirationsControlView: React.FC<ExpirationsControlViewProps> = ({ onNavigate }) => {
-  const { isAdmin, isSolicitante, activeEmpresaId } = useAuth();
+  const { isAdmin, isSolicitante } = useAuth();
   const {
+    effectiveAuthorizedEmpresaIds,
     contractorIntegrationItems,
     documents,
     trainings,
@@ -137,10 +138,11 @@ export const ExpirationsControlView: React.FC<ExpirationsControlViewProps> = ({ 
     }
 
     // 2. Complement with official SST records not already represented by an integration item
+    const allowedCompaniesSet = new Set(effectiveAuthorizedEmpresaIds);
     const scopeCompany = (empresaId?: string) => {
       if (!isSolicitante) return true;
-      if (!activeEmpresaId) return false;
-      return empresaId === activeEmpresaId;
+      if (!empresaId || allowedCompaniesSet.size === 0) return false;
+      return allowedCompaniesSet.has(empresaId);
     };
 
     for (const doc of documents) {
@@ -249,7 +251,7 @@ export const ExpirationsControlView: React.FC<ExpirationsControlViewProps> = ({ 
       const bDays = b.exp.daysRemaining ?? 99999;
       return aDays - bDays;
     });
-  }, [contractorIntegrationItems, documents, trainings, exams, isSolicitante, activeEmpresaId]);
+  }, [contractorIntegrationItems, documents, trainings, exams, isSolicitante, effectiveAuthorizedEmpresaIds]);
 
   const counts = useMemo(() => {
     let vencidos = 0;

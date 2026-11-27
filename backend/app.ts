@@ -40,6 +40,7 @@ import {
   getValidatedApiAuthSecret,
   hashPasswordBcrypt,
   sanitizeUserProfile,
+  getProfileAuthorizedEmpresaIds,
   isValidRole,
   AuthConfigError,
   AuthServiceUnavailableError,
@@ -110,6 +111,22 @@ import {
   sanitizeDownloadFileName,
 } from './integrationFileStorage';
 import { FirebaseAdminNotConfiguredError } from './firebaseAdmin';
+import {
+  InAppNotificationService,
+  NotificationActor,
+  NotificationWorkflowError,
+} from './inAppNotificationService';
+import {
+  ThirdPartyActor,
+  ThirdPartyManagementService,
+  ThirdPartyWorkflowError,
+} from './thirdPartyManagementService';
+import {
+  parseMultipartBoolean,
+  parseMultipartStringArray,
+  parseOptionalMultipartFile,
+  RequestWithBinaryUpload,
+} from './multipartUpload';
 
 function removeUndefinedFields<T extends Record<string, any>>(obj: T): Partial<T> {
   const clean: Record<string, any> = {};
@@ -125,13 +142,24 @@ export function createApiApp(options?: {
   smartDocAiInvoker?: SmartDocAiInvoker;
   permitWorkflowService?: PermitWorkflowService;
   integrationWorkflowService?: IntegrationWorkflowService;
+  inAppNotificationService?: InAppNotificationService;
+  thirdPartyManagementService?: ThirdPartyManagementService;
   authoritativeUserLookup?: AuthoritativeUserLookup;
   userProfilesLister?: UserProfilesLister;
 }) {
   const app = express();
   const permitService = options?.permitWorkflowService ?? new PermitWorkflowService();
+  const inAppNotificationService =
+    options?.inAppNotificationService ?? new InAppNotificationService();
   const integrationService =
-    options?.integrationWorkflowService ?? new IntegrationWorkflowService();
+    options?.integrationWorkflowService ??
+    new IntegrationWorkflowService({ notificationService: inAppNotificationService });
+  const thirdPartyService =
+    options?.thirdPartyManagementService ??
+    new ThirdPartyManagementService({ notificationService: inAppNotificationService });
+  thirdPartyService.setOnOfficialDocumentReviewed(async (event) => {
+    await integrationService.syncOfficialDocumentDecision(event);
+  });
   const authoritativeUserLookup = options?.authoritativeUserLookup;
   const userProfilesLister = options?.userProfilesLister;
   const requireIntegrationAuth = authoritativeUserLookup
@@ -153,10 +181,14 @@ export function createApiApp(options?: {
       req.url = stripped.startsWith('/api') ? stripped : `/api${stripped.startsWith('/') ? stripped : `/${stripped}`}`;
     } else if (
       req.url.startsWith('/notifications/') ||
+      req.url.startsWith('/in-app-notifications') ||
       req.url.startsWith('/auth/') ||
       req.url.startsWith('/smartdocs') ||
       req.url.startsWith('/permits') ||
-      req.url.startsWith('/integrations')
+      req.url.startsWith('/integrations') ||
+      req.url.startsWith('/companies') ||
+      req.url.startsWith('/employees') ||
+      req.url.startsWith('/direct-documents')
     ) {
       req.url = `/api${req.url}`;
     }
@@ -3211,6 +3243,7 @@ export function createApiApp(options?: {
       email: req.officialProfile.email || req.authUser.email,
       role: req.officialProfile.role,
       empresaId: req.officialProfile.empresaId,
+      empresaIds: getProfileAuthorizedEmpresaIds(req.officialProfile),
     };
   };
 
@@ -3256,12 +3289,12 @@ export function createApiApp(options?: {
       rawMsg.toLowerCase().includes('missing or insufficient permissions') ||
       rawMsg.toLowerCase().includes('permission_denied')
     ) {
-      console.error('[API /api/integrations Firestore Permission Denied]:', err);
+      console.error('[API /api/integrations Firestore Permission Denied - Diagnostics]:', err);
       return res.status(503).json({
         success: false,
         code: 'FIRESTORE_RULES_NOT_PUBLISHED',
         message:
-          'Infraestrutura Firestore pendente: o banco recusou acesso (permission-denied) às coleções da Central de Integração (activityProfiles, activityDocumentRequirements, contractorIntegrations ou contractorIntegrationItems). Publique o arquivo firestore.rules no Firebase e configure as credenciais do Firebase Admin SDK no backend.',
+          'Não foi possível acessar os dados da integração. Verifique sua conexão ou tente novamente. Se o problema persistir, entre em contato com o administrador.',
       });
     }
     console.error('[API /api/integrations Error]:', err);
@@ -3327,6 +3360,42 @@ export function createApiApp(options?: {
         return res.json({ success: true, ...result });
       } catch (err) {
         return handleIntegrationWorkflowError(res, err, 'Erro ao verificar duplicidade cadastral.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/reuse-preview',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const body = req.body || {};
+        const preview = await integrationService.previewDocumentReuse(actor, {
+          empresaId: typeof body.empresaId === 'string' ? body.empresaId : '',
+          atividadeIds: Array.isArray(body.atividadeIds)
+            ? body.atividadeIds.map((id: unknown) => String(id))
+            : [],
+          atividadesSimples: Array.isArray(body.atividadesSimples)
+            ? body.atividadesSimples
+            : [],
+          colaboradorIds: Array.isArray(body.colaboradorIds)
+            ? body.colaboradorIds.map((id: unknown) => String(id))
+            : [],
+        });
+        return res.json({ success: true, preview });
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao consultar reaproveitamento automático de documentos.'
+        );
       }
     }
   );
@@ -3402,7 +3471,8 @@ export function createApiApp(options?: {
   app.post(
     '/api/integrations/:id/documents/upload',
     requireIntegrationEditor,
-    async (req: AuthenticatedRequest, res: Response) => {
+    parseOptionalMultipartFile,
+    async (req: AuthenticatedRequest & RequestWithBinaryUpload, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
         return res.status(401).json({
@@ -3411,10 +3481,25 @@ export function createApiApp(options?: {
         });
       }
       try {
+        const rawBody = req.body || {};
+        const binaryFile = req.uploadedBinaryFile;
+        const normalizedPayload = {
+          ...rawBody,
+          arquivoNome:
+            (typeof rawBody.arquivoNome === 'string' && rawBody.arquivoNome.trim()) ||
+            binaryFile?.originalName ||
+            '',
+          arquivoBuffer: binaryFile?.buffer,
+          arquivoMimeType: binaryFile?.declaredMimeType || rawBody.arquivoMimeType,
+          semValidade: parseMultipartBoolean(rawBody.semValidade),
+          obrigatorio: parseMultipartBoolean(rawBody.obrigatorio),
+          runSmartDocsAi: parseMultipartBoolean(rawBody.runSmartDocsAi),
+          aptidoesEspecificas: parseMultipartStringArray(rawBody.aptidoesEspecificas),
+        };
         const result = await integrationService.uploadSingleDocument(
           actor,
           req.params.id,
-          req.body || {}
+          normalizedPayload
         );
         return res.json({
           success: true,
@@ -3674,7 +3759,8 @@ export function createApiApp(options?: {
   app.post(
     '/api/integrations/:id/items/:itemId/renew',
     requireIntegrationEditor,
-    async (req: AuthenticatedRequest, res: Response) => {
+    parseOptionalMultipartFile,
+    async (req: AuthenticatedRequest & RequestWithBinaryUpload, res: Response) => {
       const actor = extractIntegrationActor(req);
       if (!actor) {
         return res.status(401).json({
@@ -3683,11 +3769,25 @@ export function createApiApp(options?: {
         });
       }
       try {
+        const rawBody = req.body || {};
+        const binaryFile = req.uploadedBinaryFile;
+        const normalizedPayload = {
+          ...rawBody,
+          arquivoNome:
+            (typeof rawBody.arquivoNome === 'string' && rawBody.arquivoNome.trim()) ||
+            binaryFile?.originalName ||
+            '',
+          arquivoBuffer: binaryFile?.buffer,
+          arquivoMimeType: binaryFile?.declaredMimeType || rawBody.arquivoMimeType,
+          semValidade: parseMultipartBoolean(rawBody.semValidade),
+          runSmartDocsAi: parseMultipartBoolean(rawBody.runSmartDocsAi),
+          aptidoesEspecificas: parseMultipartStringArray(rawBody.aptidoesEspecificas),
+        };
         const result = await integrationService.renewIntegrationItem(
           actor,
           req.params.id,
           req.params.itemId,
-          req.body || {}
+          normalizedPayload
         );
         return res.json({
           success: true,
@@ -3863,6 +3963,147 @@ export function createApiApp(options?: {
     }
   );
 
+  // ============================================================================
+  // ATIVIDADE SIMPLES (SECTION 9.1): SOLICITANTE REGISTRATION & ADMIN EHS REVIEW
+  // ============================================================================
+
+  app.post(
+    '/api/integrations/:id/simple-activities',
+    requireIntegrationEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.addSimpleActivity(
+          actor,
+          req.params.id,
+          req.body || {}
+        );
+        return res.status(201).json({
+          success: true,
+          message: 'Atividade Simples cadastrada e vinculada à solicitação de integração.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao cadastrar Atividade Simples na integração.'
+        );
+      }
+    }
+  );
+
+  app.patch(
+    '/api/integrations/:id/simple-activities/:simpleActivityId',
+    requireIntegrationEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.updateSimpleActivity(
+          actor,
+          req.params.id,
+          req.params.simpleActivityId,
+          req.body || {}
+        );
+        return res.json({
+          success: true,
+          message: 'Atividade Simples atualizada e encaminhada para conferência do Admin EHS.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao atualizar Atividade Simples.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/simple-activities/:simpleActivityId/documents',
+    requireIntegrationEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.addSimpleActivityDocuments(
+          actor,
+          req.params.id,
+          req.params.simpleActivityId,
+          req.body || {}
+        );
+        return res.status(201).json({
+          success: true,
+          message: 'Documentos vinculados à Atividade Simples (com verificação de reaproveitamento automático).',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao vincular documentos à Atividade Simples.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/integrations/:id/simple-activities/:simpleActivityId/review',
+    requireIntegrationAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractIntegrationActor(req);
+      if (!actor) {
+        return res.status(401).json({
+          success: false,
+          message: 'Sessão inválida ou divergente. Faça login novamente.',
+        });
+      }
+      try {
+        const result = await integrationService.reviewSimpleActivity(
+          actor,
+          req.params.id,
+          req.params.simpleActivityId,
+          {
+            decisao: req.body?.decisao,
+            justificativa:
+              typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
+            expectedVersion:
+              typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+          }
+        );
+        return res.json({
+          success: true,
+          message: 'Decisão sobre a Atividade Simples registrada com histórico e notificação.',
+          ...result,
+        });
+      } catch (err) {
+        return handleIntegrationWorkflowError(
+          res,
+          err,
+          'Erro ao analisar Atividade Simples.'
+        );
+      }
+    }
+  );
+
   app.post(
     '/api/integrations/:id/approve',
     requireIntegrationAdmin,
@@ -3880,6 +4121,7 @@ export function createApiApp(options?: {
             typeof req.body?.justificativa === 'string' ? req.body.justificativa : undefined,
           expectedVersion:
             typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+          approveWholePackage: Boolean(req.body?.approveWholePackage),
         });
         return res.json({
           success: true,
@@ -3910,10 +4152,17 @@ export function createApiApp(options?: {
             typeof req.body?.justificativa === 'string' ? req.body.justificativa : '',
           expectedVersion:
             typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined,
+          rejectedItemIds: Array.isArray(req.body?.rejectedItemIds)
+            ? req.body.rejectedItemIds.map((id: unknown) => String(id))
+            : undefined,
+          itemReasons:
+            req.body?.itemReasons && typeof req.body.itemReasons === 'object'
+              ? req.body.itemReasons
+              : undefined,
         });
         return res.json({
           success: true,
-          message: 'Integração reprovada com justificativa registrada.',
+          message: 'Integração reprovada com justificativa registrada e solicitante notificado.',
           ...result,
         });
       } catch (err) {
@@ -3970,6 +4219,430 @@ export function createApiApp(options?: {
         message:
           'A exclusão física de documentos e versões da integração é proibida para preservar o histórico auditável.',
       });
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // CENTRAL DE NOTIFICAÇÕES INTERNAS (ADM + SOLICITANTE — MULTI-TENANT FIRESTORE)
+  // ---------------------------------------------------------------------------
+  const extractNotificationActor = (req: AuthenticatedRequest): NotificationActor | null => {
+    if (!req.officialProfile || !req.authUser) return null;
+    return {
+      id: req.officialProfile.id,
+      nome: req.officialProfile.nome || req.authUser.nome,
+      email: req.officialProfile.email || req.authUser.email,
+      role: req.officialProfile.role,
+      empresaId: req.officialProfile.empresaId,
+      empresaIds: getProfileAuthorizedEmpresaIds(req.officialProfile),
+    };
+  };
+
+  const handleNotificationError = (res: Response, err: unknown, fallback: string) => {
+    if (err instanceof NotificationWorkflowError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+      });
+    }
+    console.error('[API /api/in-app-notifications Error - Diagnostics]:', err);
+    return res.status(500).json({
+      success: false,
+      code: 'NOTIFICATION_SERVICE_ERROR',
+      message: fallback,
+    });
+  };
+
+  app.get(
+    '/api/in-app-notifications',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractNotificationActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const result = await inAppNotificationService.listForActor(actor);
+        return res.json({ success: true, ...result });
+      } catch (err) {
+        return handleNotificationError(
+          res,
+          err,
+          'Não foi possível carregar suas notificações no momento.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/in-app-notifications/:id/read',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractNotificationActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        await inAppNotificationService.markAsRead(actor, req.params.id);
+        return res.json({ success: true });
+      } catch (err) {
+        return handleNotificationError(
+          res,
+          err,
+          'Não foi possível marcar a notificação como lida.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/in-app-notifications/read-all',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractNotificationActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const result = await inAppNotificationService.markAllAsRead(actor);
+        return res.json({ success: true, ...result });
+      } catch (err) {
+        return handleNotificationError(
+          res,
+          err,
+          'Não foi possível marcar as notificações como lidas.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/in-app-notifications/broadcast',
+    requireIntegrationAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractNotificationActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const body = req.body || {};
+        const result = await inAppNotificationService.sendAdminAnnouncement(actor, {
+          targetScope:
+            body.targetScope === 'single_company' ||
+            body.targetScope === 'company_group' ||
+            body.targetScope === 'all_solicitantes'
+              ? body.targetScope
+              : 'all_solicitantes',
+          empresaIds: Array.isArray(body.empresaIds)
+            ? body.empresaIds.map((id: unknown) => String(id))
+            : [],
+          title: typeof body.title === 'string' ? body.title : '',
+          message: typeof body.message === 'string' ? body.message : '',
+          severity: body.severity,
+        });
+        return res.status(201).json({
+          success: true,
+          message: 'Comunicado enviado com sucesso para a Central de Notificações.',
+          ...result,
+        });
+      } catch (err) {
+        return handleNotificationError(
+          res,
+          err,
+          'Não foi possível enviar o comunicado no momento.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/in-app-notifications/sync-expirations',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractNotificationActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const milestones = Array.isArray(req.body?.milestones) ? req.body.milestones : undefined;
+        const result = await inAppNotificationService.syncExpirationNotifications(milestones);
+        return res.json({ success: true, ...result });
+      } catch (err) {
+        return handleNotificationError(
+          res,
+          err,
+          'Não foi possível sincronizar alertas de vencimento.'
+        );
+      }
+    }
+  );
+
+  app.post(
+    '/api/in-app-notifications/event',
+    requireIntegrationEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractNotificationActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const b = req.body || {};
+        // Prevent solicitantes from spoofing admin-only broadcast/rejection events
+        const requestedRecipientRole =
+          actor.role === 'solicitante' ? 'admin' : b.recipientRole || 'solicitante';
+        const resNotif = await inAppNotificationService.createIdempotentNotification({
+          recipientRole: requestedRecipientRole,
+          empresaId: actor.role === 'solicitante' ? actor.empresaId || b.empresaId : b.empresaId,
+          empresaNome: typeof b.empresaNome === 'string' ? b.empresaNome : undefined,
+          type: typeof b.type === 'string' ? (b.type as any) : 'DOCUMENTO_CORRIGIDO',
+          severity: ['info', 'success', 'warning', 'critical'].includes(b.severity)
+            ? b.severity
+            : 'info',
+          title: typeof b.title === 'string' ? b.title : 'Atualização EHS More',
+          message: typeof b.message === 'string' ? b.message : 'Novo evento registrado.',
+          actionLabel: typeof b.actionLabel === 'string' ? b.actionLabel : undefined,
+          actionTab: typeof b.actionTab === 'string' ? b.actionTab : undefined,
+          integrationId: typeof b.integrationId === 'string' ? b.integrationId : undefined,
+          companyId: typeof b.companyId === 'string' ? b.companyId : undefined,
+          employeeId: typeof b.employeeId === 'string' ? b.employeeId : undefined,
+          documentId: typeof b.documentId === 'string' ? b.documentId : undefined,
+          createdById: actor.id,
+          createdByNome: actor.nome,
+          createdByRole: actor.role,
+          idempotencyKey:
+            typeof b.idempotencyKey === 'string' && b.idempotencyKey.trim()
+              ? b.idempotencyKey.trim()
+              : `evt-${actor.id}-${Date.now()}`,
+        });
+        return res.status(201).json({ success: true, ...resNotif });
+      } catch (err) {
+        return handleNotificationError(
+          res,
+          err,
+          'Não foi possível registrar a notificação do evento.'
+        );
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // GESTÃO DE TERCEIROS — CADASTRO COM VÍNCULO AUTOMÁTICO, COLABORADORES E DOCUMENTOS DIRETOS
+  // ---------------------------------------------------------------------------
+  const extractThirdPartyActor = (req: AuthenticatedRequest): ThirdPartyActor | null => {
+    if (req.tokenRoleDiverged || !req.authUser || !req.officialProfile) {
+      return null;
+    }
+    return {
+      id: req.officialProfile.id,
+      nome: req.officialProfile.nome || req.authUser.nome,
+      email: req.officialProfile.email || req.authUser.email,
+      role: req.officialProfile.role,
+      empresaId: req.officialProfile.empresaId,
+      empresaIds: getProfileAuthorizedEmpresaIds(req.officialProfile),
+    };
+  };
+
+  const handleThirdPartyError = (res: Response, err: unknown, fallback: string) => {
+    if (err instanceof ThirdPartyWorkflowError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+        ...(err.details || {}),
+      });
+    }
+    if (err instanceof IntegrationStorageUnavailableError) {
+      return res.status(err.status).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+      });
+    }
+    console.error('[API ThirdParty Error]:', err);
+    return res.status(500).json({
+      success: false,
+      code: 'THIRD_PARTY_INTERNAL_ERROR',
+      message: fallback,
+    });
+  };
+
+  app.post(
+    '/api/companies/register',
+    requireIntegrationEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractThirdPartyActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const result = await thirdPartyService.registerCompany(actor, req.body || {});
+        return res.status(201).json({
+          success: true,
+          company: result.company,
+          user: result.updatedUser
+            ? sanitizeUserProfile(result.updatedUser.id, result.updatedUser)
+            : undefined,
+        });
+      } catch (err) {
+        return handleThirdPartyError(res, err, 'Não foi possível cadastrar a empresa no momento.');
+      }
+    }
+  );
+
+  app.put(
+    '/api/companies/:companyId/links',
+    requireIntegrationAdmin,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractThirdPartyActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const solicitanteUserIds = Array.isArray(req.body?.solicitanteUserIds)
+          ? req.body.solicitanteUserIds.map((v: unknown) => String(v))
+          : [];
+        const result = await thirdPartyService.updateCompanySolicitanteLinks(
+          actor,
+          req.params.companyId,
+          solicitanteUserIds
+        );
+        return res.json({ success: true, ...result });
+      } catch (err) {
+        return handleThirdPartyError(res, err, 'Não foi possível atualizar os vínculos da empresa.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/employees/register',
+    requireIntegrationEditor,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractThirdPartyActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const result = await thirdPartyService.registerEmployee(actor, req.body || {});
+        return res.status(201).json({ success: true, ...result });
+      } catch (err) {
+        return handleThirdPartyError(res, err, 'Não foi possível cadastrar o colaborador.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/direct-documents/upload',
+    requireIntegrationEditor,
+    parseOptionalMultipartFile,
+    async (req: AuthenticatedRequest & RequestWithBinaryUpload, res: Response) => {
+      const actor = extractThirdPartyActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      try {
+        const rawBody = req.body || {};
+        const binaryFile = req.uploadedBinaryFile;
+        const normalizedPayload = {
+          ...rawBody,
+          arquivoNome:
+            (typeof rawBody.arquivoNome === 'string' && rawBody.arquivoNome.trim()) ||
+            binaryFile?.originalName ||
+            '',
+          arquivoBuffer: binaryFile?.buffer,
+          arquivoMimeType: binaryFile?.declaredMimeType || rawBody.arquivoMimeType,
+          semValidade: parseMultipartBoolean(rawBody.semValidade),
+        };
+        const result = await thirdPartyService.uploadDirectDocument(actor, normalizedPayload);
+        return res.status(201).json({ success: true, ...result });
+      } catch (err) {
+        return handleThirdPartyError(res, err, 'Não foi possível enviar o documento.');
+      }
+    }
+  );
+
+  app.get(
+    '/api/direct-documents/file',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractThirdPartyActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      const key = typeof req.query?.key === 'string' ? req.query.key : '';
+      if (!key) {
+        return res.status(400).json({ success: false, message: 'Referência de arquivo obrigatória.' });
+      }
+      try {
+        const retrieved = await thirdPartyService.retrieveDirectDocumentFile(actor, key);
+        const safeName = sanitizeDownloadFileName(
+          typeof req.query?.name === 'string' && req.query.name.trim()
+            ? req.query.name
+            : retrieved.fileName
+        );
+        const disposition = req.query?.download === '1' ? 'attachment' : 'inline';
+        res.setHeader('Content-Type', retrieved.mimeType);
+        res.setHeader('Content-Length', String(retrieved.sizeBytes));
+        res.setHeader('Content-Disposition', `${disposition}; filename="${safeName}"`);
+        res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        return res.send(retrieved.buffer);
+      } catch (err) {
+        return handleThirdPartyError(res, err, 'Não foi possível recuperar o arquivo.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/direct-documents/:kind/:id/review',
+    requireIntegrationAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = extractThirdPartyActor(req);
+      if (!actor) {
+        return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+      }
+      const rawKind = String(req.params.kind || '').trim().toLowerCase();
+      if (rawKind !== 'documento' && rawKind !== 'exame' && rawKind !== 'treinamento') {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_DOCUMENT_KIND',
+          message: 'Tipo documental inválido. Utilize documento, exame ou treinamento.',
+        });
+      }
+      try {
+        const body = req.body || {};
+        const rawDecision = String(body.decisao ?? body.decision ?? '')
+          .trim()
+          .toLowerCase();
+        const decisao: 'aprovado' | 'reprovado' | null =
+          rawDecision === 'aprovado' || rawDecision === 'aprovar'
+            ? 'aprovado'
+            : rawDecision === 'reprovado' || rawDecision === 'reprovar'
+            ? 'reprovado'
+            : null;
+        if (!decisao) {
+          return res.status(400).json({
+            success: false,
+            code: 'INVALID_DECISION',
+            message: 'Decisão inválida. Informe aprovado ou reprovado.',
+          });
+        }
+        const result = await thirdPartyService.reviewDirectDocument(
+          actor,
+          rawKind,
+          req.params.id,
+          {
+            decisao,
+            motivo: typeof body.motivo === 'string' ? body.motivo : undefined,
+          }
+        );
+        return res.json({ success: true, ...result });
+      } catch (err) {
+        return handleThirdPartyError(
+          res,
+          err,
+          'Não foi possível registrar a avaliação do documento.'
+        );
+      }
     }
   );
 

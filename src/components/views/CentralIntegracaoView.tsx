@@ -28,7 +28,9 @@ import {
   RotateCcw,
   Download,
   X,
+  FileSpreadsheet,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { useAuth } from '../../context/AuthContext';
 import {
   IntegrationBatchFilePayload,
@@ -45,9 +47,13 @@ import type {
   IntegrationItemStatus,
   IntegrationOfficialCollection,
   IntegrationPendingDocumentInfo,
+  IntegrationReusePreviewResult,
   IntegrationSubmissionReadiness,
   IntegrationType,
   IntegrationWorkflowStatus,
+  SimpleActivityDocumentInput,
+  SimpleActivityEntry,
+  SimpleActivityStatus,
 } from '../../types/sst';
 import {
   CATEGORY_BY_ID,
@@ -61,6 +67,7 @@ import {
 interface CentralIntegracaoViewProps {
   initialSection?: 'nova' | 'acompanhamento';
   initialIntegrationId?: string | null;
+  initialCompanyId?: string | null;
 }
 
 type QueueItemUploadStatus = 'queued' | 'uploading' | 'success' | 'failed';
@@ -122,6 +129,51 @@ interface NewEmployeeDraft {
   telefone: string;
   email: string;
 }
+
+interface SimpleActivityDraft {
+  localId: string;
+  nome: string;
+  descricaoServico: string;
+  observacoes: string;
+  documentos: Array<{
+    localId: string;
+    nomeDocumento: string;
+    escopo: 'empresa' | 'colaborador';
+    obrigatorio: boolean;
+  }>;
+}
+
+const SIMPLE_ACTIVITY_STATUS_META: Record<
+  SimpleActivityStatus,
+  { label: string; badgeClass: string }
+> = {
+  PENDENTE_ANALISE: {
+    label: 'Pendente de Análise EHS',
+    badgeClass: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  },
+  APROVADA: {
+    label: 'Aprovada pelo Admin EHS',
+    badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  },
+  RECUSADA: {
+    label: 'Recusada pelo Admin EHS',
+    badgeClass: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+  },
+  COMPLEMENTACAO_SOLICITADA: {
+    label: 'Complementação Solicitada',
+    badgeClass: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
+  },
+};
+
+const QUICK_SIMPLE_DOC_SUGGESTIONS: Array<{ nome: string; escopo: 'empresa' | 'colaborador' }> = [
+  { nome: 'PGR — Programa de Gerenciamento de Riscos', escopo: 'empresa' },
+  { nome: 'PCMSO — Programa de Controle Médico', escopo: 'empresa' },
+  { nome: 'ART — Anotação de Responsabilidade Técnica', escopo: 'empresa' },
+  { nome: 'Procedimento Operacional / Memorial Descritivo', escopo: 'empresa' },
+  { nome: 'Ordem de Serviço (OS)', escopo: 'colaborador' },
+  { nome: 'Ficha de Entrega de EPI', escopo: 'colaborador' },
+  { nome: 'ASO — Atestado de Saúde Ocupacional', escopo: 'colaborador' },
+];
 
 const INTEGRATION_STATUS_META: Record<
   IntegrationWorkflowStatus,
@@ -216,15 +268,6 @@ const QUICK_RENEWAL_DOCS: Array<{
   { code: 'FICHA_EPI', label: 'Ficha de Entrega de EPI Assinada', categoria: 'colaborador', origem: 'epiDeliveries' },
 ];
 
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error(`Falha ao ler arquivo ${file.name}`));
-    reader.readAsDataURL(file);
-  });
-}
-
 function formatDateTimePt(iso?: string): string {
   if (!iso) return '—';
   const dt = new Date(iso);
@@ -293,10 +336,13 @@ function persistActiveIntegrationId(id: string | null): void {
 export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
   initialSection = 'nova',
   initialIntegrationId = null,
+  initialCompanyId = null,
 }) => {
-  const { activeEmpresaId, isSolicitante, isAuditor } = useAuth();
+  const { activeEmpresaId, isSolicitante, isAuditor, isDemoMode } = useAuth();
   const {
     companies,
+    authorizedCompanies,
+    effectiveAuthorizedEmpresaIds,
     employees,
     activityProfiles,
     activityDocumentRequirements,
@@ -305,7 +351,11 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
     integrationFirestoreError,
     getIntegrationDetailOnServer,
     checkIntegrationDuplicatesOnServer,
+    previewIntegrationReuseOnServer,
     createIntegrationOnServer,
+    addSimpleActivityOnServer,
+    updateSimpleActivityOnServer,
+    addSimpleActivityDocumentsOnServer,
     uploadIntegrationDocumentOnServer,
     fetchIntegrationItemFileBlobOnServer,
     renewIntegrationItemOnServer,
@@ -361,7 +411,9 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
   // Creation wizard state
   const [integrationType, setIntegrationType] = useState<IntegrationType>('INTEGRACAO_INICIAL');
   const [companyMode, setCompanyMode] = useState<'existing' | 'new'>('existing');
-  const [selectedEmpresaId, setSelectedEmpresaId] = useState<string>(() => activeEmpresaId || '');
+  const [selectedEmpresaId, setSelectedEmpresaId] = useState<string>(
+    () => initialCompanyId || activeEmpresaId || ''
+  );
   const [newCompanyForm, setNewCompanyForm] = useState({
     razaoSocial: '',
     nomeFantasia: '',
@@ -378,8 +430,36 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
     contrato_indeterminado: true,
   });
   const [cnpjCheck, setCnpjCheck] = useState<IntegrationDuplicateCheckResult | null>(null);
+  const [reusePreview, setReusePreview] = useState<IntegrationReusePreviewResult | null>(null);
+  const [loadingReusePreview, setLoadingReusePreview] = useState(false);
+  const [showConsolidatedTable, setShowConsolidatedTable] = useState(true);
 
   const [selectedActivityIds, setSelectedActivityIds] = useState<string[]>([]);
+  // ATIVIDADE SIMPLES (Section 9.1) creation state
+  const [simpleActivityPanelOpen, setSimpleActivityPanelOpen] = useState(false);
+  const [simpleActivitiesDraft, setSimpleActivitiesDraft] = useState<SimpleActivityDraft[]>([]);
+  const [saDraftNome, setSaDraftNome] = useState('');
+  const [saDraftDescricao, setSaDraftDescricao] = useState('');
+  const [saDraftObservacoes, setSaDraftObservacoes] = useState('');
+  const [saDraftDocs, setSaDraftDocs] = useState<
+    Array<{ localId: string; nomeDocumento: string; escopo: 'empresa' | 'colaborador'; obrigatorio: boolean }>
+  >([]);
+  const [saDocInputName, setSaDocInputName] = useState('');
+  const [saDocInputScope, setSaDocInputScope] = useState<'empresa' | 'colaborador'>('empresa');
+
+  // ATIVIDADE SIMPLES active integration management state
+  const [addingSimpleInActive, setAddingSimpleInActive] = useState(false);
+  const [editingSimpleId, setEditingSimpleId] = useState<string | null>(null);
+  const [editSimpleForm, setEditSimpleForm] = useState({
+    nome: '',
+    descricaoServico: '',
+    observacoes: '',
+  });
+  const [addDocToSimpleId, setAddDocToSimpleId] = useState<string | null>(null);
+  const [addDocToSimpleName, setAddDocToSimpleName] = useState('');
+  const [addDocToSimpleScope, setAddDocToSimpleScope] = useState<'empresa' | 'colaborador'>('empresa');
+  const [simpleActionBusy, setSimpleActionBusy] = useState(false);
+
   const [selectedEmployeeIds, setSelectedEmployeeIds] = useState<string[]>([]);
   const [newEmployees, setNewEmployees] = useState<NewEmployeeDraft[]>([]);
   const [empDraft, setEmpDraft] = useState({
@@ -410,7 +490,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
   const [renewingItem, setRenewingItem] = useState<ContractorIntegrationItem | null>(null);
   const [renewFileData, setRenewFileData] = useState<{
     arquivoNome: string;
-    arquivoBase64: string;
+    file: File;
     sizeBytes: number;
     dataEmissao: string;
     dataValidade: string;
@@ -428,18 +508,25 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
     };
   }, [previewDoc]);
 
-  // Sync company default when activeEmpresaId loads
+  // Sync company default when authorizedCompanies or initialCompanyId changes
   useEffect(() => {
+    if (initialCompanyId && (!isSolicitante || effectiveAuthorizedEmpresaIds.includes(initialCompanyId))) {
+      setSelectedEmpresaId(initialCompanyId);
+      setCompanyMode('existing');
+      return;
+    }
     if (isSolicitante) {
-      if (activeEmpresaId) {
-        setSelectedEmpresaId(activeEmpresaId);
+      if (effectiveAuthorizedEmpresaIds.length > 0) {
+        if (!selectedEmpresaId || !effectiveAuthorizedEmpresaIds.includes(selectedEmpresaId)) {
+          setSelectedEmpresaId(activeEmpresaId || effectiveAuthorizedEmpresaIds[0]);
+        }
         setCompanyMode('existing');
       } else {
         setSelectedEmpresaId('');
         setCompanyMode('new');
       }
     }
-  }, [isSolicitante, activeEmpresaId]);
+  }, [isSolicitante, activeEmpresaId, effectiveAuthorizedEmpresaIds, initialCompanyId]);
 
   const activeActivities = useMemo(
     () => activityProfiles.filter((a) => a.ativo),
@@ -448,10 +535,10 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
 
   const visibleCompanies = useMemo(() => {
     if (isSolicitante) {
-      return activeEmpresaId ? companies.filter((c) => c.id === activeEmpresaId) : [];
+      return authorizedCompanies;
     }
     return companies;
-  }, [companies, isSolicitante, activeEmpresaId]);
+  }, [companies, authorizedCompanies, isSolicitante]);
 
   const companyEmployees = useMemo(() => {
     if (!selectedEmpresaId) return [];
@@ -460,8 +547,9 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
 
   const visibleIntegrations = useMemo(() => {
     let list = contractorIntegrations;
-    if (isSolicitante && activeEmpresaId) {
-      list = list.filter((i) => i.empresaId === activeEmpresaId || !i.empresaId);
+    if (isSolicitante && effectiveAuthorizedEmpresaIds.length > 0) {
+      const allowedSet = new Set(effectiveAuthorizedEmpresaIds);
+      list = list.filter((i) => !i.empresaId || allowedSet.has(i.empresaId));
     }
     if (statusFilter !== 'ALL') {
       list = list.filter((i) => i.status === statusFilter);
@@ -476,7 +564,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
       );
     }
     return list;
-  }, [contractorIntegrations, isSolicitante, activeEmpresaId, statusFilter, searchQuery]);
+  }, [contractorIntegrations, isSolicitante, effectiveAuthorizedEmpresaIds, statusFilter, searchQuery]);
 
   // Preview count of Matrix requirements for selected activities
   const previewMatrixRequirementsCount = useMemo(() => {
@@ -616,6 +704,264 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
     }
   };
 
+  const selectedActivityIdsKey = selectedActivityIds.join(',');
+  const selectedEmployeeIdsKey = selectedEmployeeIds.join(',');
+  const simpleActivitiesPreviewPayload = useMemo(() => {
+    const list = simpleActivitiesDraft.map((sa) => ({
+      nome: sa.nome,
+      descricaoServico: sa.descricaoServico,
+      observacoes: sa.observacoes || undefined,
+      documentos: sa.documentos.map((d) => ({
+        nomeDocumento: d.nomeDocumento,
+        escopo: d.escopo,
+        obrigatorio: d.obrigatorio,
+      })),
+    }));
+    if (saDraftNome.trim() && saDraftDocs.length > 0) {
+      list.push({
+        nome: saDraftNome.trim(),
+        descricaoServico: saDraftDescricao.trim() || 'Atividade simples em preenchimento',
+        observacoes: saDraftObservacoes.trim() || undefined,
+        documentos: saDraftDocs.map((d) => ({
+          nomeDocumento: d.nomeDocumento,
+          escopo: d.escopo,
+          obrigatorio: d.obrigatorio,
+        })),
+      });
+    }
+    return list;
+  }, [simpleActivitiesDraft, saDraftNome, saDraftDescricao, saDraftObservacoes, saDraftDocs]);
+  const simpleActivitiesPreviewKey = JSON.stringify(simpleActivitiesPreviewPayload);
+
+  useEffect(() => {
+    if (
+      section !== 'nova' ||
+      companyMode !== 'existing' ||
+      !selectedEmpresaId ||
+      (selectedActivityIds.length === 0 && simpleActivitiesPreviewPayload.length === 0)
+    ) {
+      setReusePreview(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingReusePreview(true);
+    const timer = setTimeout(() => {
+      previewIntegrationReuseOnServer({
+        empresaId: selectedEmpresaId,
+        atividadeIds: selectedActivityIds,
+        atividadesSimples:
+          simpleActivitiesPreviewPayload.length > 0 ? simpleActivitiesPreviewPayload : undefined,
+        colaboradorIds: selectedEmployeeIds,
+      })
+        .then((res) => {
+          if (!cancelled) setReusePreview(res);
+        })
+        .catch(() => {
+          if (!cancelled) setReusePreview(null);
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingReusePreview(false);
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    section,
+    companyMode,
+    selectedEmpresaId,
+    selectedActivityIdsKey,
+    selectedEmployeeIdsKey,
+    simpleActivitiesPreviewKey,
+  ]);
+
+  const handleAddSimpleDocToDraft = (docName?: string, escopo?: 'empresa' | 'colaborador') => {
+    const clean = (docName ?? saDocInputName).trim();
+    if (!clean) return;
+    const scope = escopo ?? saDocInputScope;
+    setSaDraftDocs((prev) => {
+      if (prev.some((d) => d.nomeDocumento.toLowerCase() === clean.toLowerCase() && d.escopo === scope)) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          localId: `sadoc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          nomeDocumento: clean,
+          escopo: scope,
+          obrigatorio: true,
+        },
+      ];
+    });
+    if (!docName) setSaDocInputName('');
+  };
+
+  const handleCommitSimpleActivityDraft = () => {
+    const nome = saDraftNome.trim();
+    const desc = saDraftDescricao.trim();
+    if (nome.length < 2) {
+      setCreateError('Informe o nome da Atividade Simples (mínimo de 2 caracteres).');
+      return;
+    }
+    if (desc.length < 5) {
+      setCreateError('Descreva o serviço que será executado na Atividade Simples (mínimo de 5 caracteres).');
+      return;
+    }
+    const pendingDocs = [...saDraftDocs];
+    if (saDocInputName.trim()) {
+      pendingDocs.push({
+        localId: `sadoc-${Date.now()}`,
+        nomeDocumento: saDocInputName.trim(),
+        escopo: saDocInputScope,
+        obrigatorio: true,
+      });
+    }
+    setSimpleActivitiesDraft((prev) => [
+      ...prev,
+      {
+        localId: `sa-draft-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        nome,
+        descricaoServico: desc,
+        observacoes: saDraftObservacoes.trim(),
+        documentos: pendingDocs,
+      },
+    ]);
+    setSaDraftNome('');
+    setSaDraftDescricao('');
+    setSaDraftObservacoes('');
+    setSaDraftDocs([]);
+    setSaDocInputName('');
+    setCreateError(null);
+  };
+
+  const handleAddSimpleActivityToActive = async () => {
+    if (!activeDetail || isAuditor || simpleActionBusy) return;
+    const nome = saDraftNome.trim();
+    const desc = saDraftDescricao.trim();
+    if (nome.length < 2 || desc.length < 5) {
+      setFeedback({
+        type: 'error',
+        text: 'Informe o nome da Atividade Simples e a descrição do serviço (mínimo de 5 caracteres).',
+      });
+      return;
+    }
+    const docsPayload: SimpleActivityDocumentInput[] = [
+      ...saDraftDocs.map((d) => ({
+        nomeDocumento: d.nomeDocumento,
+        escopo: d.escopo,
+        obrigatorio: d.obrigatorio,
+      })),
+      ...(saDocInputName.trim()
+        ? [{ nomeDocumento: saDocInputName.trim(), escopo: saDocInputScope, obrigatorio: true }]
+        : []),
+    ];
+    setSimpleActionBusy(true);
+    setFeedback(null);
+    try {
+      const updated = await addSimpleActivityOnServer(activeDetail.integration.id, {
+        nome,
+        descricaoServico: desc,
+        observacoes: saDraftObservacoes.trim() || undefined,
+        documentos: docsPayload,
+        expectedVersion: activeDetail.integration.versaoConcorrencia,
+      });
+      setActiveDetail(updated);
+      setSaDraftNome('');
+      setSaDraftDescricao('');
+      setSaDraftObservacoes('');
+      setSaDraftDocs([]);
+      setSaDocInputName('');
+      setAddingSimpleInActive(false);
+      setFeedback({
+        type: 'success',
+        text: `Atividade Simples "${nome}" vinculada à integração (${updated.createdItems.length} documento(s) incluído(s) com verificação automática de reaproveitamento).`,
+      });
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        text: err?.message || 'Erro ao adicionar Atividade Simples.',
+      });
+    } finally {
+      setSimpleActionBusy(false);
+    }
+  };
+
+  const handleSaveSimpleActivityEdit = async (simpleActivityId: string) => {
+    if (!activeDetail || isAuditor || simpleActionBusy) return;
+    setSimpleActionBusy(true);
+    setFeedback(null);
+    try {
+      const updated = await updateSimpleActivityOnServer(
+        activeDetail.integration.id,
+        simpleActivityId,
+        {
+          nome: editSimpleForm.nome,
+          descricaoServico: editSimpleForm.descricaoServico,
+          observacoes: editSimpleForm.observacoes,
+          expectedVersion: activeDetail.integration.versaoConcorrencia,
+        }
+      );
+      setActiveDetail(updated);
+      setEditingSimpleId(null);
+      setFeedback({
+        type: 'success',
+        text: 'Atividade Simples atualizada e encaminhada para nova análise do Administrador EHS.',
+      });
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        text: err?.message || 'Erro ao atualizar Atividade Simples.',
+      });
+    } finally {
+      setSimpleActionBusy(false);
+    }
+  };
+
+  const handleAddDocToExistingSimple = async (simpleActivityId: string) => {
+    if (!activeDetail || isAuditor || simpleActionBusy) return;
+    const docName = addDocToSimpleName.trim();
+    if (!docName) return;
+    setSimpleActionBusy(true);
+    setFeedback(null);
+    try {
+      const updated = await addSimpleActivityDocumentsOnServer(
+        activeDetail.integration.id,
+        simpleActivityId,
+        {
+          documentos: [
+            {
+              nomeDocumento: docName,
+              escopo: addDocToSimpleScope,
+              obrigatorio: true,
+            },
+          ],
+          expectedVersion: activeDetail.integration.versaoConcorrencia,
+        }
+      );
+      setActiveDetail(updated);
+      setAddDocToSimpleName('');
+      setAddDocToSimpleId(null);
+      const reusedCount = updated.createdItems.filter((i) => i.reaproveitado).length;
+      setFeedback({
+        type: 'success',
+        text:
+          reusedCount > 0
+            ? `Documento "${docName}" reaproveitado automaticamente da base oficial (já aprovado e vigente)!`
+            : `Documento "${docName}" adicionado à Atividade Simples. Anexe o arquivo no checklist abaixo.`,
+      });
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        text: err?.message || 'Erro ao adicionar documento à Atividade Simples.',
+      });
+    } finally {
+      setSimpleActionBusy(false);
+    }
+  };
+
   const handleCreateIntegration = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isAuditor || busy) return;
@@ -704,22 +1050,49 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
         obrigatorio: boolean;
       }> = [];
 
+      // Auto-include any typed Simple Activity draft so user input is never discarded
+      const finalSimpleActivities = [...simpleActivitiesDraft];
+      let simpleDraftWasIncluded = false;
+      if (
+        integrationType === 'INTEGRACAO_INICIAL' &&
+        (saDraftNome.trim() || saDraftDescricao.trim() || saDraftDocs.length > 0)
+      ) {
+        if (saDraftNome.trim().length < 2 || saDraftDescricao.trim().length < 5) {
+          failCreation(
+            'Você iniciou o preenchimento de uma Atividade Simples. Informe o Nome da Atividade (mín. 2 caracteres) e a Descrição do Serviço (mín. 5 caracteres), ou limpe esses campos.'
+          );
+          return;
+        }
+        const pendingDocs = [...saDraftDocs];
+        if (saDocInputName.trim()) {
+          pendingDocs.push({
+            localId: `sadoc-auto-${Date.now()}`,
+            nomeDocumento: saDocInputName.trim(),
+            escopo: saDocInputScope,
+            obrigatorio: true,
+          });
+        }
+        finalSimpleActivities.push({
+          localId: `sa-auto-${Date.now()}`,
+          nome: saDraftNome.trim(),
+          descricaoServico: saDraftDescricao.trim(),
+          observacoes: saDraftObservacoes.trim(),
+          documentos: pendingDocs,
+        });
+        simpleDraftWasIncluded = true;
+      }
+
       if (integrationType === 'INTEGRACAO_INICIAL') {
-        if (activeActivities.length === 0) {
+        if (selectedActivityIds.length === 0 && finalSimpleActivities.length === 0) {
           failCreation(
-            activityMatrixFirestoreError
-              ? `Não foi possível carregar a Matriz de Atividades: ${activityMatrixFirestoreError}`
-              : 'Nenhuma atividade ativa disponível na Matriz de Atividades. Solicite ao Admin EHS a configuração das atividades.'
+            'Selecione ao menos uma atividade da Matriz NR ou cadastre uma ATIVIDADE SIMPLES na etapa "2. Atividades a Executar".'
           );
           return;
         }
-        if (selectedActivityIds.length === 0) {
-          failCreation(
-            'Selecione ao menos uma atividade na etapa "2. Atividades a Executar" para gerar o checklist obrigatório.'
-          );
-          return;
-        }
-        if (finalEmployeeIds.length === 0 && finalNewEmployees.length === 0) {
+        const requiresCollaborator =
+          selectedActivityIds.length > 0 ||
+          finalSimpleActivities.some((sa) => sa.documentos.some((d) => d.escopo === 'colaborador'));
+        if (requiresCollaborator && finalEmployeeIds.length === 0 && finalNewEmployees.length === 0) {
           failCreation(
             'Selecione ao menos um colaborador já cadastrado ou informe os dados de um novo colaborador terceirizado na etapa "3. Colaboradores Terceirizados Vinculados".'
           );
@@ -768,6 +1141,19 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
         empresaId: companyMode === 'existing' ? effectiveEmpresaId || undefined : undefined,
         solicitacaoNovaEmpresa: companyMode === 'new' ? newCompanyForm : undefined,
         atividadeIds: selectedActivityIds,
+        atividadesSimples:
+          finalSimpleActivities.length > 0
+            ? finalSimpleActivities.map((sa) => ({
+                nome: sa.nome,
+                descricaoServico: sa.descricaoServico,
+                observacoes: sa.observacoes || undefined,
+                documentos: sa.documentos.map((d) => ({
+                  nomeDocumento: d.nomeDocumento,
+                  escopo: d.escopo,
+                  obrigatorio: d.obrigatorio,
+                })),
+              }))
+            : undefined,
         colaboradorIds: finalEmployeeIds,
         novosColaboradores: finalNewEmployees.map((emp) => ({
           nomeCompleto: emp.nomeCompleto,
@@ -780,6 +1166,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
         })),
         customItems: customItems.length > 0 ? customItems : undefined,
         observacoes,
+        isDemo: isDemoMode || undefined,
       });
 
       // 5. Never show false success without a real persisted integration ID
@@ -796,6 +1183,15 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
       setBatchSummary(null);
       setSection('acompanhamento');
       setNewEmployees([]);
+      setSimpleActivitiesDraft([]);
+      if (simpleDraftWasIncluded) {
+        setSaDraftNome('');
+        setSaDraftDescricao('');
+        setSaDraftObservacoes('');
+        setSaDraftDocs([]);
+        setSaDocInputName('');
+      }
+      setSimpleActivityPanelOpen(false);
       if (draftWasIncluded) {
         setEmpDraft({
           nomeCompleto: '',
@@ -811,7 +1207,11 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
       setCreateError(null);
       setFeedback({
         type: 'success',
-        text: `Protocolo ${detail.integration.codigoProtocolo} gerado e salvo com ${detail.items.length} item(ns) no checklist dinâmico e ${detail.integration.colaboradoresCandidatos?.length || 0} colaborador(es). Anexe agora os documentos abaixo na seção DOCUMENTAÇÃO DOS COLABORADORES.`,
+        text: `Protocolo ${detail.integration.codigoProtocolo} gerado e salvo com ${detail.items.length} item(ns) no checklist dinâmico${
+          finalSimpleActivities.length > 0
+            ? ` e ${finalSimpleActivities.length} Atividade(s) Simples`
+            : ''
+        }. Anexe os documentos pendentes abaixo.`,
       });
 
       requestAnimationFrame(() => {
@@ -1256,7 +1656,6 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
       );
 
       try {
-        const base64DataUrl = await readFileAsDataUrl(queued.file);
         const payload: IntegrationBatchFilePayload = {
           itemId: queued.itemId || undefined,
           categoria: queued.categoria,
@@ -1268,7 +1667,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
           origemColecao: queued.origemColecao,
           obrigatorio: false,
           arquivoNome: queued.arquivoNome,
-          arquivoBase64: base64DataUrl,
+          file: queued.file,
           dataEmissao: queued.dataEmissao || undefined,
           dataValidade: queued.semValidade ? '' : queued.dataValidade || undefined,
           semValidade: queued.semValidade,
@@ -1480,7 +1879,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
         renewingItem.id,
         {
           arquivoNome: renewFileData.arquivoNome,
-          arquivoBase64: renewFileData.arquivoBase64,
+          file: renewFileData.file,
           dataEmissao: renewFileData.dataEmissao || undefined,
           dataValidade: renewFileData.semValidade ? '' : renewFileData.dataValidade || undefined,
           semValidade: renewFileData.semValidade,
@@ -1522,10 +1921,166 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
     return { total, queued, uploading, success, failed, globalPercent };
   }, [uploadQueue]);
 
+  const [spreadsheetFeedback, setSpreadsheetFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  const handleDownloadEmployeesTemplate = () => {
+    const templateRows = [
+      {
+        NomeCompleto: 'Carlos Eduardo Silva',
+        CPF: '123.456.789-01',
+        Cargo: 'Eletricista Industrial',
+        Setor: 'Manutenção',
+        Telefone: '(11) 99999-0001',
+        Email: 'carlos.silva@contratada.com.br',
+      },
+      {
+        NomeCompleto: 'Fernanda Souza Lima',
+        CPF: '987.654.321-09',
+        Cargo: 'Técnica em Soldagem',
+        Setor: 'Caldeiraria',
+        Telefone: '(11) 99999-0002',
+        Email: 'fernanda.lima@contratada.com.br',
+      },
+    ];
+    const sheet = XLSX.utils.json_to_sheet(templateRows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Colaboradores');
+    XLSX.writeFile(workbook, 'modelo-colaboradores-ehs-more.xlsx');
+  };
+
+  const handleImportEmployeesSpreadsheet = async (file: File) => {
+    setSpreadsheetFeedback(null);
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: 'array' });
+      const firstSheetName = workbook.SheetNames[0];
+      if (!firstSheetName) {
+        setSpreadsheetFeedback({
+          type: 'error',
+          text: 'A planilha enviada não contém nenhuma aba de dados.',
+        });
+        return;
+      }
+      const rows = XLSX.utils.sheet_to_json<Record<string, any>>(
+        workbook.Sheets[firstSheetName],
+        { defval: '' }
+      );
+      if (rows.length === 0) {
+        setSpreadsheetFeedback({
+          type: 'error',
+          text: 'Nenhuma linha de colaborador encontrada na planilha.',
+        });
+        return;
+      }
+
+      const normalizeHeaderKey = (k: string) =>
+        k
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '');
+
+      const pickField = (row: Record<string, any>, aliases: string[]): string => {
+        for (const [k, v] of Object.entries(row)) {
+          const nk = normalizeHeaderKey(k);
+          if (aliases.includes(nk)) {
+            return String(v ?? '').trim();
+          }
+        }
+        return '';
+      };
+
+      const existingCpfs = new Set<string>([
+        ...newEmployees.map((e) => e.cpf.replace(/\D/g, '')),
+        ...companyEmployees
+          .filter((e) => selectedEmployeeIds.includes(e.id))
+          .map((e) => e.cpf.replace(/\D/g, '')),
+      ]);
+
+      const importedNew: NewEmployeeDraft[] = [];
+      const reusedIds: string[] = [];
+      let skipped = 0;
+
+      for (const row of rows) {
+        const nomeCompleto = pickField(row, [
+          'nomecompleto',
+          'nome',
+          'colaborador',
+          'funcionario',
+          'name',
+        ]);
+        const cpfRaw = pickField(row, ['cpf', 'documento', 'doc']);
+        const cargo = pickField(row, ['cargo', 'funcao', 'role', 'ocupacao']) || 'Terceirizado';
+        const setor = pickField(row, ['setor', 'area', 'departamento']);
+        const telefone = pickField(row, ['telefone', 'celular', 'fone', 'phone']);
+        const email = pickField(row, ['email', 'mail']);
+
+        const cpfDigits = cpfRaw.replace(/\D/g, '');
+        if (!nomeCompleto || cpfDigits.length < 11) {
+          skipped += 1;
+          continue;
+        }
+        if (existingCpfs.has(cpfDigits)) {
+          skipped += 1;
+          continue;
+        }
+
+        const existingCompanyEmp = companyEmployees.find(
+          (e) => e.cpf.replace(/\D/g, '') === cpfDigits
+        );
+        if (existingCompanyEmp) {
+          reusedIds.push(existingCompanyEmp.id);
+          existingCpfs.add(cpfDigits);
+          continue;
+        }
+
+        importedNew.push({
+          localId: `xlsx-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          nomeCompleto,
+          cpf: cpfRaw,
+          cargo,
+          setor,
+          telefone,
+          email,
+        });
+        existingCpfs.add(cpfDigits);
+      }
+
+      if (reusedIds.length > 0) {
+        setSelectedEmployeeIds((prev) => Array.from(new Set([...prev, ...reusedIds])));
+      }
+      if (importedNew.length > 0) {
+        setNewEmployees((prev) => [...prev, ...importedNew]);
+      }
+
+      if (importedNew.length === 0 && reusedIds.length === 0) {
+        setSpreadsheetFeedback({
+          type: 'error',
+          text: 'Nenhum colaborador válido pôde ser importado. Verifique se as colunas NomeCompleto e CPF (11 dígitos) estão preenchidas.',
+        });
+      } else {
+        setSpreadsheetFeedback({
+          type: 'success',
+          text: `Importação concluída: ${importedNew.length} novo(s) colaborador(es) adicionado(s)${
+            reusedIds.length > 0 ? `, ${reusedIds.length} já cadastrado(s) selecionado(s)` : ''
+          }${skipped > 0 ? ` e ${skipped} linha(s) duplicada(s)/incompleta(s) ignorada(s)` : ''}.`,
+        });
+      }
+    } catch (err: any) {
+      setSpreadsheetFeedback({
+        type: 'error',
+        text: err?.message || 'Não foi possível ler a planilha. Envie um arquivo .xlsx ou .csv válido.',
+      });
+    }
+  };
+
   const canUploadToActive =
     !isAuditor &&
     activeDetail &&
-    ['RASCUNHO', 'PENDENTE_DOCUMENTACAO', 'EM_ENVIO', 'PENDENTE_CORRECAO'].includes(
+    ['RASCUNHO', 'PENDENTE_DOCUMENTACAO', 'EM_ENVIO', 'PENDENTE_CORRECAO', 'REPROVADA'].includes(
       activeDetail.integration.status
     );
 
@@ -1629,6 +2184,123 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
       mandatoryProgressPercent,
     };
   }, [activeDetail, canUploadToActive, busy, isUploadingQueue, queueStats]);
+
+  // Etapa 6: Conferência Automática antes do Envio (ausentes, duplicados, datas vencidas/ausentes, sugestões IA)
+  const automaticConference = useMemo(() => {
+    if (!activeDetail) {
+      return {
+        missingMandatory: [] as ContractorIntegrationItem[],
+        rejectedItems: [] as ContractorIntegrationItem[],
+        duplicateFiles: [] as Array<{ hash: string; names: string[] }>,
+        expiredOrMissingDate: [] as Array<{ item: ContractorIntegrationItem; reason: string }>,
+        aiSuggestions: [] as Array<{ item: ContractorIntegrationItem; alerts: string[] }>,
+      };
+    }
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const missingMandatory: ContractorIntegrationItem[] = [];
+    const rejectedItems: ContractorIntegrationItem[] = [];
+    const expiredOrMissingDate: Array<{ item: ContractorIntegrationItem; reason: string }> = [];
+    const aiSuggestions: Array<{ item: ContractorIntegrationItem; alerts: string[] }> = [];
+    const hashMap = new Map<string, string[]>();
+
+    for (const item of activeDetail.items) {
+      if (item.status === 'REPROVADO') {
+        rejectedItems.push(item);
+      } else if (item.obrigatorio && (!item.arquivoNome || item.status === 'PENDENTE_ENVIO')) {
+        missingMandatory.push(item);
+      }
+
+      if (item.arquivoHashSha256 && item.arquivoNome) {
+        const list = hashMap.get(item.arquivoHashSha256) || [];
+        list.push(`${item.nomeExibicao}${item.colaboradorNome ? ` (${item.colaboradorNome})` : ''}`);
+        hashMap.set(item.arquivoHashSha256, list);
+      }
+
+      if (item.arquivoNome && !item.semValidade) {
+        if (!item.dataValidade) {
+          expiredOrMissingDate.push({
+            item,
+            reason: 'Data de validade não informada (preencha se o documento possuir validade).',
+          });
+        } else if (item.dataValidade.slice(0, 10) < todayIso) {
+          expiredOrMissingDate.push({
+            item,
+            reason: `Data de validade vencida (${item.dataValidade.slice(0, 10)}).`,
+          });
+        }
+      }
+
+      if (item.smartDocsSugestao?.alertas && item.smartDocsSugestao.alertas.length > 0) {
+        aiSuggestions.push({
+          item,
+          alerts: item.smartDocsSugestao.alertas,
+        });
+      }
+    }
+
+    const duplicateFiles = Array.from(hashMap.entries())
+      .filter(([, names]) => names.length > 1)
+      .map(([hash, names]) => ({ hash, names }));
+
+    return {
+      missingMandatory,
+      rejectedItems,
+      duplicateFiles,
+      expiredOrMissingDate,
+      aiSuggestions,
+    };
+  }, [activeDetail]);
+
+  const guidedSteps = useMemo(() => {
+    const companyDone =
+      Boolean(activeDetail) ||
+      (companyMode === 'existing'
+        ? Boolean(selectedEmpresaId || activeEmpresaId)
+        : Boolean(newCompanyForm.cnpj && newCompanyForm.razaoSocial));
+    const employeesDone =
+      Boolean(activeDetail) || selectedEmployeeIds.length > 0 || newEmployees.length > 0;
+    const activitiesDone =
+      Boolean(activeDetail) ||
+      (integrationType === 'INTEGRACAO_INICIAL'
+        ? selectedActivityIds.length > 0
+        : selectedRenewalCodes.length > 0);
+    const listGenerated = Boolean(activeDetail);
+    const docsUploaded = Boolean(
+      activeDetail && submissionGate.readiness.obrigatoriosConfirmados > 0
+    );
+    const conferenceReady = Boolean(activeDetail && submissionGate.canFinalizeAndSubmit);
+    const submitted = Boolean(
+      activeDetail &&
+        ['ENVIADA', 'AGUARDANDO_ANALISE', 'EM_ANALISE', 'REENVIADA', 'APROVADA'].includes(
+          activeDetail.integration.status
+        )
+    );
+
+    return [
+      { num: 1, label: 'Empresa', done: companyDone },
+      { num: 2, label: 'Colaboradores', done: employeesDone },
+      { num: 3, label: 'Atividades', done: activitiesDone },
+      { num: 4, label: 'Lista Documental', done: listGenerated },
+      { num: 5, label: 'Envio de Docs', done: docsUploaded },
+      { num: 6, label: 'Conferência', done: conferenceReady || submitted },
+      { num: 7, label: 'Envio Análise', done: submitted },
+    ];
+  }, [
+    activeDetail,
+    companyMode,
+    selectedEmpresaId,
+    activeEmpresaId,
+    newCompanyForm.cnpj,
+    newCompanyForm.razaoSocial,
+    selectedEmployeeIds.length,
+    newEmployees.length,
+    integrationType,
+    selectedActivityIds.length,
+    selectedRenewalCodes.length,
+    submissionGate.readiness.obrigatoriosConfirmados,
+    submissionGate.canFinalizeAndSubmit,
+  ]);
 
   const renderItemCard = (item: ContractorIntegrationItem, ownerKeyOverride?: string) => {
     const meta = ITEM_STATUS_META[item.status];
@@ -1791,12 +2463,67 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
           </div>
         )}
 
+        {/* Centralized Reuse / Pending / Expired Guidance Notice */}
+        {item.reaproveitado && isApproved && (
+          <div className="mt-2.5 rounded-lg bg-emerald-950/35 border border-emerald-500/35 px-3 py-2 text-xs text-emerald-200 flex items-start gap-2">
+            <CheckCircle2 size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold text-emerald-300">
+                Reaproveitado automaticamente da Base Oficial
+              </span>{' '}
+              — não é necessário reenviar este documento.
+              {item.documentoExistenteAviso && (
+                <span className="block text-[11px] text-emerald-200/80 mt-0.5">
+                  {item.documentoExistenteAviso}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!isApproved &&
+          item.situacaoDocumentoExistente === 'PENDENTE_APROVACAO' &&
+          item.documentoExistenteAviso && (
+            <div className="mt-2.5 rounded-lg bg-sky-950/35 border border-sky-500/35 px-3 py-2 text-xs text-sky-200 flex items-start gap-2">
+              <Clock size={14} className="text-sky-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold text-sky-300">
+                  Documento já cadastrado e aguardando aprovação EHS
+                </span>
+                <p className="text-[11px] text-sky-200/85 mt-0.5">{item.documentoExistenteAviso}</p>
+              </div>
+            </div>
+          )}
+
+        {!isApproved &&
+          !isRejected &&
+          (item.situacaoDocumentoExistente === 'VENCIDO' ||
+            item.situacaoDocumentoExistente === 'RECUSADO' ||
+            item.situacaoDocumentoExistente === 'ARQUIVO_INDISPONIVEL') &&
+          item.documentoExistenteAviso && (
+            <div className="mt-2.5 rounded-lg bg-amber-950/35 border border-amber-500/40 px-3 py-2 text-xs text-amber-200 flex items-start gap-2">
+              <AlertTriangle size={14} className="text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold text-amber-300">
+                  {item.situacaoDocumentoExistente === 'VENCIDO'
+                    ? 'Documento existente vencido — atualização necessária:'
+                    : item.situacaoDocumentoExistente === 'RECUSADO'
+                    ? 'Documento existente recusado — correção necessária:'
+                    : 'Arquivo indisponível na base — novo anexo necessário:'}
+                </span>{' '}
+                {item.documentoExistenteAviso}
+              </div>
+            </div>
+          )}
+
         {/* Approved Preservation Notice */}
         {isApproved && (
           <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-300/90">
             <span className="flex items-center gap-1.5">
               <Lock size={13} />{' '}
-              {item.officialCollection && item.officialRecordId
+              {item.reaproveitado
+                ? 'Documento válido reaproveitado da base oficial EHS (sem necessidade de novo upload).'
+                : item.officialCollection && item.officialRecordId
                 ? `Documento aprovado e preservado oficialmente (${item.officialCollection}).`
                 : 'Documento conferido e aprovado pelo Admin EHS (preservado — será oficializado na aprovação final completa do cadastro).'}
             </span>
@@ -2234,6 +2961,35 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
         </div>
       )}
 
+      {/* 7-Step Guided Integration Progress Bar */}
+      {!isAuditor && (
+        <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-3.5">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+            {guidedSteps.map((st) => (
+              <div
+                key={st.num}
+                className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 text-xs transition-colors ${
+                  st.done
+                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                    : 'bg-slate-950/70 border-slate-800 text-slate-400'
+                }`}
+              >
+                <span
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                    st.done
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-slate-800 text-slate-300 border border-slate-700'
+                  }`}
+                >
+                  {st.done ? '✓' : st.num}
+                </span>
+                <span className="font-semibold truncate">{st.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* SECTION 1: NEW INTEGRATION / DOCUMENT UPDATE WIZARD */}
       {section === 'nova' && !isAuditor && (
         <form noValidate onSubmit={handleCreateIntegration} className="space-y-6">
@@ -2297,7 +3053,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                 <Building2 size={18} className="text-blue-400" />
                 1. Empresa Contratada
               </h2>
-              {(!isSolicitante || !activeEmpresaId) && (
+              {(!isSolicitante || effectiveAuthorizedEmpresaIds.length === 0) && (
                 <div className="flex items-center gap-2 text-xs">
                   <button
                     type="button"
@@ -2337,7 +3093,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                       setSelectedEmpresaId(e.target.value);
                       setSelectedEmployeeIds([]);
                     }}
-                    disabled={isSolicitante && Boolean(activeEmpresaId)}
+                    disabled={isSolicitante && visibleCompanies.length <= 1}
                     className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none disabled:opacity-70"
                     required
                   >
@@ -2352,7 +3108,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                 <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3 text-xs text-slate-400 flex items-center gap-2">
                   <Info size={16} className="text-blue-400 shrink-0" />
                   <span>
-                    Vincular uma empresa já existente reaproveita o cadastro oficial sem duplicar CNPJ nem sobrescrever documentos já aprovados.
+                    Os dados cadastrais e os documentos empresariais já aprovados da empresa selecionada são reaproveitados automaticamente sem redigitação nem perda de histórico.
                   </span>
                 </div>
               </div>
@@ -2509,7 +3265,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                       <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
                       <div className="space-y-1">
                         <p className="font-bold text-amber-300">
-                          Dependência de Infraestrutura Firestore (Matriz de Atividades indisponível)
+                          Matriz de Atividades temporariamente indisponível
                         </p>
                         <p>{activityMatrixFirestoreError}</p>
                       </div>
@@ -2552,8 +3308,218 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                     );
                   })
                 )}
+
+                {/* Special Category Card: ATIVIDADE SIMPLES (Section 9.1) */}
+                <button
+                  type="button"
+                  onClick={() => setSimpleActivityPanelOpen((v) => !v)}
+                  className={`text-left p-3.5 rounded-xl border transition-all cursor-pointer ${
+                    simpleActivityPanelOpen || simpleActivitiesDraft.length > 0
+                      ? 'bg-emerald-600/15 border-emerald-500 text-white'
+                      : 'bg-slate-950 border-dashed border-emerald-500/40 text-slate-200 hover:border-emerald-400'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-emerald-300">ATIVIDADE SIMPLES</span>
+                    <span className="text-[10px] uppercase px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/30">
+                      {simpleActivitiesDraft.length > 0
+                        ? `${simpleActivitiesDraft.length} adicionada(s)`
+                        : 'Sem NR'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">
+                    Cadastre serviço específico fora das NRs predefinidas e anexe seus documentos para análise EHS.
+                  </p>
+                </button>
               </div>
             )}
+
+            {/* ATIVIDADE SIMPLES Builder (Section 9.1) */}
+            {integrationType === 'INTEGRACAO_INICIAL' &&
+              (simpleActivityPanelOpen || simpleActivitiesDraft.length > 0) && (
+                <div className="rounded-xl bg-slate-950/90 border border-emerald-500/35 p-4 space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <h3 className="text-xs font-bold text-emerald-300 uppercase tracking-wide">
+                        ATIVIDADE SIMPLES — Cadastro Livre pelo Solicitante
+                      </h3>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Não exige vínculo com NR predefinida e não altera a Matriz NR. A atividade e seus documentos passarão por aprovação do Administrador EHS.
+                      </p>
+                    </div>
+                  </div>
+
+                  {simpleActivitiesDraft.length > 0 && (
+                    <div className="space-y-2">
+                      {simpleActivitiesDraft.map((sa) => (
+                        <div
+                          key={sa.localId}
+                          className="rounded-lg bg-slate-900 border border-slate-800 p-3 flex items-start justify-between gap-3 text-xs"
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <p className="font-bold text-white">{sa.nome}</p>
+                            <p className="text-slate-300">{sa.descricaoServico}</p>
+                            {sa.observacoes && (
+                              <p className="text-[11px] text-slate-400">Obs.: {sa.observacoes}</p>
+                            )}
+                            <p className="text-[11px] text-emerald-300">
+                              {sa.documentos.length > 0
+                                ? `Documentos vinculados (${sa.documentos.length}): ${sa.documentos
+                                    .map((d) => `${d.nomeDocumento} (${d.escopo})`)
+                                    .join(', ')}`
+                                : 'Nenhum documento pré-listado (poderá anexar na próxima etapa)'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSimpleActivitiesDraft((prev) =>
+                                prev.filter((item) => item.localId !== sa.localId)
+                              )
+                            }
+                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-600/30 text-slate-400 hover:text-rose-300 cursor-pointer shrink-0"
+                            title="Remover Atividade Simples"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold text-slate-300">
+                        Nome da Atividade Simples *
+                      </label>
+                      <input
+                        type="text"
+                        value={saDraftNome}
+                        onChange={(e) => setSaDraftNome(e.target.value)}
+                        placeholder="Ex.: Pintura Predial Interna / Manutenção de Jardinagem"
+                        className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold text-slate-300">
+                        Observações Complementares (opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={saDraftObservacoes}
+                        onChange={(e) => setSaDraftObservacoes(e.target.value)}
+                        placeholder="Local, horário previsto, restrições operacionais..."
+                        className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                    <div className="md:col-span-2 space-y-1">
+                      <label className="text-[11px] font-semibold text-slate-300">
+                        Descrição do Serviço que Será Executado *
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={saDraftDescricao}
+                        onChange={(e) => setSaDraftDescricao(e.target.value)}
+                        placeholder="Descreva livremente o escopo do serviço, etapas, equipamentos utilizados e área de execução..."
+                        className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Documents linked to this Simple Activity */}
+                  <div className="space-y-2.5 pt-2 border-t border-slate-800">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label className="text-[11px] font-semibold text-slate-200">
+                        Documentos Relacionados à Atividade (reaproveitamento automático aplicado)
+                      </label>
+                      <span className="text-[10px] text-slate-400">
+                        Documentos já aprovados e vigentes serão aproveitados sem novo upload
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1.5">
+                      {QUICK_SIMPLE_DOC_SUGGESTIONS.map((sug) => (
+                        <button
+                          key={sug.nome}
+                          type="button"
+                          onClick={() => handleAddSimpleDocToDraft(sug.nome, sug.escopo)}
+                          className="text-[11px] px-2 py-1 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 cursor-pointer"
+                        >
+                          + {sug.nome.split('—')[0].trim()}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={saDocInputName}
+                        onChange={(e) => setSaDocInputName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddSimpleDocToDraft();
+                          }
+                        }}
+                        placeholder="Digite o nome de outro documento (ex.: FISPQ, Checklist de Ferramentas, ART...)"
+                        className="flex-1 rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                      />
+                      <select
+                        value={saDocInputScope}
+                        onChange={(e) =>
+                          setSaDocInputScope(e.target.value as 'empresa' | 'colaborador')
+                        }
+                        className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                      >
+                        <option value="empresa">Documento da Empresa</option>
+                        <option value="colaborador">Documento por Colaborador</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleAddSimpleDocToDraft()}
+                        className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs font-semibold text-white cursor-pointer shrink-0 flex items-center gap-1"
+                      >
+                        <Plus size={14} /> Incluir Doc
+                      </button>
+                    </div>
+
+                    {saDraftDocs.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {saDraftDocs.map((d) => (
+                          <div
+                            key={d.localId}
+                            className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-[11px] text-slate-200"
+                          >
+                            <span>{d.nomeDocumento}</span>
+                            <span className="text-[10px] uppercase text-slate-400">
+                              ({d.escopo})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSaDraftDocs((prev) => prev.filter((x) => x.localId !== d.localId))
+                              }
+                              className="text-slate-400 hover:text-rose-400 cursor-pointer"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleCommitSimpleActivityDraft}
+                      className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Plus size={14} /> Adicionar esta Atividade Simples à Integração
+                    </button>
+                  </div>
+                </div>
+              )}
 
             {integrationType === 'INTEGRACAO_INICIAL' && selectedActivityIds.length > 0 && (() => {
               const selectedReqs = activityDocumentRequirements.filter(
@@ -2664,12 +3630,47 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
               </div>
             )}
 
-            {/* Add new third-party employee */}
+            {/* Add new third-party employee (Individual + Importação Excel/CSV) */}
             {integrationType === 'INTEGRACAO_INICIAL' && (
               <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-4 space-y-3">
-                <p className="text-xs font-semibold text-slate-300">
-                  Incluir novo colaborador terceirizado (com verificação automática de CPF duplicado):
-                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-slate-300">
+                    Incluir colaborador individualmente ou importar lista via planilha (Excel / CSV):
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDownloadEmployeesTemplate}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Download size={12} /> Baixar Modelo (.xlsx)
+                    </button>
+                    <label className="px-2.5 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-[11px] font-semibold text-indigo-200 inline-flex items-center gap-1.5 cursor-pointer">
+                      <FileSpreadsheet size={12} /> Importar Planilha (Excel/CSV)
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls,.csv"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) void handleImportEmployeesSpreadsheet(f);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
+                </div>
+                {spreadsheetFeedback && (
+                  <div
+                    className={`rounded-lg px-3 py-2 text-xs border ${
+                      spreadsheetFeedback.type === 'success'
+                        ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                        : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                    }`}
+                  >
+                    {spreadsheetFeedback.text}
+                  </div>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                   <input
                     type="text"
@@ -2779,13 +3780,79 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
             </div>
           )}
 
+          {/* Automatic Reuse Preview (Zero Re-upload) */}
+          {companyMode === 'existing' && selectedEmpresaId && selectedActivityIds.length > 0 && (
+            <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <FileCheck2 size={16} className="text-emerald-400" />
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-white">
+                    Verificação Automática de Reaproveitamento Documental
+                  </h4>
+                </div>
+                {loadingReusePreview && (
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-400">
+                    <Loader2 size={12} className="animate-spin" /> Consultando base oficial...
+                  </span>
+                )}
+              </div>
+
+              {reusePreview ? (
+                <>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 tabular-nums">
+                    <div className="rounded-xl bg-emerald-950/30 border border-emerald-500/30 px-3 py-2">
+                      <p className="text-[10px] uppercase font-semibold text-emerald-300">
+                        Reaproveitados
+                      </p>
+                      <p className="text-lg font-extrabold text-emerald-400">
+                        {reusePreview.reaproveitadosAprovados}
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-sky-950/30 border border-sky-500/30 px-3 py-2">
+                      <p className="text-[10px] uppercase font-semibold text-sky-300">
+                        Aguardando EHS
+                      </p>
+                      <p className="text-lg font-extrabold text-sky-300">
+                        {reusePreview.pendentesAprovacao}
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-amber-950/30 border border-amber-500/30 px-3 py-2">
+                      <p className="text-[10px] uppercase font-semibold text-amber-300">
+                        Vencidos / Recusados
+                      </p>
+                      <p className="text-lg font-extrabold text-amber-300">
+                        {reusePreview.vencidos + reusePreview.recusados}
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-slate-950 border border-slate-800 px-3 py-2">
+                      <p className="text-[10px] uppercase font-semibold text-slate-400">
+                        Novos a Anexar
+                      </p>
+                      <p className="text-lg font-extrabold text-white">
+                        {reusePreview.ausentes}
+                      </p>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Documentos já aprovados e dentro da validade em <strong>Minhas Empresas</strong> e{' '}
+                    <strong>Meus Colaboradores</strong> serão carregados automaticamente — o sistema solicitará anexo apenas para itens ausentes, vencidos ou recusados.
+                  </p>
+                </>
+              ) : (
+                <p className="text-[11px] text-slate-400">
+                  Os documentos aprovados e válidos da empresa e dos colaboradores selecionados serão reaproveitados automaticamente ao gerar o checklist.
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="rounded-xl bg-blue-950/25 border border-blue-500/30 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="text-xs text-slate-300 space-y-0.5">
               <p className="font-semibold text-white">
-                Próximo passo: Anexar Documentos dos Colaboradores em Lote
+                Próximo passo: Checklist Centralizado com Reaproveitamento Automático
               </p>
               <p className="text-slate-400">
-                Ao gerar o protocolo, você será direcionado à seção <strong>DOCUMENTAÇÃO DOS COLABORADORES</strong>, organizada nas 4 categorias oficiais, com botão <strong>ADICIONAR DOCUMENTOS</strong> e arrastar/soltar múltiplos arquivos por colaborador.
+                Documentos aprovados e válidos já existentes entram prontos automaticamente. Você anexará arquivos apenas para o que estiver faltando, vencido ou recusado.
               </p>
             </div>
             <button
@@ -2826,6 +3893,24 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                       >
                         ← Voltar à lista
                       </button>
+                      {!isAuditor &&
+                        ['RASCUNHO', 'PENDENTE_DOCUMENTACAO', 'EM_ENVIO', 'PENDENTE_CORRECAO'].includes(
+                          activeDetail.integration.status
+                        ) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              persistActiveIntegrationId(activeDetail.integration.id);
+                              setFeedback({
+                                type: 'success',
+                                text: `Rascunho ${activeDetail.integration.codigoProtocolo} salvo com segurança. Todos os documentos já anexados permanecem gravados — você pode sair e retomar o preenchimento quando desejar.`,
+                              });
+                            }}
+                            className="text-xs px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-emerald-300 font-semibold cursor-pointer"
+                          >
+                            Salvar Rascunho
+                          </button>
+                        )}
                       <span className="font-mono text-sm font-bold text-blue-400">
                         {activeDetail.integration.codigoProtocolo}
                       </span>
@@ -2847,9 +3932,12 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                     </h2>
                     <p className="text-xs text-slate-400">
                       CNPJ: {activeDetail.integration.empresaCnpj} • Atividades:{' '}
-                      {activeDetail.integration.atividadeNomes.length > 0
-                        ? activeDetail.integration.atividadeNomes.join(', ')
-                        : 'Atualização direcionada'}
+                      {[
+                        ...activeDetail.integration.atividadeNomes,
+                        ...(activeDetail.integration.atividadesSimples || []).map(
+                          (sa) => `Atividade Simples: ${sa.nome}`
+                        ),
+                      ].join(', ') || 'Atualização direcionada'}
                     </p>
                   </div>
 
@@ -2969,6 +4057,469 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                       Integração aprovada por <strong>{activeDetail.integration.aprovadoPorNome}</strong> em{' '}
                       {formatDateTimePt(activeDetail.integration.dataAprovacao)}. Os documentos oficiais estão ativos no motor de conformidade; a execução de atividades críticas continua exigindo Permissão de Trabalho (PT/APR).
                     </span>
+                  </div>
+                )}
+              </div>
+
+              {/* ATIVIDADE SIMPLES Panel inside Active Integration (Section 9.1) */}
+              {((activeDetail.integration.atividadesSimples &&
+                activeDetail.integration.atividadesSimples.length > 0) ||
+                (!isAuditor &&
+                  ['RASCUNHO', 'PENDENTE_DOCUMENTACAO', 'EM_ENVIO', 'PENDENTE_CORRECAO', 'REPROVADA'].includes(
+                    activeDetail.integration.status
+                  ))) && (
+                <div className="rounded-2xl bg-slate-900 border border-emerald-500/30 p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <Layers size={16} className="text-emerald-400" />
+                        Atividades Simples Vinculadas (
+                        {(activeDetail.integration.atividadesSimples || []).length})
+                      </h3>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Atividades específicas cadastradas pelo Solicitante (passam por análise e aprovação do Administrador EHS).
+                      </p>
+                    </div>
+                    {!isAuditor &&
+                      ['RASCUNHO', 'PENDENTE_DOCUMENTACAO', 'EM_ENVIO', 'PENDENTE_CORRECAO', 'REPROVADA'].includes(
+                        activeDetail.integration.status
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={() => setAddingSimpleInActive((v) => !v)}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Plus size={14} />
+                          {addingSimpleInActive ? 'Cancelar' : 'Nova Atividade Simples'}
+                        </button>
+                      )}
+                  </div>
+
+                  {addingSimpleInActive && (
+                    <div className="rounded-xl bg-slate-950 border border-emerald-500/30 p-4 space-y-3 text-xs">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <input
+                          type="text"
+                          value={saDraftNome}
+                          onChange={(e) => setSaDraftNome(e.target.value)}
+                          placeholder="Nome da Atividade Simples *"
+                          className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-white placeholder-slate-500"
+                        />
+                        <input
+                          type="text"
+                          value={saDraftObservacoes}
+                          onChange={(e) => setSaDraftObservacoes(e.target.value)}
+                          placeholder="Observações complementares (opcional)"
+                          className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-white placeholder-slate-500"
+                        />
+                        <textarea
+                          rows={2}
+                          value={saDraftDescricao}
+                          onChange={(e) => setSaDraftDescricao(e.target.value)}
+                          placeholder="Descrição do serviço que será executado *"
+                          className="md:col-span-2 rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-white placeholder-slate-500"
+                        />
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={saDocInputName}
+                          onChange={(e) => setSaDocInputName(e.target.value)}
+                          placeholder="Documento relacionado (ex.: PGR, ART, Procedimento...)"
+                          className="flex-1 rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-white placeholder-slate-500"
+                        />
+                        <select
+                          value={saDocInputScope}
+                          onChange={(e) =>
+                            setSaDocInputScope(e.target.value as 'empresa' | 'colaborador')
+                          }
+                          className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-slate-200"
+                        >
+                          <option value="empresa">Empresa</option>
+                          <option value="colaborador">Colaborador</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleAddSimpleDocToDraft()}
+                          className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold cursor-pointer"
+                        >
+                          + Doc
+                        </button>
+                      </div>
+                      {saDraftDocs.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {saDraftDocs.map((d) => (
+                            <span
+                              key={d.localId}
+                              className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-[11px] text-slate-200 flex items-center gap-1.5"
+                            >
+                              {d.nomeDocumento} ({d.escopo})
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSaDraftDocs((prev) =>
+                                    prev.filter((x) => x.localId !== d.localId)
+                                  )
+                                }
+                                className="text-slate-400 hover:text-rose-400 cursor-pointer"
+                              >
+                                <X size={11} />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          disabled={simpleActionBusy}
+                          onClick={handleAddSimpleActivityToActive}
+                          className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold cursor-pointer"
+                        >
+                          {simpleActionBusy ? 'Salvando...' : 'Salvar Atividade Simples'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {(activeDetail.integration.atividadesSimples || []).length > 0 && (
+                    <div className="space-y-3">
+                      {(activeDetail.integration.atividadesSimples || []).map((sa: SimpleActivityEntry) => {
+                        const saMeta = SIMPLE_ACTIVITY_STATUS_META[sa.status];
+                        const isEditableIntegration =
+                          !isAuditor &&
+                          [
+                            'RASCUNHO',
+                            'PENDENTE_DOCUMENTACAO',
+                            'EM_ENVIO',
+                            'PENDENTE_CORRECAO',
+                            'REPROVADA',
+                          ].includes(activeDetail.integration.status);
+                        const linkedDocs = activeDetail.items.filter(
+                          (it) => it.simpleActivityId === sa.id
+                        );
+                        const isEditingThis = editingSimpleId === sa.id;
+                        const isAddingDocHere = addDocToSimpleId === sa.id;
+
+                        return (
+                          <div
+                            key={sa.id}
+                            className="rounded-xl bg-slate-950/70 border border-slate-800 p-4 space-y-2.5 text-xs"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="space-y-0.5 min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-bold text-white text-sm">{sa.nome}</span>
+                                  <span
+                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded border ${saMeta.badgeClass}`}
+                                  >
+                                    {saMeta.label}
+                                  </span>
+                                </div>
+                                <p className="text-slate-300 leading-relaxed">
+                                  {sa.descricaoServico}
+                                </p>
+                                {sa.observacoes && (
+                                  <p className="text-[11px] text-slate-400">
+                                    Observações: {sa.observacoes}
+                                  </p>
+                                )}
+                              </div>
+
+                              {isEditableIntegration && (
+                                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingSimpleId(isEditingThis ? null : sa.id);
+                                      setEditSimpleForm({
+                                        nome: sa.nome,
+                                        descricaoServico: sa.descricaoServico,
+                                        observacoes: sa.observacoes || '',
+                                      });
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold cursor-pointer"
+                                  >
+                                    {isEditingThis ? 'Fechar edição' : 'Editar / Complementar'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAddDocToSimpleId(isAddingDocHere ? null : sa.id);
+                                      setAddDocToSimpleName('');
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 font-semibold cursor-pointer"
+                                  >
+                                    + Documento
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+
+                            {sa.justificativaAnalise && (
+                              <div
+                                className={`rounded-lg p-2.5 border text-[11px] ${
+                                  sa.status === 'RECUSADA'
+                                    ? 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                                    : sa.status === 'COMPLEMENTACAO_SOLICITADA'
+                                    ? 'bg-orange-950/40 border-orange-500/40 text-orange-200'
+                                    : 'bg-slate-900 border-slate-700 text-slate-300'
+                                }`}
+                              >
+                                <strong>Parecer do Admin EHS ({sa.analisadoPorNome || 'EHS'}):</strong>{' '}
+                                {sa.justificativaAnalise}
+                              </div>
+                            )}
+
+                            {isEditingThis && (
+                              <div className="rounded-lg bg-slate-900 border border-slate-700 p-3 space-y-2.5">
+                                <input
+                                  type="text"
+                                  value={editSimpleForm.nome}
+                                  onChange={(e) =>
+                                    setEditSimpleForm((f) => ({ ...f, nome: e.target.value }))
+                                  }
+                                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-white"
+                                  placeholder="Nome da atividade"
+                                />
+                                <textarea
+                                  rows={2}
+                                  value={editSimpleForm.descricaoServico}
+                                  onChange={(e) =>
+                                    setEditSimpleForm((f) => ({
+                                      ...f,
+                                      descricaoServico: e.target.value,
+                                    }))
+                                  }
+                                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-white"
+                                  placeholder="Descrição do serviço"
+                                />
+                                <input
+                                  type="text"
+                                  value={editSimpleForm.observacoes}
+                                  onChange={(e) =>
+                                    setEditSimpleForm((f) => ({
+                                      ...f,
+                                      observacoes: e.target.value,
+                                    }))
+                                  }
+                                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-white"
+                                  placeholder="Observações complementares"
+                                />
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingSimpleId(null)}
+                                    className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 cursor-pointer"
+                                  >
+                                    Cancelar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={simpleActionBusy}
+                                    onClick={() => handleSaveSimpleActivityEdit(sa.id)}
+                                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer"
+                                  >
+                                    Salvar Alterações
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {isAddingDocHere && (
+                              <div className="flex flex-col sm:flex-row gap-2 rounded-lg bg-slate-900 border border-blue-500/30 p-3">
+                                <input
+                                  type="text"
+                                  value={addDocToSimpleName}
+                                  onChange={(e) => setAddDocToSimpleName(e.target.value)}
+                                  placeholder="Nome do documento (ex.: PGR, ART, FISPQ, Procedimento...)"
+                                  className="flex-1 rounded-lg bg-slate-950 border border-slate-700 px-3 py-1.5 text-white placeholder-slate-500"
+                                />
+                                <select
+                                  value={addDocToSimpleScope}
+                                  onChange={(e) =>
+                                    setAddDocToSimpleScope(
+                                      e.target.value as 'empresa' | 'colaborador'
+                                    )
+                                  }
+                                  className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-slate-200"
+                                >
+                                  <option value="empresa">Empresa</option>
+                                  <option value="colaborador">Colaborador</option>
+                                </select>
+                                <button
+                                  type="button"
+                                  disabled={simpleActionBusy || !addDocToSimpleName.trim()}
+                                  onClick={() => handleAddDocToExistingSimple(sa.id)}
+                                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold cursor-pointer"
+                                >
+                                  Vincular Documento
+                                </button>
+                              </div>
+                            )}
+
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400 pt-1 border-t border-slate-800/70">
+                              <span>
+                                Documentos vinculados:{' '}
+                                <strong className="text-slate-200">{linkedDocs.length}</strong>
+                              </span>
+                              <span>
+                                Reaproveitados:{' '}
+                                <strong className="text-emerald-300">
+                                  {linkedDocs.filter((d) => d.reaproveitado).length}
+                                </strong>
+                              </span>
+                              <span>Cadastrada por {sa.criadoPorNome}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Centralized Single-Screen Document Checklist Table (Section 5) */}
+              <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden">
+                <div className="px-5 py-3.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-950/50">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <FileCheck2 size={16} className="text-blue-400" />
+                      Painel Único de Documentos da Integração ({activeDetail.items.length})
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Documentos já aprovados e válidos na base são reaproveitados automaticamente. Anexe ou atualize apenas os itens solicitados.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowConsolidatedTable((v) => !v)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {showConsolidatedTable ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    {showConsolidatedTable ? 'Recolher Tabela' : 'Expandir Tabela'}
+                  </button>
+                </div>
+
+                {showConsolidatedTable && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 bg-slate-950/70 text-[11px] uppercase tracking-wider text-slate-400">
+                          <th className="py-2.5 px-4 font-semibold">Documento</th>
+                          <th className="py-2.5 px-3 font-semibold">Tipo</th>
+                          <th className="py-2.5 px-3 font-semibold">Situação Atual</th>
+                          <th className="py-2.5 px-3 font-semibold">Arquivo Existente</th>
+                          <th className="py-2.5 px-3 font-semibold">Validade</th>
+                          <th className="py-2.5 px-4 font-semibold text-right">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/70">
+                        {activeDetail.items.map((it) => {
+                          const needsAction =
+                            it.status === 'PENDENTE_ENVIO' ||
+                            it.status === 'REPROVADO' ||
+                            it.status === 'SUBSTITUIDO';
+                          const statusMeta = ITEM_STATUS_META[it.status];
+                          return (
+                            <tr key={`tbl-${it.id}`} className="hover:bg-slate-800/30 transition-colors">
+                              <td className="py-2.5 px-4">
+                                <div className="font-semibold text-white">{it.nomeExibicao}</div>
+                                <div className="text-[11px] text-slate-400">
+                                  <span className="font-mono text-blue-300">{it.documentoCodigoCanonico}</span>
+                                  {' · '}
+                                  {it.categoria === 'colaborador' && it.colaboradorNome
+                                    ? it.colaboradorNome
+                                    : 'Empresa Contratada'}
+                                </div>
+                                {it.documentoExistenteAviso && !it.reaproveitado && (
+                                  <div className="text-[11px] text-amber-300 mt-0.5">
+                                    {it.documentoExistenteAviso}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 whitespace-nowrap">
+                                <span
+                                  className={`text-[10px] font-bold uppercase ${
+                                    it.obrigatorio ? 'text-amber-300' : 'text-slate-400'
+                                  }`}
+                                >
+                                  {it.obrigatorio ? 'Obrigatório' : 'Complementar'}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 whitespace-nowrap">
+                                <div className="flex flex-col gap-0.5">
+                                  <span
+                                    className={`inline-flex w-fit text-[11px] font-semibold px-2 py-0.5 rounded border ${statusMeta.badgeClass}`}
+                                  >
+                                    {it.reaproveitado && it.status === 'APROVADO'
+                                      ? 'Reaproveitado (Aprovado)'
+                                      : it.situacaoDocumentoExistente === 'PENDENTE_APROVACAO' &&
+                                        it.status === 'ENVIADO'
+                                      ? 'Aguardando Aprovação EHS'
+                                      : statusMeta.label}
+                                  </span>
+                                  {it.status === 'REPROVADO' && it.motivoReprovacao && (
+                                    <span className="text-[10px] text-rose-300 max-w-[200px] truncate">
+                                      {it.motivoReprovacao}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-3">
+                                {it.arquivoNome ? (
+                                  <span className="text-slate-200 truncate block max-w-[200px]" title={it.arquivoNome}>
+                                    {it.arquivoNome}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-500">Sem arquivo</span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 whitespace-nowrap tabular-nums text-slate-300">
+                                {it.semValidade
+                                  ? 'Indeterminada'
+                                  : it.dataValidade
+                                  ? it.dataValidade
+                                  : '—'}
+                              </td>
+                              <td className="py-2.5 px-4 whitespace-nowrap text-right">
+                                <div className="inline-flex items-center justify-end gap-1.5">
+                                  {it.arquivoNome && it.hasStoredFile !== false && (
+                                    <button
+                                      type="button"
+                                      disabled={loadingFileKey !== null}
+                                      onClick={() =>
+                                        openSolicitanteDocumentPreview(it, {
+                                          version: it.versaoAtual || 1,
+                                          fileName: it.arquivoNome,
+                                        })
+                                      }
+                                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-blue-300 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <Eye size={12} /> Visualizar
+                                    </button>
+                                  )}
+                                  {canUploadToActive && needsAction && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openFilePicker(`item-picker-${it.id}`)}
+                                      className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <Upload size={12} />
+                                      {it.status === 'REPROVADO' ||
+                                      it.situacaoDocumentoExistente === 'VENCIDO' ||
+                                      it.situacaoDocumentoExistente === 'RECUSADO'
+                                        ? 'Atualizar'
+                                        : 'Anexar'}
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>
@@ -3548,7 +5099,121 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                 )}
               </div>
 
-              {/* Strict Completion & Final Submission Gate */}
+              {/* Etapa 6: Conferência Automática Antes do Envio */}
+              {canUploadToActive && (
+                <div className="rounded-2xl bg-slate-900 border border-slate-800 p-5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Sparkles size={16} className="text-sky-400" />
+                      Etapa 6 — Conferência Automática do Pacote Documental
+                    </h3>
+                    <span className="text-[11px] text-slate-400">
+                      Verificação automática de completude, duplicidade e datas
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+                    <div
+                      className={`rounded-xl border p-3 ${
+                        automaticConference.missingMandatory.length +
+                          automaticConference.rejectedItems.length ===
+                        0
+                          ? 'bg-emerald-950/25 border-emerald-500/35 text-emerald-200'
+                          : 'bg-amber-950/25 border-amber-500/35 text-amber-200'
+                      }`}
+                    >
+                      <p className="font-bold">Documentos Obrigatórios</p>
+                      <p className="text-[11px] mt-1">
+                        {automaticConference.missingMandatory.length === 0 &&
+                        automaticConference.rejectedItems.length === 0
+                          ? 'Todos os obrigatórios anexados'
+                          : `${automaticConference.missingMandatory.length} ausente(s) · ${automaticConference.rejectedItems.length} reprovado(s)`}
+                      </p>
+                    </div>
+
+                    <div
+                      className={`rounded-xl border p-3 ${
+                        automaticConference.duplicateFiles.length === 0
+                          ? 'bg-emerald-950/25 border-emerald-500/35 text-emerald-200'
+                          : 'bg-amber-950/25 border-amber-500/35 text-amber-200'
+                      }`}
+                    >
+                      <p className="font-bold">Arquivos Duplicados</p>
+                      <p className="text-[11px] mt-1">
+                        {automaticConference.duplicateFiles.length === 0
+                          ? 'Nenhum arquivo duplicado detectado'
+                          : `${automaticConference.duplicateFiles.length} arquivo(s) repetido(s) em itens distintos`}
+                      </p>
+                    </div>
+
+                    <div
+                      className={`rounded-xl border p-3 ${
+                        automaticConference.expiredOrMissingDate.length === 0
+                          ? 'bg-emerald-950/25 border-emerald-500/35 text-emerald-200'
+                          : 'bg-orange-950/25 border-orange-500/35 text-orange-200'
+                      }`}
+                    >
+                      <p className="font-bold">Validade / Datas</p>
+                      <p className="text-[11px] mt-1">
+                        {automaticConference.expiredOrMissingDate.length === 0
+                          ? 'Datas conferidas dentro da validade'
+                          : `${automaticConference.expiredOrMissingDate.length} item(ns) sem data ou vencido(s)`}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl border p-3 bg-sky-950/25 border-sky-500/30 text-sky-200">
+                      <p className="font-bold">Sugestões IA (Opcional)</p>
+                      <p className="text-[11px] mt-1">
+                        {automaticConference.aiSuggestions.length === 0
+                          ? 'Sem alertas de leitura — validação humana sempre ativa'
+                          : `${automaticConference.aiSuggestions.length} observação(ões) marcada(s) como Sugestão IA`}
+                      </p>
+                    </div>
+                  </div>
+
+                  {automaticConference.duplicateFiles.length > 0 && (
+                    <div className="rounded-xl bg-amber-950/30 border border-amber-500/30 px-3.5 py-2.5 text-xs text-amber-200 space-y-1">
+                      <p className="font-semibold text-amber-300">
+                        Aviso de arquivo duplicado (confira se não anexou o mesmo PDF em dois itens diferentes):
+                      </p>
+                      {automaticConference.duplicateFiles.map((dup) => (
+                        <p key={dup.hash} className="text-[11px]">
+                          • Mesmo arquivo detectado em: {dup.names.join(' / ')}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+
+                  {automaticConference.expiredOrMissingDate.length > 0 && (
+                    <div className="rounded-xl bg-orange-950/30 border border-orange-500/30 px-3.5 py-2.5 text-xs text-orange-200 space-y-1">
+                      <p className="font-semibold text-orange-300">
+                        Atenção às datas de validade ({automaticConference.expiredOrMissingDate.length}):
+                      </p>
+                      {automaticConference.expiredOrMissingDate.slice(0, 5).map(({ item, reason }) => (
+                        <p key={item.id} className="text-[11px]">
+                          • <strong>{item.nomeExibicao}</strong>
+                          {item.colaboradorNome ? ` (${item.colaboradorNome})` : ''}: {reason}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+
+                  {automaticConference.aiSuggestions.length > 0 && (
+                    <div className="rounded-xl bg-sky-950/30 border border-sky-500/30 px-3.5 py-2.5 text-xs text-sky-200 space-y-1">
+                      <p className="font-semibold text-sky-300">
+                        Sugestão IA (apenas apoio à conferência — jamais aprova ou altera dados automaticamente):
+                      </p>
+                      {automaticConference.aiSuggestions.slice(0, 4).map(({ item, alerts }) => (
+                        <p key={item.id} className="text-[11px]">
+                          • <strong>{item.nomeExibicao}</strong>: {alerts.join(' · ')}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Etapa 7: Strict Completion & Final Submission Gate */}
               {canUploadToActive && (
                 <div
                   className={`rounded-2xl border p-5 space-y-4 ${
@@ -3567,22 +5232,90 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                         )}
                         <h3 className="text-sm font-bold text-white uppercase tracking-wide">
                           {submissionGate.canFinalizeAndSubmit
-                            ? 'Documentação Obrigatória Completa — Pronto para Submissão'
-                            : 'Submissão Bloqueada — Pendências Documentais Obrigatórias'}
+                            ? 'Etapa 4 — Resumo Único — Documentação Pronta para Análise'
+                            : 'Etapa 4 — Resumo Único — Pendências Documentais Obrigatórias'}
                         </h3>
                       </div>
 
                       <p className="text-xs text-slate-300">
-                        {activeDetail.integration.status === 'PENDENTE_CORRECAO'
-                          ? 'Substitua todos os documentos reprovados ou pendentes obrigatórios antes de reenviar. Documentos já aprovados pelo Admin EHS permanecem preservados.'
-                          : 'O cadastro inicial só é liberado para conferência do Admin EHS quando 100% dos documentos obrigatórios da Matriz de Atividades estiverem anexados e confirmados no armazenamento seguro. Documentos opcionais não bloqueiam a submissão.'}
+                        {activeDetail.integration.status === 'PENDENTE_CORRECAO' ||
+                        activeDetail.integration.status === 'REPROVADA'
+                          ? 'Corrija e substitua apenas os documentos reprovados ou pendentes obrigatórios antes de reenviar. Documentos aprovados e versões anteriores permanecem preservados.'
+                          : 'Documentos aprovados e válidos foram reaproveitados automaticamente. O pacote é enviado para análise do Administrador EHS assim que 100% dos obrigatórios estiverem atendidos.'}
                       </p>
+
+                      {/* Etapa 4 — Resumo Único Counters */}
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1 tabular-nums">
+                        <div className="rounded-lg bg-emerald-950/30 border border-emerald-500/30 px-2.5 py-1.5">
+                          <span className="block text-[10px] uppercase text-emerald-300 font-semibold">
+                            Aprovados / Reaproveitados
+                          </span>
+                          <span className="text-base font-extrabold text-emerald-400">
+                            {submissionGate.readiness.reaproveitadosAprovados ??
+                              activeDetail.items.filter((i) => i.status === 'APROVADO' && i.reaproveitado).length}
+                          </span>
+                        </div>
+                        <div className="rounded-lg bg-blue-950/30 border border-blue-500/30 px-2.5 py-1.5">
+                          <span className="block text-[10px] uppercase text-blue-300 font-semibold">
+                            Novos Enviados
+                          </span>
+                          <span className="text-base font-extrabold text-blue-300">
+                            {submissionGate.readiness.novosEnviados ??
+                              activeDetail.items.filter(
+                                (i) =>
+                                  !i.reaproveitado &&
+                                  i.situacaoDocumentoExistente !== 'PENDENTE_APROVACAO' &&
+                                  i.status !== 'PENDENTE_ENVIO' &&
+                                  i.status !== 'REPROVADO'
+                              ).length}
+                          </span>
+                        </div>
+                        <div className="rounded-lg bg-sky-950/30 border border-sky-500/30 px-2.5 py-1.5">
+                          <span className="block text-[10px] uppercase text-sky-300 font-semibold">
+                            Aguardando EHS
+                          </span>
+                          <span className="text-base font-extrabold text-sky-300">
+                            {submissionGate.readiness.pendentesAprovacaoExistentes ??
+                              activeDetail.items.filter(
+                                (i) =>
+                                  i.situacaoDocumentoExistente === 'PENDENTE_APROVACAO' &&
+                                  i.status !== 'APROVADO' &&
+                                  i.status !== 'REPROVADO'
+                              ).length}
+                          </span>
+                        </div>
+                        <div className="rounded-lg bg-rose-950/30 border border-rose-500/30 px-2.5 py-1.5">
+                          <span className="block text-[10px] uppercase text-rose-300 font-semibold">
+                            Recusados
+                          </span>
+                          <span className="text-base font-extrabold text-rose-400">
+                            {submissionGate.readiness.recusados ??
+                              activeDetail.items.filter(
+                                (i) => i.status === 'REPROVADO' || i.situacaoDocumentoExistente === 'RECUSADO'
+                              ).length}
+                          </span>
+                        </div>
+                        <div className="rounded-lg bg-amber-950/30 border border-amber-500/30 px-2.5 py-1.5 col-span-2 sm:col-span-1">
+                          <span className="block text-[10px] uppercase text-amber-300 font-semibold">
+                            Atualização Necessária
+                          </span>
+                          <span className="text-base font-extrabold text-amber-300">
+                            {submissionGate.readiness.atualizacaoNecessaria ??
+                              activeDetail.items.filter(
+                                (i) =>
+                                  i.status === 'PENDENTE_ENVIO' ||
+                                  i.status === 'REPROVADO' ||
+                                  i.status === 'SUBSTITUIDO'
+                              ).length}
+                          </span>
+                        </div>
+                      </div>
 
                       {/* Mandatory Progress Bar */}
                       <div className="pt-1 space-y-1">
                         <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] tabular-nums">
                           <span className="text-slate-300 font-semibold">
-                            Obrigatórios confirmados:{' '}
+                            Obrigatórios atendidos:{' '}
                             <strong
                               className={
                                 submissionGate.readiness.podeSubmeter
@@ -3595,8 +5328,8 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                             </strong>
                             {submissionGate.readiness.totalOpcionais > 0 && (
                               <span className="text-slate-400 font-normal ml-2">
-                                · Opcionais enviados: {submissionGate.readiness.opcionaisEnviados}/
-                                {submissionGate.readiness.totalOpcionais} (não bloqueantes)
+                                · Complementares enviados: {submissionGate.readiness.opcionaisEnviados}/
+                                {submissionGate.readiness.totalOpcionais}
                               </span>
                             )}
                           </span>
@@ -3635,12 +5368,12 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                         ) : (
                           <Lock size={15} />
                         )}
-                        FINALIZAR CADASTRO E ENVIAR PARA APROVAÇÃO
+                        ENVIAR DOCUMENTAÇÃO PARA ANÁLISE
                       </button>
                       <span className="text-[11px] text-slate-400">
                         {submissionGate.canFinalizeAndSubmit
                           ? 'Validação completa no servidor · Aprovação exclusiva do Admin EHS'
-                          : 'Anexe e confirme todos os itens obrigatórios para habilitar'}
+                          : 'Anexe ou atualize os itens obrigatórios pendentes para habilitar'}
                       </span>
                     </div>
                   </div>
@@ -3766,7 +5499,7 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                   <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
                   <div className="space-y-1">
                     <p className="font-bold text-amber-300">
-                      Dependência de Infraestrutura Firestore (Listagem de Integrações)
+                      Não foi possível carregar as integrações no momento
                     </p>
                     <p>{integrationFirestoreError}</p>
                   </div>
@@ -3892,13 +5625,12 @@ export const CentralIntegracaoView: React.FC<CentralIntegracaoViewProps> = ({
                 <input
                   type="file"
                   accept=".pdf,.jpg,.jpeg,.png"
-                  onChange={async (e) => {
+                  onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (!file) return;
-                    const base64 = await readFileAsDataUrl(file);
                     setRenewFileData({
                       arquivoNome: file.name,
-                      arquivoBase64: base64,
+                      file,
                       sizeBytes: file.size,
                       dataEmissao: new Date().toISOString().slice(0, 10),
                       dataValidade: '',

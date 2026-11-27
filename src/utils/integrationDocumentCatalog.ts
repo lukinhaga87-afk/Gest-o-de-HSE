@@ -204,8 +204,16 @@ export const EMPLOYEE_DOCUMENT_CATALOG: readonly IntegrationDocumentTypeCatalogE
   },
 ] as const;
 
+export const SIMPLE_ACTIVITY_DOCUMENT_CATEGORY: IntegrationDocumentCategoryDefinition = {
+  id: 'atividade_simples',
+  ordem: 5,
+  codigoEtiqueta: 'ATIVIDADE SIMPLES',
+  titulo: 'DOCUMENTOS DE ATIVIDADE SIMPLES',
+  descricao: 'Documentos específicos vinculados às Atividades Simples cadastradas pelo Solicitante.',
+};
+
 export const CATEGORY_BY_ID: Record<IntegrationDocumentGroupId, IntegrationDocumentCategoryDefinition> =
-  MANDATORY_DOCUMENT_CATEGORIES.reduce(
+  [...MANDATORY_DOCUMENT_CATEGORIES, SIMPLE_ACTIVITY_DOCUMENT_CATEGORY].reduce(
     (acc, cat) => {
       acc[cat.id] = cat;
       return acc;
@@ -331,15 +339,23 @@ export function groupItemsByMandatoryCategories(
   items: ContractorIntegrationItem[];
 }> {
   const buckets = new Map<IntegrationDocumentGroupId, ContractorIntegrationItem[]>(
-    MANDATORY_DOCUMENT_CATEGORIES.map((c) => [c.id, []])
+    [...MANDATORY_DOCUMENT_CATEGORIES, SIMPLE_ACTIVITY_DOCUMENT_CATEGORY].map((c) => [c.id, []])
   );
 
   for (const item of items) {
     const groupId = classifyIntegrationDocumentGroup(item);
-    buckets.get(groupId)!.push(item);
+    const bucket = buckets.get(groupId) || buckets.get('pessoais_legais')!;
+    bucket.push(item);
   }
 
-  return MANDATORY_DOCUMENT_CATEGORIES.map((category) => {
+  const orderedCategories: IntegrationDocumentCategoryDefinition[] = [
+    ...MANDATORY_DOCUMENT_CATEGORIES,
+    ...((buckets.get('atividade_simples') || []).length > 0
+      ? [SIMPLE_ACTIVITY_DOCUMENT_CATEGORY]
+      : []),
+  ];
+
+  return orderedCategories.map((category) => {
     const list = buckets.get(category.id) || [];
     list.sort((a, b) => {
       const orderDiff = getDocumentSortOrder(a) - getDocumentSortOrder(b);

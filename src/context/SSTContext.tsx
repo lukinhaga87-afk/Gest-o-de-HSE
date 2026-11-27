@@ -47,8 +47,15 @@ import {
   IntegrationDocumentGroupId,
   IntegrationOfficialCollection,
   IntegrationCompanyRequest,
+  IntegrationReusePreviewResult,
   IntegrationSubmissionReadiness,
   ConclusaoAptidao,
+  InAppNotification,
+  InAppNotificationRecipientRole,
+  InAppNotificationSeverity,
+  InAppNotificationType,
+  SimpleActivityDocumentInput,
+  SimpleActivityEntry,
 } from '../types/sst';
 import { INITIAL_COMPANIES, INITIAL_EMPLOYEES } from '../utils/initialData';
 import {
@@ -148,11 +155,19 @@ export interface IntegrationDuplicateCheckResult {
   };
 }
 
+export interface SimpleActivityServerCreateInput {
+  nome: string;
+  descricaoServico: string;
+  observacoes?: string;
+  documentos?: SimpleActivityDocumentInput[];
+}
+
 export interface IntegrationServerCreateInput {
   tipo?: IntegrationType;
   empresaId?: string;
   solicitacaoNovaEmpresa?: Omit<IntegrationCompanyRequest, 'aprovadoCompanyId'>;
   atividadeIds?: string[];
+  atividadesSimples?: SimpleActivityServerCreateInput[];
   colaboradorIds?: string[];
   novosColaboradores?: Array<{
     colaboradorId?: string;
@@ -179,6 +194,7 @@ export interface IntegrationServerCreateInput {
     officialRecordId?: string;
   }>;
   observacoes?: string;
+  isDemo?: boolean;
 }
 
 export interface IntegrationBatchFilePayload {
@@ -192,7 +208,8 @@ export interface IntegrationBatchFilePayload {
   origemColecao?: IntegrationOfficialCollection;
   obrigatorio?: boolean;
   arquivoNome: string;
-  arquivoBase64: string;
+  file?: File;
+  arquivoBase64?: string;
   dataEmissao?: string;
   dataValidade?: string;
   semValidade?: boolean;
@@ -248,8 +265,45 @@ export class IntegrationApiClientError extends Error {
   }
 }
 
+export interface DirectDocumentUploadPayload {
+  kind?: 'documento' | 'exame' | 'treinamento';
+  recordId?: string;
+  empresaId: string;
+  colaboradorId?: string;
+  nomeDocumento: string;
+  tipoDocumentoCanonico?: string;
+  categoria?: string;
+  numeroDocumento?: string;
+  dataEmissao?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  conclusao?: ConclusaoAptidao;
+  medicoResponsavel?: string;
+  crmMedico?: string;
+  cargaHoraria?: string;
+  instrutor?: string;
+  observacoes?: string;
+  arquivoNome: string;
+  file?: File;
+  arquivoBase64?: string;
+}
+
+export interface DirectDocumentUploadResult {
+  recordId: string;
+  kind: 'documento' | 'exame' | 'treinamento';
+  storageKey: string;
+  storageVerified: boolean;
+  fileSizeBytes: number;
+  sha256: string;
+  versao: number;
+  situacao: DocumentStatus;
+  record: DocumentSST | OccupationalExam | Training;
+}
+
 interface SSTContextType {
   companies: Company[];
+  authorizedCompanies: Company[];
+  effectiveAuthorizedEmpresaIds: string[];
   employees: Employee[];
   documents: DocumentSST[];
   trainings: Training[];
@@ -272,6 +326,10 @@ interface SSTContextType {
   // CRUD actions
   addCompany: (comp: Omit<Company, 'id'>) => Promise<string>;
   updateCompany: (id: string, comp: Partial<Company>) => Promise<void>;
+  updateCompanySolicitanteLinks: (
+    companyId: string,
+    solicitanteUserIds: string[]
+  ) => Promise<Company>;
   deleteCompany: (id: string) => Promise<void>;
   requestCompanyChange: (
     companyId: string,
@@ -285,6 +343,14 @@ interface SSTContextType {
   updateEmployee: (id: string, emp: Partial<Employee>) => Promise<void>;
   deleteEmployee: (id: string) => Promise<void>;
 
+  uploadDirectDocument: (
+    payload: DirectDocumentUploadPayload
+  ) => Promise<DirectDocumentUploadResult>;
+  reviewDirectDocumentOnServer: (
+    kind: 'documento' | 'exame' | 'treinamento',
+    id: string,
+    payload: { decisao: 'aprovado' | 'reprovado'; motivo?: string }
+  ) => Promise<{ kind: 'documento' | 'exame' | 'treinamento'; record: any; versao: number }>;
   addDocument: (docData: Omit<DocumentSST, 'id'>) => Promise<string>;
   updateDocument: (id: string, docData: Partial<DocumentSST>) => Promise<void>;
   approveDocument: (id: string) => Promise<void>;
@@ -320,9 +386,41 @@ interface SSTContextType {
   addEnvironmentalDoc: (env: Omit<EnvironmentalDoc, 'id'>) => Promise<string>;
   updateEnvironmentalDoc: (id: string, env: Partial<EnvironmentalDoc>) => Promise<void>;
 
-  // Notifications Module
+  // Notifications Module (E-mail + Central de Notificações Interna)
   notificationConfigs: NotificationConfig[];
   notificationLogs: NotificationLog[];
+  inAppNotifications: InAppNotification[];
+  unreadNotificationsCount: number;
+  refreshInAppNotifications: () => Promise<InAppNotification[]>;
+  markNotificationRead: (id: string) => Promise<void>;
+  markAllNotificationsRead: () => Promise<number>;
+  sendAdminAnnouncement: (input: {
+    title: string;
+    message: string;
+    severity?: InAppNotificationSeverity;
+    targetScope: 'all_solicitantes' | 'company_group' | 'single_company';
+    empresaIds?: string[];
+  }) => Promise<{ count: number }>;
+  syncExpirationNotificationsOnServer: () => Promise<{
+    createdCount: number;
+    scannedCount: number;
+  }>;
+  emitNotificationEventOnServer: (input: {
+    type: InAppNotificationType;
+    title: string;
+    message: string;
+    severity?: InAppNotificationSeverity;
+    recipientRole: InAppNotificationRecipientRole;
+    empresaId?: string;
+    empresaNome?: string;
+    companyId?: string;
+    employeeId?: string;
+    integrationId?: string;
+    documentId?: string;
+    actionTab?: string;
+    actionLabel?: string;
+    idempotencyKey?: string;
+  }) => Promise<void>;
   addNotificationConfig: (cfg: Omit<NotificationConfig, 'id'>) => Promise<string>;
   updateNotificationConfig: (id: string, cfg: Partial<NotificationConfig>) => Promise<void>;
   deleteNotificationConfig: (id: string) => Promise<void>;
@@ -415,9 +513,48 @@ interface SSTContextType {
     cnpj?: string;
     cpf?: string;
   }) => Promise<IntegrationDuplicateCheckResult>;
+  previewIntegrationReuseOnServer: (input: {
+    empresaId: string;
+    atividadeIds: string[];
+    atividadesSimples?: SimpleActivityServerCreateInput[];
+    colaboradorIds?: string[];
+  }) => Promise<IntegrationReusePreviewResult>;
   createIntegrationOnServer: (
     payload: IntegrationServerCreateInput
   ) => Promise<IntegrationServerDetailResult>;
+  addSimpleActivityOnServer: (
+    integrationId: string,
+    payload: SimpleActivityServerCreateInput & { expectedVersion?: number }
+  ) => Promise<
+    IntegrationServerDetailResult & {
+      simpleActivity: SimpleActivityEntry;
+      createdItems: ContractorIntegrationItem[];
+    }
+  >;
+  updateSimpleActivityOnServer: (
+    integrationId: string,
+    simpleActivityId: string,
+    payload: {
+      nome?: string;
+      descricaoServico?: string;
+      observacoes?: string;
+      expectedVersion?: number;
+    }
+  ) => Promise<IntegrationServerDetailResult & { simpleActivity: SimpleActivityEntry }>;
+  addSimpleActivityDocumentsOnServer: (
+    integrationId: string,
+    simpleActivityId: string,
+    payload: { documentos: SimpleActivityDocumentInput[]; expectedVersion?: number }
+  ) => Promise<IntegrationServerDetailResult & { createdItems: ContractorIntegrationItem[] }>;
+  reviewSimpleActivityOnServer: (
+    integrationId: string,
+    simpleActivityId: string,
+    payload: {
+      decisao: 'APROVAR' | 'RECUSAR' | 'SOLICITAR_COMPLEMENTACAO';
+      justificativa?: string;
+      expectedVersion?: number;
+    }
+  ) => Promise<IntegrationServerDetailResult & { simpleActivity: SimpleActivityEntry }>;
   uploadIntegrationBatchOnServer: (
     id: string,
     payload: {
@@ -470,11 +607,16 @@ interface SSTContextType {
   ) => Promise<IntegrationServerDetailResult>;
   approveIntegrationOnServer: (
     id: string,
-    opts?: { justificativa?: string; expectedVersion?: number }
+    opts?: { justificativa?: string; expectedVersion?: number; approveWholePackage?: boolean }
   ) => Promise<IntegrationServerDetailResult>;
   rejectIntegrationOnServer: (
     id: string,
-    opts: { justificativa: string; expectedVersion?: number }
+    opts: {
+      justificativa: string;
+      expectedVersion?: number;
+      rejectedItemIds?: string[];
+      itemReasons?: Record<string, string>;
+    }
   ) => Promise<IntegrationServerDetailResult>;
   closeIntegrationOnServer: (
     id: string,
@@ -487,7 +629,16 @@ interface SSTContextType {
 const SSTContext = createContext<SSTContextType | undefined>(undefined);
 
 export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { profile, activeRole, activeEmpresaId, isAdmin, authorizedFetch, getAuthHeaders } = useAuth();
+  const {
+    profile,
+    activeRole,
+    activeEmpresaId,
+    authorizedEmpresaIds,
+    syncProfileLocally,
+    isAdmin,
+    authorizedFetch,
+    getAuthHeaders,
+  } = useAuth();
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -503,6 +654,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [userProfiles, setUserProfiles] = useState<UserProfile[]>([]);
   const [notificationConfigs, setNotificationConfigs] = useState<NotificationConfig[]>([]);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
+  const [rawInAppNotifications, setRawInAppNotifications] = useState<InAppNotification[]>([]);
   const [activityProfiles, setActivityProfiles] = useState<ActivityProfile[]>([]);
   const [activityDocumentRequirements, setActivityDocumentRequirements] = useState<ActivityDocumentRequirement[]>([]);
   const [smartDocs, setSmartDocs] = useState<SmartDocRecord[]>([]);
@@ -738,7 +890,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const code = String(error?.code || '').toLowerCase();
           if (code === 'permission-denied' || String(error?.message || '').toLowerCase().includes('insufficient permissions')) {
             setActivityMatrixFirestoreError(
-              'Acesso negado pelo Firestore (permission-denied) na coleção activityProfiles. Publique as regras atualizadas em firestore.rules no Firebase e conclua a migração para o Firebase Admin SDK.'
+              'Não foi possível carregar a Matriz de Atividades no momento. Tente atualizar a página ou contate o administrador.'
             );
           }
           handleFirestoreError(error, OperationType.GET, 'activityProfiles');
@@ -765,13 +917,30 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const code = String(error?.code || '').toLowerCase();
           if (code === 'permission-denied' || String(error?.message || '').toLowerCase().includes('insufficient permissions')) {
             setActivityMatrixFirestoreError(
-              'Acesso negado pelo Firestore (permission-denied) na coleção activityDocumentRequirements. Publique as regras atualizadas em firestore.rules no Firebase e conclua a migração para o Firebase Admin SDK.'
+              'Não foi possível carregar os requisitos documentais no momento. Tente atualizar a página ou contate o administrador.'
             );
           }
           handleFirestoreError(error, OperationType.GET, 'activityDocumentRequirements');
         }
       );
       unsubs.push(unsubActivityReqs);
+
+      // 16b. Central de Notificações Interna (tempo real; filtrada estritamente por perfil/empresa no cliente e no servidor)
+      const unsubInAppNotifications = onSnapshot(
+        collection(db, 'notifications'),
+        (snap) => {
+          const list: InAppNotification[] = [];
+          snap.forEach((d) =>
+            list.push({ id: d.id, ...(d.data() as Omit<InAppNotification, 'id'>) })
+          );
+          list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+          setRawInAppNotifications(list);
+        },
+        (error) => {
+          console.warn('[SSTContext] Sincronização em tempo real de notificações indisponível; usando API:', error);
+        }
+      );
+      unsubs.push(unsubInAppNotifications);
 
       // 17. SmartDocs (metadados leves sem arquivoUrl para visibilidade de pendências no motor de conformidade)
       const unsubSmartDocs = onSnapshot(
@@ -825,19 +994,78 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const effectiveAuthorizedEmpresaIds = React.useMemo<string[]>(() => {
+    if (activeRole === 'admin' || activeRole === 'auditor') {
+      return companies.map((c) => c.id);
+    }
+    const ids = new Set<string>(authorizedEmpresaIds);
+    if (activeEmpresaId) ids.add(activeEmpresaId);
+    if (profile?.id) {
+      for (const comp of companies) {
+        if (
+          comp.criadoPorId === profile.id ||
+          (Array.isArray(comp.solicitantesAutorizadosIds) &&
+            comp.solicitantesAutorizadosIds.includes(profile.id))
+        ) {
+          ids.add(comp.id);
+        }
+      }
+    }
+    return Array.from(ids);
+  }, [activeRole, companies, authorizedEmpresaIds, activeEmpresaId, profile?.id]);
+
+  const authorizedCompanies = React.useMemo<Company[]>(() => {
+    if (activeRole === 'admin' || activeRole === 'auditor') {
+      return companies;
+    }
+    const allowed = new Set(effectiveAuthorizedEmpresaIds);
+    return companies.filter((c) => allowed.has(c.id));
+  }, [activeRole, companies, effectiveAuthorizedEmpresaIds]);
+
   // CRUD Implementations
   const addCompany = async (comp: Omit<Company, 'id'>) => {
-    const colRef = collection(db, 'companies');
-    const isIndeterminate = Boolean(comp.contrato_indeterminado);
-    const docRef = await addDoc(colRef, {
-      ...comp,
-      contrato_indeterminado: isIndeterminate,
-      dataTerminoContrato: isIndeterminate ? '' : comp.dataTerminoContrato || '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    const resp = await authorizedFetch('/api/companies/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...comp,
+        contrato_indeterminado: Boolean(comp.contrato_indeterminado),
+        dataTerminoContrato: comp.contrato_indeterminado ? '' : comp.dataTerminoContrato || '',
+      }),
     });
-    await logAudit('Criação', 'Empresa', docRef.id, `Cadastrada empresa ${comp.razaoSocial} (CNPJ: ${comp.cnpj})`);
-    return docRef.id;
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data?.success || !data?.company?.id) {
+      throw new Error(data?.message || 'Não foi possível cadastrar a empresa no momento.');
+    }
+
+    const createdCompany = data.company as Company;
+    setCompanies((prev) =>
+      prev.some((c) => c.id === createdCompany.id) ? prev : [createdCompany, ...prev]
+    );
+    if (data.user && profile && data.user.id === profile.id) {
+      syncProfileLocally(data.user as UserProfile);
+    }
+    void refreshInAppNotifications();
+    return createdCompany.id;
+  };
+
+  const updateCompanySolicitanteLinks = async (
+    companyId: string,
+    solicitanteUserIds: string[]
+  ): Promise<Company> => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode gerenciar vínculos de solicitantes.');
+    }
+    const resp = await authorizedFetch(`/api/companies/${encodeURIComponent(companyId)}/links`, {
+      method: 'PUT',
+      body: JSON.stringify({ solicitanteUserIds }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data?.success || !data?.company) {
+      throw new Error(data?.message || 'Não foi possível atualizar os vínculos da empresa.');
+    }
+    const updatedCompany = data.company as Company;
+    setCompanies((prev) => prev.map((c) => (c.id === updatedCompany.id ? updatedCompany : c)));
+    return updatedCompany;
   };
 
   const updateCompany = async (id: string, comp: Partial<Company>) => {
@@ -875,8 +1103,11 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!company) {
       throw new Error('Empresa não encontrada para solicitação de alteração cadastral.');
     }
-    if (activeRole === 'solicitante' && activeEmpresaId && companyId !== activeEmpresaId) {
-      throw new Error('Permissão negada: você só pode solicitar alteração para sua própria empresa.');
+    if (
+      activeRole === 'solicitante' &&
+      !effectiveAuthorizedEmpresaIds.includes(companyId)
+    ) {
+      throw new Error('Permissão negada: você só pode solicitar alteração para empresas vinculadas ao seu perfil.');
     }
     const cleanReason = (justificativaSolicitante || '').trim();
     if (!cleanReason) {
@@ -1060,14 +1291,17 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const addEmployee = async (emp: Omit<Employee, 'id'>) => {
-    const colRef = collection(db, 'employees');
-    const docRef = await addDoc(colRef, {
-      ...emp,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    const resp = await authorizedFetch('/api/employees/register', {
+      method: 'POST',
+      body: JSON.stringify(emp),
     });
-    await logAudit('Criação', 'Colaborador', docRef.id, `Cadastrado colaborador ${emp.nomeCompleto} (CPF: ${emp.cpf}) na empresa ${emp.empresaNome}`);
-    return docRef.id;
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data?.success || !data?.employee?.id) {
+      throw new Error(data?.message || 'Não foi possível cadastrar o colaborador.');
+    }
+    const created = data.employee as Employee;
+    setEmployees((prev) => (prev.some((e) => e.id === created.id) ? prev : [created, ...prev]));
+    return created.id;
   };
 
   const updateEmployee = async (id: string, emp: Partial<Employee>) => {
@@ -1083,6 +1317,89 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const emp = employees.find((e) => e.id === id);
     await deleteDoc(doc(db, 'employees', id));
     await logAudit('Exclusão', 'Colaborador', id, `Excluído colaborador ${emp?.nomeCompleto || id}`);
+  };
+
+  const uploadDirectDocument = async (
+    payload: DirectDocumentUploadPayload
+  ): Promise<DirectDocumentUploadResult> => {
+    let requestBody: BodyInit;
+    if (payload.file && typeof FormData !== 'undefined') {
+      const formData = new FormData();
+      formData.append('file', payload.file, payload.arquivoNome || payload.file.name);
+      formData.append('arquivoNome', payload.arquivoNome || payload.file.name);
+      if (payload.kind) formData.append('kind', payload.kind);
+      if (payload.recordId) formData.append('recordId', payload.recordId);
+      formData.append('empresaId', payload.empresaId);
+      if (payload.colaboradorId) formData.append('colaboradorId', payload.colaboradorId);
+      formData.append('nomeDocumento', payload.nomeDocumento);
+      if (payload.tipoDocumentoCanonico) {
+        formData.append('tipoDocumentoCanonico', payload.tipoDocumentoCanonico);
+      }
+      if (payload.categoria) formData.append('categoria', payload.categoria);
+      if (payload.numeroDocumento) formData.append('numeroDocumento', payload.numeroDocumento);
+      if (payload.dataEmissao) formData.append('dataEmissao', payload.dataEmissao);
+      if (payload.dataValidade !== undefined) formData.append('dataValidade', payload.dataValidade);
+      if (payload.semValidade !== undefined) {
+        formData.append('semValidade', String(Boolean(payload.semValidade)));
+      }
+      if (payload.conclusao) formData.append('conclusao', payload.conclusao);
+      if (payload.medicoResponsavel) formData.append('medicoResponsavel', payload.medicoResponsavel);
+      if (payload.crmMedico) formData.append('crmMedico', payload.crmMedico);
+      if (payload.cargaHoraria) formData.append('cargaHoraria', payload.cargaHoraria);
+      if (payload.instrutor) formData.append('instrutor', payload.instrutor);
+      if (payload.observacoes) formData.append('observacoes', payload.observacoes);
+      requestBody = formData;
+    } else {
+      requestBody = JSON.stringify(payload);
+    }
+
+    const resp = await authorizedFetch('/api/direct-documents/upload', {
+      method: 'POST',
+      body: requestBody,
+    });
+    const data = await resp.json().catch(() => ({}));
+    const resolvedRecordId = data?.recordId || data?.record?.id;
+    if (!resp.ok || !data?.success || !resolvedRecordId) {
+      throw new Error(
+        data?.message || 'Não foi possível armazenar e registrar o documento no servidor.'
+      );
+    }
+
+    const kind = (data.kind || payload.kind || 'documento') as 'documento' | 'exame' | 'treinamento';
+    if (kind === 'documento' && data.record) {
+      const rec = data.record as DocumentSST;
+      setDocuments((prev) =>
+        prev.some((d) => d.id === rec.id)
+          ? prev.map((d) => (d.id === rec.id ? rec : d))
+          : [rec, ...prev]
+      );
+    } else if (kind === 'exame' && data.record) {
+      const rec = data.record as OccupationalExam;
+      setExams((prev) =>
+        prev.some((e) => e.id === rec.id)
+          ? prev.map((e) => (e.id === rec.id ? rec : e))
+          : [rec, ...prev]
+      );
+    } else if (kind === 'treinamento' && data.record) {
+      const rec = data.record as Training;
+      setTrainings((prev) =>
+        prev.some((t) => t.id === rec.id)
+          ? prev.map((t) => (t.id === rec.id ? rec : t))
+          : [rec, ...prev]
+      );
+    }
+    void refreshInAppNotifications();
+    return {
+      recordId: resolvedRecordId,
+      kind,
+      storageKey: data.storageKey,
+      storageVerified: Boolean(data.storageVerified),
+      fileSizeBytes: Number(data.fileSizeBytes ?? data.sizeBytes ?? 0),
+      sha256: String(data.sha256 || ''),
+      versao: Number(data.versao ?? data.record?.versao ?? 1),
+      situacao: (data.situacao || data.record?.situacao || 'pendente') as DocumentStatus,
+      record: data.record,
+    };
   };
 
   const addDocument = async (docData: Omit<DocumentSST, 'id'>) => {
@@ -1157,35 +1474,73 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await logAudit('Atualização', 'Documento', id, `Atualizado documento "${current?.nomeDocumento}"`);
   };
 
+  const reviewDirectDocumentOnServer = async (
+    kind: 'documento' | 'exame' | 'treinamento',
+    id: string,
+    payload: { decisao: 'aprovado' | 'reprovado'; motivo?: string }
+  ) => {
+    if (!isAdmin) {
+      throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar ou recusar documentos.');
+    }
+    const resp = await authorizedFetch(
+      `/api/direct-documents/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/review`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data?.success) {
+      throw new Error(data?.message || `Falha ao avaliar documento (HTTP ${resp.status}).`);
+    }
+    // Sync integration lists in background so any auto-updated integrations reflect immediately
+    void Promise.all([listIntegrationsOnServer(), listIntegrationItemsOnServer()]).catch(() => {});
+    return {
+      kind: data.kind as 'documento' | 'exame' | 'treinamento',
+      record: data.record,
+      versao: Number(data.versao ?? data.record?.versao ?? 1),
+    };
+  };
+
   const approveDocument = async (id: string) => {
     if (!isAdmin) {
       throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar documentos.');
     }
-    const current = documents.find((d) => d.id === id);
-    const docRef = doc(db, 'documents', id);
-    const dataAnalise = new Date().toISOString();
-    const analisadoPor = profile?.nome || 'Administrador SST';
-
-    const updatedVersions = (current?.historicoVersoes || []).map((v) =>
-      v.versao === current?.versao
-        ? { ...v, situacao: 'aprovado' as DocumentStatus, analisadoPor, dataAnalise }
-        : v
-    );
-
-    await updateDoc(docRef, {
-      situacao: 'aprovado',
-      analisadoPor,
-      dataAnalise,
-      motivoReprovacao: '',
-      historicoVersoes: updatedVersions,
-      updatedAt: dataAnalise,
-    });
-    await logAudit(
-      'Aprovação',
-      'Documento',
-      id,
-      `Documento "${current?.nomeDocumento}" aprovado por ${analisadoPor}`
-    );
+    try {
+      await reviewDirectDocumentOnServer('documento', id, { decisao: 'aprovado' });
+      return;
+    } catch (serverErr: any) {
+      const msg = String(serverErr?.message || '');
+      if (msg.includes('Permissão negada') || msg.includes('obrigat')) {
+        throw serverErr;
+      }
+      // Safe fallback only if backend endpoint is unreachable in isolated offline mode
+      const current = documents.find((d) => d.id === id);
+      const docRef = doc(db, 'documents', id);
+      const dataAnalise = new Date().toISOString();
+      const analisadoPor = profile?.nome || 'Administrador SST';
+      const updatedVersions = (current?.historicoVersoes || []).map((v) =>
+        v.versao === current?.versao
+          ? { ...v, situacao: 'aprovado' as DocumentStatus, analisadoPor, dataAnalise }
+          : v
+      );
+      await updateDoc(docRef, {
+        situacao: 'aprovado',
+        analisadoPor,
+        dataAnalise,
+        motivoReprovacao: '',
+        versaoPendente: null,
+        historicoVersoes: updatedVersions,
+        updatedAt: dataAnalise,
+      });
+      await logAudit(
+        'Aprovação',
+        'Documento',
+        id,
+        `Documento "${current?.nomeDocumento}" aprovado por ${analisadoPor}`
+      );
+    }
   };
 
   const rejectDocument = async (id: string, motivo: string) => {
@@ -1195,31 +1550,41 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!motivo || motivo.trim().length === 0) {
       throw new Error('O motivo da reprovação é obrigatório.');
     }
-    const current = documents.find((d) => d.id === id);
-    const docRef = doc(db, 'documents', id);
-    const dataAnalise = new Date().toISOString();
-    const analisadoPor = profile?.nome || 'Administrador SST';
-
-    const updatedVersions = (current?.historicoVersoes || []).map((v) =>
-      v.versao === current?.versao
-        ? { ...v, situacao: 'reprovado' as DocumentStatus, motivoReprovacao: motivo.trim(), analisadoPor, dataAnalise }
-        : v
-    );
-
-    await updateDoc(docRef, {
-      situacao: 'reprovado',
-      motivoReprovacao: motivo.trim(),
-      analisadoPor,
-      dataAnalise,
-      historicoVersoes: updatedVersions,
-      updatedAt: dataAnalise,
-    });
-    await logAudit(
-      'Reprovação',
-      'Documento',
-      id,
-      `Documento "${current?.nomeDocumento}" reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
-    );
+    try {
+      await reviewDirectDocumentOnServer('documento', id, {
+        decisao: 'reprovado',
+        motivo: motivo.trim(),
+      });
+      return;
+    } catch (serverErr: any) {
+      const msg = String(serverErr?.message || '');
+      if (msg.includes('Permissão negada') || msg.includes('obrigat') || msg.includes('justificativa')) {
+        throw serverErr;
+      }
+      const current = documents.find((d) => d.id === id);
+      const docRef = doc(db, 'documents', id);
+      const dataAnalise = new Date().toISOString();
+      const analisadoPor = profile?.nome || 'Administrador SST';
+      const updatedVersions = (current?.historicoVersoes || []).map((v) =>
+        v.versao === current?.versao
+          ? { ...v, situacao: 'reprovado' as DocumentStatus, motivoReprovacao: motivo.trim(), analisadoPor, dataAnalise }
+          : v
+      );
+      await updateDoc(docRef, {
+        situacao: 'reprovado',
+        motivoReprovacao: motivo.trim(),
+        analisadoPor,
+        dataAnalise,
+        historicoVersoes: updatedVersions,
+        updatedAt: dataAnalise,
+      });
+      await logAudit(
+        'Reprovação',
+        'Documento',
+        id,
+        `Documento "${current?.nomeDocumento}" reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
+      );
+    }
   };
 
   const deleteDocument = async (id: string) => {
@@ -1270,18 +1635,28 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!isAdmin) {
       throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar treinamentos.');
     }
-    const trn = trainings.find((t) => t.id === id);
-    const docRef = doc(db, 'trainings', id);
-    const dataAnalise = new Date().toISOString();
-    const analisadoPor = profile?.nome || 'Administrador SST';
-    await updateDoc(docRef, {
-      situacao: 'aprovado',
-      analisadoPor,
-      dataAnalise,
-      motivoReprovacao: '',
-      updatedAt: dataAnalise,
-    });
-    await logAudit('Aprovação', 'Treinamento', id, `Treinamento "${trn?.nomeTreinamento}" aprovado por ${analisadoPor}`);
+    try {
+      await reviewDirectDocumentOnServer('treinamento', id, { decisao: 'aprovado' });
+      return;
+    } catch (serverErr: any) {
+      const msg = String(serverErr?.message || '');
+      if (msg.includes('Permissão negada') || msg.includes('obrigat')) {
+        throw serverErr;
+      }
+      const trn = trainings.find((t) => t.id === id);
+      const docRef = doc(db, 'trainings', id);
+      const dataAnalise = new Date().toISOString();
+      const analisadoPor = profile?.nome || 'Administrador SST';
+      await updateDoc(docRef, {
+        situacao: 'aprovado',
+        analisadoPor,
+        dataAnalise,
+        motivoReprovacao: '',
+        versaoPendente: null,
+        updatedAt: dataAnalise,
+      });
+      await logAudit('Aprovação', 'Treinamento', id, `Treinamento "${trn?.nomeTreinamento}" aprovado por ${analisadoPor}`);
+    }
   };
 
   const rejectTraining = async (id: string, motivo: string) => {
@@ -1291,23 +1666,35 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!motivo || motivo.trim().length === 0) {
       throw new Error('O motivo da reprovação é obrigatório.');
     }
-    const trn = trainings.find((t) => t.id === id);
-    const docRef = doc(db, 'trainings', id);
-    const dataAnalise = new Date().toISOString();
-    const analisadoPor = profile?.nome || 'Administrador SST';
-    await updateDoc(docRef, {
-      situacao: 'reprovado',
-      motivoReprovacao: motivo.trim(),
-      analisadoPor,
-      dataAnalise,
-      updatedAt: dataAnalise,
-    });
-    await logAudit(
-      'Reprovação',
-      'Treinamento',
-      id,
-      `Treinamento "${trn?.nomeTreinamento}" reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
-    );
+    try {
+      await reviewDirectDocumentOnServer('treinamento', id, {
+        decisao: 'reprovado',
+        motivo: motivo.trim(),
+      });
+      return;
+    } catch (serverErr: any) {
+      const msg = String(serverErr?.message || '');
+      if (msg.includes('Permissão negada') || msg.includes('obrigat') || msg.includes('justificativa')) {
+        throw serverErr;
+      }
+      const trn = trainings.find((t) => t.id === id);
+      const docRef = doc(db, 'trainings', id);
+      const dataAnalise = new Date().toISOString();
+      const analisadoPor = profile?.nome || 'Administrador SST';
+      await updateDoc(docRef, {
+        situacao: 'reprovado',
+        motivoReprovacao: motivo.trim(),
+        analisadoPor,
+        dataAnalise,
+        updatedAt: dataAnalise,
+      });
+      await logAudit(
+        'Reprovação',
+        'Treinamento',
+        id,
+        `Treinamento "${trn?.nomeTreinamento}" reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
+      );
+    }
   };
 
   const deleteTraining = async (id: string) => {
@@ -1358,18 +1745,28 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!isAdmin) {
       throw new Error('Permissão negada: apenas o Administrador EHS pode aprovar exames e ASOs.');
     }
-    const exam = exams.find((e) => e.id === id);
-    const docRef = doc(db, 'exams', id);
-    const dataAnalise = new Date().toISOString();
-    const analisadoPor = profile?.nome || 'Administrador SST';
-    await updateDoc(docRef, {
-      situacao: 'aprovado',
-      analisadoPor,
-      dataAnalise,
-      motivoReprovacao: '',
-      updatedAt: dataAnalise,
-    });
-    await logAudit('Aprovação', 'Exame/ASO', id, `${exam?.tipoExame || 'ASO'} de ${exam?.colaboradorNome || id} aprovado por ${analisadoPor}`);
+    try {
+      await reviewDirectDocumentOnServer('exame', id, { decisao: 'aprovado' });
+      return;
+    } catch (serverErr: any) {
+      const msg = String(serverErr?.message || '');
+      if (msg.includes('Permissão negada') || msg.includes('obrigat')) {
+        throw serverErr;
+      }
+      const exam = exams.find((e) => e.id === id);
+      const docRef = doc(db, 'exams', id);
+      const dataAnalise = new Date().toISOString();
+      const analisadoPor = profile?.nome || 'Administrador SST';
+      await updateDoc(docRef, {
+        situacao: 'aprovado',
+        analisadoPor,
+        dataAnalise,
+        motivoReprovacao: '',
+        versaoPendente: null,
+        updatedAt: dataAnalise,
+      });
+      await logAudit('Aprovação', 'Exame/ASO', id, `${exam?.tipoExame || 'ASO'} de ${exam?.colaboradorNome || id} aprovado por ${analisadoPor}`);
+    }
   };
 
   const rejectExam = async (id: string, motivo: string) => {
@@ -1379,23 +1776,35 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!motivo || motivo.trim().length === 0) {
       throw new Error('O motivo da reprovação é obrigatório.');
     }
-    const exam = exams.find((e) => e.id === id);
-    const docRef = doc(db, 'exams', id);
-    const dataAnalise = new Date().toISOString();
-    const analisadoPor = profile?.nome || 'Administrador SST';
-    await updateDoc(docRef, {
-      situacao: 'reprovado',
-      motivoReprovacao: motivo.trim(),
-      analisadoPor,
-      dataAnalise,
-      updatedAt: dataAnalise,
-    });
-    await logAudit(
-      'Reprovação',
-      'Exame/ASO',
-      id,
-      `${exam?.tipoExame || 'ASO'} de ${exam?.colaboradorNome || id} reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
-    );
+    try {
+      await reviewDirectDocumentOnServer('exame', id, {
+        decisao: 'reprovado',
+        motivo: motivo.trim(),
+      });
+      return;
+    } catch (serverErr: any) {
+      const msg = String(serverErr?.message || '');
+      if (msg.includes('Permissão negada') || msg.includes('obrigat') || msg.includes('justificativa')) {
+        throw serverErr;
+      }
+      const exam = exams.find((e) => e.id === id);
+      const docRef = doc(db, 'exams', id);
+      const dataAnalise = new Date().toISOString();
+      const analisadoPor = profile?.nome || 'Administrador SST';
+      await updateDoc(docRef, {
+        situacao: 'reprovado',
+        motivoReprovacao: motivo.trim(),
+        analisadoPor,
+        dataAnalise,
+        updatedAt: dataAnalise,
+      });
+      await logAudit(
+        'Reprovação',
+        'Exame/ASO',
+        id,
+        `${exam?.tipoExame || 'ASO'} de ${exam?.colaboradorNome || id} reprovado por ${analisadoPor}. Justificativa: ${motivo.trim()}`
+      );
+    }
   };
 
   const deleteExam = async (id: string) => {
@@ -1924,6 +2333,18 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         docRef.id,
         `Vinculado requisito "${reqData.nomeExibicao}" (${reqData.documentoCodigoCanonico}) à atividade ${reqData.activityId}.`
       );
+      const linkedActivity = activityProfiles.find((a) => a.id === reqData.activityId);
+      void emitNotificationEventOnServer({
+        type: 'NOVA_EXIGENCIA_DOCUMENTAL',
+        title: `Nova exigência documental: ${reqData.nomeExibicao}`,
+        message: `O EHS adicionou o requisito "${reqData.nomeExibicao}"${linkedActivity ? ` para a atividade "${linkedActivity.nome}"` : ''} na Matriz de Atividades.`,
+        severity: 'info',
+        recipientRole: 'all_solicitantes',
+        documentId: docRef.id,
+        actionTab: 'gestao_integracao',
+        actionLabel: 'Ver checklist',
+        idempotencyKey: `nova-exigencia:${docRef.id}`,
+      });
       return docRef.id;
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'activityDocumentRequirements');
@@ -2422,6 +2843,46 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  const buildIntegrationUploadFormData = (payload: IntegrationBatchFilePayload): FormData => {
+    const formData = new FormData();
+    if (payload.file) {
+      formData.append('file', payload.file, payload.arquivoNome || payload.file.name);
+    }
+    formData.append('arquivoNome', payload.arquivoNome || payload.file?.name || '');
+    if (payload.itemId) formData.append('itemId', payload.itemId);
+    if (payload.categoria) formData.append('categoria', payload.categoria);
+    if (payload.categoriaOrganizacional) {
+      formData.append('categoriaOrganizacional', payload.categoriaOrganizacional);
+    }
+    if (payload.colaboradorId) formData.append('colaboradorId', payload.colaboradorId);
+    if (payload.colaboradorCandidateId) {
+      formData.append('colaboradorCandidateId', payload.colaboradorCandidateId);
+    }
+    if (payload.documentoCodigoCanonico) {
+      formData.append('documentoCodigoCanonico', payload.documentoCodigoCanonico);
+    }
+    if (payload.nomeExibicao) formData.append('nomeExibicao', payload.nomeExibicao);
+    if (payload.origemColecao) formData.append('origemColecao', payload.origemColecao);
+    if (payload.obrigatorio !== undefined) {
+      formData.append('obrigatorio', String(Boolean(payload.obrigatorio)));
+    }
+    if (payload.dataEmissao) formData.append('dataEmissao', payload.dataEmissao);
+    if (payload.dataValidade !== undefined) formData.append('dataValidade', payload.dataValidade);
+    if (payload.semValidade !== undefined) {
+      formData.append('semValidade', String(Boolean(payload.semValidade)));
+    }
+    if (payload.numeroDocumento) formData.append('numeroDocumento', payload.numeroDocumento);
+    if (payload.conclusaoAso) formData.append('conclusaoAso', payload.conclusaoAso);
+    if (payload.aptidoesEspecificas && payload.aptidoesEspecificas.length > 0) {
+      formData.append('aptidoesEspecificas', JSON.stringify(payload.aptidoesEspecificas));
+    }
+    if (payload.observacoes) formData.append('observacoes', payload.observacoes);
+    if (payload.runSmartDocsAi !== undefined) {
+      formData.append('runSmartDocsAi', String(Boolean(payload.runSmartDocsAi)));
+    }
+    return formData;
+  };
+
   const uploadIntegrationDocumentOnServer = async (
     id: string,
     payload: IntegrationBatchFilePayload,
@@ -2429,17 +2890,18 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Promise<IntegrationSingleUploadResult> => {
     const url = `/api/integrations/${encodeURIComponent(id)}/documents/upload`;
     const authHeaders = getAuthHeaders();
+    const useMultipart = Boolean(payload.file && typeof FormData !== 'undefined');
 
     if (typeof XMLHttpRequest === 'undefined') {
       const res = await invokeIntegrationApi<IntegrationSingleUploadResult & { success: boolean }>(
         url,
         {
           method: 'POST',
-          body: JSON.stringify(payload),
+          body: useMultipart ? buildIntegrationUploadFormData(payload) : JSON.stringify(payload),
         }
       );
       onProgress?.(100);
-      upsertIntegrationInState(res.integration);
+      upsertIntegrationInState(res.integration, res.items || []);
       return {
         integration: res.integration,
         items: res.items || [],
@@ -2453,9 +2915,16 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return new Promise<IntegrationSingleUploadResult>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', url, true);
-      xhr.setRequestHeader('Content-Type', 'application/json');
+
+      // Avoid setting Content-Type twice (XHR concatenates duplicate headers into an invalid media type)
+      // and omit Content-Type for FormData so the browser supplies the multipart boundary automatically.
+      if (!useMultipart) {
+        xhr.setRequestHeader('Content-Type', 'application/json');
+      }
       for (const [k, v] of Object.entries(authHeaders)) {
-        if (v) xhr.setRequestHeader(k, v);
+        if (!v) continue;
+        if (k.toLowerCase() === 'content-type') continue;
+        xhr.setRequestHeader(k, v);
       }
 
       xhr.upload.onprogress = (evt) => {
@@ -2520,7 +2989,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       xhr.timeout = 90_000;
       onProgress?.(5);
-      xhr.send(JSON.stringify(payload));
+      xhr.send(useMultipart ? buildIntegrationUploadFormData(payload) : JSON.stringify(payload));
     });
   };
 
@@ -2569,8 +3038,113 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     itemId: string,
     payload: IntegrationBatchFilePayload
   ): Promise<IntegrationServerDetailResult> => {
+    const useMultipart = Boolean(payload.file && typeof FormData !== 'undefined');
     const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
       `/api/integrations/${encodeURIComponent(integrationId)}/items/${encodeURIComponent(itemId)}/renew`,
+      {
+        method: 'POST',
+        body: useMultipart ? buildIntegrationUploadFormData(payload) : JSON.stringify(payload),
+      }
+    );
+    upsertIntegrationInState(res.integration, res.items || []);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+    };
+  };
+
+  const previewIntegrationReuseOnServer = async (input: {
+    empresaId: string;
+    atividadeIds: string[];
+    atividadesSimples?: SimpleActivityServerCreateInput[];
+    colaboradorIds?: string[];
+  }): Promise<IntegrationReusePreviewResult> => {
+    const res = await invokeIntegrationApi<{ success: boolean; preview: IntegrationReusePreviewResult }>(
+      '/api/integrations/reuse-preview',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    );
+    return res.preview;
+  };
+
+  const addSimpleActivityOnServer = async (
+    integrationId: string,
+    payload: SimpleActivityServerCreateInput & { expectedVersion?: number }
+  ): Promise<
+    IntegrationServerDetailResult & {
+      simpleActivity: SimpleActivityEntry;
+      createdItems: ContractorIntegrationItem[];
+    }
+  > => {
+    const res = await invokeIntegrationApi<
+      IntegrationServerDetailResult & {
+        success: boolean;
+        simpleActivity: SimpleActivityEntry;
+        createdItems: ContractorIntegrationItem[];
+      }
+    >(`/api/integrations/${encodeURIComponent(integrationId)}/simple-activities`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    upsertIntegrationInState(res.integration, res.items || []);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+      simpleActivity: res.simpleActivity,
+      createdItems: res.createdItems || [],
+    };
+  };
+
+  const updateSimpleActivityOnServer = async (
+    integrationId: string,
+    simpleActivityId: string,
+    payload: {
+      nome?: string;
+      descricaoServico?: string;
+      observacoes?: string;
+      expectedVersion?: number;
+    }
+  ): Promise<IntegrationServerDetailResult & { simpleActivity: SimpleActivityEntry }> => {
+    const res = await invokeIntegrationApi<
+      IntegrationServerDetailResult & {
+        success: boolean;
+        simpleActivity: SimpleActivityEntry;
+      }
+    >(
+      `/api/integrations/${encodeURIComponent(integrationId)}/simple-activities/${encodeURIComponent(simpleActivityId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    );
+    upsertIntegrationInState(res.integration, res.items || []);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+      simpleActivity: res.simpleActivity,
+    };
+  };
+
+  const addSimpleActivityDocumentsOnServer = async (
+    integrationId: string,
+    simpleActivityId: string,
+    payload: { documentos: SimpleActivityDocumentInput[]; expectedVersion?: number }
+  ): Promise<IntegrationServerDetailResult & { createdItems: ContractorIntegrationItem[] }> => {
+    const res = await invokeIntegrationApi<
+      IntegrationServerDetailResult & {
+        success: boolean;
+        createdItems: ContractorIntegrationItem[];
+      }
+    >(
+      `/api/integrations/${encodeURIComponent(integrationId)}/simple-activities/${encodeURIComponent(simpleActivityId)}/documents`,
       {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -2582,6 +3156,38 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items: res.items || [],
       compliancePreview: res.compliancePreview ?? null,
       submissionReadiness: res.submissionReadiness,
+      createdItems: res.createdItems || [],
+    };
+  };
+
+  const reviewSimpleActivityOnServer = async (
+    integrationId: string,
+    simpleActivityId: string,
+    payload: {
+      decisao: 'APROVAR' | 'RECUSAR' | 'SOLICITAR_COMPLEMENTACAO';
+      justificativa?: string;
+      expectedVersion?: number;
+    }
+  ): Promise<IntegrationServerDetailResult & { simpleActivity: SimpleActivityEntry }> => {
+    const res = await invokeIntegrationApi<
+      IntegrationServerDetailResult & {
+        success: boolean;
+        simpleActivity: SimpleActivityEntry;
+      }
+    >(
+      `/api/integrations/${encodeURIComponent(integrationId)}/simple-activities/${encodeURIComponent(simpleActivityId)}/review`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+    upsertIntegrationInState(res.integration, res.items || []);
+    return {
+      integration: res.integration,
+      items: res.items || [],
+      compliancePreview: res.compliancePreview ?? null,
+      submissionReadiness: res.submissionReadiness,
+      simpleActivity: res.simpleActivity,
     };
   };
 
@@ -2694,7 +3300,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const approveIntegrationOnServer = async (
     id: string,
-    opts?: { justificativa?: string; expectedVersion?: number }
+    opts?: { justificativa?: string; expectedVersion?: number; approveWholePackage?: boolean }
   ): Promise<IntegrationServerDetailResult> => {
     const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
       `/api/integrations/${encodeURIComponent(id)}/approve`,
@@ -2704,6 +3310,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     );
     upsertIntegrationInState(res.integration, res.items || []);
+    void refreshInAppNotifications();
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2714,7 +3321,12 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const rejectIntegrationOnServer = async (
     id: string,
-    opts: { justificativa: string; expectedVersion?: number }
+    opts: {
+      justificativa: string;
+      expectedVersion?: number;
+      rejectedItemIds?: string[];
+      itemReasons?: Record<string, string>;
+    }
   ): Promise<IntegrationServerDetailResult> => {
     const res = await invokeIntegrationApi<IntegrationServerDetailResult & { success: boolean }>(
       `/api/integrations/${encodeURIComponent(id)}/reject`,
@@ -2724,6 +3336,7 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     );
     upsertIntegrationInState(res.integration, res.items || []);
+    void refreshInAppNotifications();
     return {
       integration: res.integration,
       items: res.items || [],
@@ -2778,7 +3391,9 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             err?.code === 'FIRESTORE_RULES_NOT_PUBLISHED' ||
             err?.code === 'FIREBASE_ADMIN_NOT_CONFIGURED'
           ) {
-            setIntegrationFirestoreError(err.message);
+            setIntegrationFirestoreError(
+              'Não foi possível acessar os dados da integração no momento. Verifique sua conexão ou tente novamente.'
+            );
           }
         }
       }
@@ -2796,6 +3411,202 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (typeof window !== 'undefined') {
         window.removeEventListener('focus', handleFocus);
       }
+    };
+  }, [profile?.id, activeRole, activeEmpresaId]);
+
+  // ============================================================================
+  // CENTRAL DE NOTIFICAÇÕES INTERNA (REAL-TIME + API BACKEND)
+  // ============================================================================
+  const inAppNotifications = React.useMemo<InAppNotification[]>(() => {
+    if (!profile?.id) return [];
+    const uid = profile.id;
+    const allowedCompanies = new Set(effectiveAuthorizedEmpresaIds);
+
+    return rawInAppNotifications
+      .filter((n) => {
+        if (activeRole === 'admin' || activeRole === 'auditor') {
+          if (n.recipientRole === 'admin') {
+            if (n.recipientUserId && n.recipientUserId !== uid) return false;
+            return true;
+          }
+          return false;
+        }
+        if (activeRole === 'solicitante') {
+          if (n.recipientRole === 'all_solicitantes') return true;
+          if (n.recipientRole === 'solicitante') {
+            if (n.recipientUserId && n.recipientUserId === uid) return true;
+            if (n.empresaId && allowedCompanies.has(n.empresaId)) return true;
+            return false;
+          }
+          return false;
+        }
+        return false;
+      })
+      .map((n) => {
+        const readBy = Array.isArray(n.readByUserIds) ? n.readByUserIds : [];
+        const isRead =
+          readBy.includes(uid) ||
+          Boolean(n.recipientUserId && n.recipientUserId === uid && n.read);
+        return { ...n, read: isRead };
+      })
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  }, [rawInAppNotifications, profile?.id, activeRole, effectiveAuthorizedEmpresaIds]);
+
+  const unreadNotificationsCount = React.useMemo(
+    () => inAppNotifications.filter((n) => !n.read).length,
+    [inAppNotifications]
+  );
+
+  const refreshInAppNotifications = async (): Promise<InAppNotification[]> => {
+    if (!profile?.id) return [];
+    try {
+      const resp = await authorizedFetch('/api/in-app-notifications', { method: 'GET' });
+      const data = await parseApiResponse(resp);
+      if (resp.ok && data?.success && Array.isArray(data.notifications)) {
+        setRawInAppNotifications((prev) => {
+          const byId = new Map<string, InAppNotification>();
+          for (const item of prev) byId.set(item.id, item);
+          for (const item of data.notifications as InAppNotification[]) byId.set(item.id, item);
+          return Array.from(byId.values()).sort((a, b) =>
+            (b.createdAt || '').localeCompare(a.createdAt || '')
+          );
+        });
+        return data.notifications as InAppNotification[];
+      }
+    } catch (err) {
+      console.warn('[SSTContext] Falha ao atualizar notificações via API:', err);
+    }
+    return inAppNotifications;
+  };
+
+  const markNotificationRead = async (id: string): Promise<void> => {
+    if (!profile?.id) return;
+    const nowIso = new Date().toISOString();
+    setRawInAppNotifications((prev) =>
+      prev.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              read: true,
+              readAt: nowIso,
+              readByUserIds: Array.from(new Set([...(n.readByUserIds || []), profile.id])),
+            }
+          : n
+      )
+    );
+    try {
+      await authorizedFetch(`/api/in-app-notifications/${encodeURIComponent(id)}/read`, {
+        method: 'POST',
+      });
+    } catch (err) {
+      console.warn('[SSTContext] Erro ao marcar notificação como lida:', err);
+    }
+  };
+
+  const markAllNotificationsRead = async (): Promise<number> => {
+    if (!profile?.id) return 0;
+    const nowIso = new Date().toISOString();
+    const unreadIds = new Set(inAppNotifications.filter((n) => !n.read).map((n) => n.id));
+    setRawInAppNotifications((prev) =>
+      prev.map((n) =>
+        unreadIds.has(n.id)
+          ? {
+              ...n,
+              read: true,
+              readAt: nowIso,
+              readByUserIds: Array.from(new Set([...(n.readByUserIds || []), profile.id])),
+            }
+          : n
+      )
+    );
+    try {
+      const resp = await authorizedFetch('/api/in-app-notifications/read-all', {
+        method: 'POST',
+      });
+      const data = await parseApiResponse(resp);
+      return Number(data?.updatedCount ?? unreadIds.size);
+    } catch (err) {
+      console.warn('[SSTContext] Erro ao marcar todas notificações como lidas:', err);
+      return unreadIds.size;
+    }
+  };
+
+  const sendAdminAnnouncement = async (input: {
+    title: string;
+    message: string;
+    severity?: InAppNotificationSeverity;
+    targetScope: 'all_solicitantes' | 'company_group' | 'single_company';
+    empresaIds?: string[];
+  }): Promise<{ count: number }> => {
+    const resp = await authorizedFetch('/api/in-app-notifications/broadcast', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    const data = await parseApiResponse(resp);
+    if (!resp.ok || !data?.success) {
+      throw new Error(data?.message || 'Não foi possível enviar o comunicado.');
+    }
+    void refreshInAppNotifications();
+    return { count: Array.isArray(data?.created) ? data.created.length : 1 };
+  };
+
+  const syncExpirationNotificationsOnServer = async (): Promise<{
+    createdCount: number;
+    scannedCount: number;
+  }> => {
+    const resp = await authorizedFetch('/api/in-app-notifications/sync-expirations', {
+      method: 'POST',
+    });
+    const data = await parseApiResponse(resp);
+    if (!resp.ok || !data?.success) {
+      return { createdCount: 0, scannedCount: 0 };
+    }
+    void refreshInAppNotifications();
+    return {
+      createdCount: Number(data?.createdCount || 0),
+      scannedCount: Number(data?.scannedCount || 0),
+    };
+  };
+
+  const emitNotificationEventOnServer = async (input: {
+    type: InAppNotificationType;
+    title: string;
+    message: string;
+    severity?: InAppNotificationSeverity;
+    recipientRole: InAppNotificationRecipientRole;
+    empresaId?: string;
+    empresaNome?: string;
+    companyId?: string;
+    employeeId?: string;
+    integrationId?: string;
+    documentId?: string;
+    actionTab?: string;
+    actionLabel?: string;
+    idempotencyKey?: string;
+  }): Promise<void> => {
+    try {
+      await authorizedFetch('/api/in-app-notifications/event', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+    } catch (err) {
+      console.warn('[SSTContext] Aviso ao emitir evento de notificação:', err);
+    }
+  };
+
+  // Sync in-app notifications & run deduplicated 5-milestone expiration check on authenticated login
+  useEffect(() => {
+    if (!profile?.id) return;
+    let cancelled = false;
+    const hydrate = async () => {
+      await refreshInAppNotifications();
+      if (!cancelled) {
+        await syncExpirationNotificationsOnServer();
+      }
+    };
+    void hydrate();
+    return () => {
+      cancelled = true;
     };
   }, [profile?.id, activeRole, activeEmpresaId]);
 
@@ -2842,6 +3653,8 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     <SSTContext.Provider
       value={{
         companies,
+        authorizedCompanies,
+        effectiveAuthorizedEmpresaIds,
         employees,
         documents,
         trainings,
@@ -2862,9 +3675,18 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         integrationFirestoreError,
         notificationConfigs,
         notificationLogs,
+        inAppNotifications,
+        unreadNotificationsCount,
+        refreshInAppNotifications,
+        markNotificationRead,
+        markAllNotificationsRead,
+        sendAdminAnnouncement,
+        syncExpirationNotificationsOnServer,
+        emitNotificationEventOnServer,
         loading,
         addCompany,
         updateCompany,
+        updateCompanySolicitanteLinks,
         deleteCompany,
         requestCompanyChange,
         approveCompanyChange,
@@ -2872,6 +3694,8 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addEmployee,
         updateEmployee,
         deleteEmployee,
+        uploadDirectDocument,
+        reviewDirectDocumentOnServer,
         addDocument,
         updateDocument,
         approveDocument,
@@ -2926,10 +3750,15 @@ export const SSTProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         cancelPermitOnServer,
         closePermitOnServer,
         listIntegrationsOnServer,
+        previewIntegrationReuseOnServer,
         listIntegrationItemsOnServer,
         getIntegrationDetailOnServer,
         checkIntegrationDuplicatesOnServer,
         createIntegrationOnServer,
+        addSimpleActivityOnServer,
+        updateSimpleActivityOnServer,
+        addSimpleActivityDocumentsOnServer,
+        reviewSimpleActivityOnServer,
         uploadIntegrationBatchOnServer,
         uploadIntegrationDocumentOnServer,
         fetchIntegrationItemFileBlobOnServer,

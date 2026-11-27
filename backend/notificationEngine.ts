@@ -15,6 +15,7 @@ import {
   SmtpOverrideConfig,
 } from './emailService';
 import { NotificationConfig, NotificationLog, NotificationMilestone } from '../src/types/sst';
+import { InAppNotificationService } from './inAppNotificationService';
 
 // Initialize Firebase for Backend Node environment
 const app = getApps().length > 0 ? getApps()[0] : initializeApp(firebaseConfig);
@@ -76,10 +77,12 @@ export function calculateDaysRemaining(normalizedDateStr: string): number | null
 
 /**
  * Checks which milestone matches the days remaining
- * Milestones requested: 30 days before, 15 days before, and 0 days (today)
+ * Milestones supported: 30 days, 15 days, 7 days, 0 days (today), and expired (< 0)
  */
 export function identifyMilestone(daysRemaining: number): NotificationMilestone | null {
+  if (daysRemaining < 0) return 'vencido';
   if (daysRemaining === 0) return 'hoje';
+  if (daysRemaining === 7) return '7_dias';
   if (daysRemaining === 15) return '15_dias';
   if (daysRemaining === 30) return '30_dias';
   return null;
@@ -374,6 +377,14 @@ export async function executeDailyNotificationMonitoring(
     } catch (saveErr) {
       console.error('[Log Firestore] Erro ao persistir log de notificação:', saveErr);
     }
+  }
+
+  // Also synchronize deduplicated internal Firestore notifications (independent of SMTP)
+  try {
+    const inAppService = new InAppNotificationService();
+    await inAppService.syncExpirationNotifications(['30_dias', '15_dias', '7_dias', 'hoje', 'vencido']);
+  } catch (inAppErr) {
+    console.warn('[Rotina de Notificação] Aviso ao sincronizar alertas internos:', inAppErr);
   }
 
   console.log(

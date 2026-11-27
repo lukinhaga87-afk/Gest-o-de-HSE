@@ -12,6 +12,30 @@ const ALLOWED_LEGACY_DATA_PREFIXES = [
   'data:image/webp;',
 ];
 
+export const DIRECT_DOCUMENT_URI_PREFIX = 'ehs-direct://';
+
+/**
+ * Resolves internal `ehs-direct://<storageKey>` pointers into authenticated backend download/preview URLs.
+ */
+export function resolveProtectedDocumentUrl(
+  rawUrl?: string | null,
+  fileName?: string
+): string {
+  if (typeof rawUrl !== 'string') return '';
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith(DIRECT_DOCUMENT_URI_PREFIX)) {
+    const storageKey = trimmed.slice(DIRECT_DOCUMENT_URI_PREFIX.length).trim();
+    if (!storageKey) return '';
+    const params = new URLSearchParams({ key: storageKey });
+    if (fileName && fileName.trim()) {
+      params.set('name', fileName.trim());
+    }
+    return `/api/direct-documents/file?${params.toString()}`;
+  }
+  return trimmed;
+}
+
 /**
  * Classifies a stored document URL so the UI handles protected backend endpoints
  * exclusively via authenticated fetch + revocable Blob URL, while blocking dangerous schemes.
@@ -31,7 +55,11 @@ export function classifyDocumentUrl(rawUrl?: string | null): DocumentUrlKind {
     return 'invalid';
   }
 
-  if (trimmed.startsWith('/api/') || trimmed.startsWith('/.netlify/functions/api/')) {
+  if (
+    trimmed.startsWith(DIRECT_DOCUMENT_URI_PREFIX) ||
+    trimmed.startsWith('/api/') ||
+    trimmed.startsWith('/.netlify/functions/api/')
+  ) {
     return 'protected_api';
   }
 
@@ -65,8 +93,8 @@ export function isProtectedApiDocumentUrl(rawUrl?: string | null): boolean {
   return classifyDocumentUrl(rawUrl) === 'protected_api';
 }
 
-export function buildProtectedDownloadUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim();
+export function buildProtectedDownloadUrl(rawUrl: string, fileName?: string): string {
+  const trimmed = resolveProtectedDocumentUrl(rawUrl, fileName);
   const separator = trimmed.includes('?') ? '&' : '?';
   if (/[?&]download=(1|true)(&|$)/i.test(trimmed)) {
     return trimmed;

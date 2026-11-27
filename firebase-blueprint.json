@@ -610,6 +610,38 @@
         "updatedAt": { "type": "string", "maxLength": 40 }
       },
       "required": ["integrationId", "empresaNome", "categoria", "documentoCodigoCanonico", "nomeExibicao", "origemColecao", "obrigatorio", "status", "versaoAtual"]
+    },
+    "inAppNotification": {
+      "title": "Notificação Interna EHS More",
+      "description": "Alertas e comunicados internos persistidos no Firestore para Solicitantes e Administradores EHS com controle de leitura e deduplicação",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "recipientRole": { "type": "string", "enum": ["admin", "solicitante", "all_solicitantes"] },
+        "recipientUserId": { "type": "string", "maxLength": 128 },
+        "empresaId": { "type": "string", "maxLength": 128 },
+        "empresaNome": { "type": "string", "maxLength": 200 },
+        "type": { "type": "string", "maxLength": 80 },
+        "severity": { "type": "string", "enum": ["info", "success", "warning", "critical"] },
+        "title": { "type": "string", "maxLength": 200 },
+        "message": { "type": "string", "maxLength": 1500 },
+        "actionLabel": { "type": "string", "maxLength": 80 },
+        "actionTab": { "type": "string", "maxLength": 60 },
+        "integrationId": { "type": "string", "maxLength": 128 },
+        "companyId": { "type": "string", "maxLength": 128 },
+        "employeeId": { "type": "string", "maxLength": 128 },
+        "documentId": { "type": "string", "maxLength": 128 },
+        "read": { "type": "boolean" },
+        "readAt": { "type": "string", "maxLength": 40 },
+        "readByUserIds": { "type": "array", "description": "IDs de usuários que já leram esta notificação compartilhada" },
+        "createdById": { "type": "string", "maxLength": 128 },
+        "createdByNome": { "type": "string", "maxLength": 180 },
+        "createdByRole": { "type": "string", "enum": ["admin", "solicitante", "auditor", "sistema"] },
+        "idempotencyKey": { "type": "string", "maxLength": 200 },
+        "isDemo": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["recipientRole", "type", "severity", "title", "message", "read", "idempotencyKey", "createdAt"]
     }
   },
   "firestore": {
@@ -704,6 +736,10 @@
     "/contractorIntegrationItems/{itemId}": {
       "schema": "contractorIntegrationItem",
       "description": "Itens documentais versionados e auditáveis da Central de Integração de Terceiros"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "inAppNotification",
+      "description": "Central de Notificações internas (ADM e Solicitante), alertas de vencimento e comunicados direcionados"
     }
   }
 }

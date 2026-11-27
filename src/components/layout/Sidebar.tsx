@@ -113,7 +113,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       key: 'empresas',
-      label: 'Minha Empresa',
+      label: 'Minhas Empresas',
       icon: <Building2 size={18} />,
     },
     {

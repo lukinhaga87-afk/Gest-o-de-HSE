@@ -254,7 +254,7 @@ test('Etapa 5 — Estrutura simplificada de navegação e padronização dos 8 s
   // Ensure all required simplified menu labels exist
   for (const requiredLabel of [
     'Painel da Contratada',
-    'Minha Empresa',
+    'Minhas Empresas',
     'Meus Colaboradores',
     'Envio de Documentos',
     'Gestão de Integração',

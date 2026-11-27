@@ -368,18 +368,34 @@ export async function sendNotificationEmail(
     };
   }
 
-  const subject = `[Gestão SST] ${
-    payload.milestone === 'hoje'
+  const milestoneSubjectLabel =
+    payload.milestone === 'vencido'
+      ? '🚨 VENCIDO'
+      : payload.milestone === 'hoje'
       ? '🚨 VENCE HOJE'
+      : payload.milestone === '7_dias'
+      ? '⚠️ Vence em 7 Dias'
       : payload.milestone === '15_dias'
       ? '⚠️ Vence em 15 Dias'
-      : '⏳ Vence em 30 Dias'
-  }: ${payload.documentTitle} - ${payload.companyName}`;
+      : '⏳ Vence em 30 Dias';
+
+  const milestoneTextLabel =
+    payload.milestone === 'vencido'
+      ? 'VENCIDO'
+      : payload.milestone === 'hoje'
+      ? 'VENCE HOJE'
+      : payload.milestone === '7_dias'
+      ? '7 Dias'
+      : payload.milestone === '15_dias'
+      ? '15 Dias'
+      : '30 Dias';
+
+  const subject = `[Gestão SST] ${milestoneSubjectLabel}: ${payload.documentTitle} - ${payload.companyName}`;
 
   const htmlContent = buildNotificationHtml(payload);
   const textContent = `
 [Gestão SST - Alerta de Vencimento Documental]
-Marco: ${payload.milestone === 'hoje' ? 'VENCE HOJE' : payload.milestone === '15_dias' ? '15 Dias' : '30 Dias'}
+Marco: ${milestoneTextLabel}
 Documento: ${payload.documentTitle}
 Categoria: ${payload.category}
 Empresa: ${payload.companyName}

@@ -231,18 +231,24 @@ test('1. firestore.rules bloqueia acesso direto client SDK em contractorIntegrat
   assert(activityProfilesBlock, 'Bloco activityProfiles deve existir em firestore.rules');
   assert(activityReqsBlock, 'Bloco activityDocumentRequirements deve existir em firestore.rules');
 
-  // Zero public reads / zero direct client writes on contractorIntegrations & contractorIntegrationItems
-  assert.doesNotMatch(integrationsBlock, /allow read:\s*if true/);
-  assert.match(integrationsBlock, /allow read:\s*if false;/);
-  assert.match(integrationsBlock, /allow create:\s*if false/);
-  assert.match(integrationsBlock, /allow update:\s*if false/);
+  // Hardened RBAC/schema guards, anti-self-approval, immutable delete=false on contractorIntegrations & contractorIntegrationItems
+  assert.match(integrationsBlock, /isValidContractorIntegration\(request\.resource\.data\)/);
+  assert.match(integrationsBlock, /isValidIntegrationTransition\(request\.resource\.data, true\)/);
+  assert.match(integrationsBlock, /isValidIntegrationTransition\(request\.resource\.data, false\)/);
   assert.match(integrationsBlock, /allow delete:\s*if false;/);
 
-  assert.doesNotMatch(itemsBlock, /allow read:\s*if true/);
-  assert.match(itemsBlock, /allow read:\s*if false;/);
-  assert.match(itemsBlock, /allow create:\s*if false/);
-  assert.match(itemsBlock, /allow update:\s*if false/);
+  assert.match(itemsBlock, /isValidContractorIntegrationItem\(request\.resource\.data\)/);
+  assert.match(itemsBlock, /isValidIntegrationItemReview\(request\.resource\.data\)/);
   assert.match(itemsBlock, /allow delete:\s*if false;/);
+
+  // Notifications collection secured with immutable content and delete=false
+  const notificationsBlock = rulesText.match(
+    /match \/notifications\/\{notificationId\}\s*\{[\s\S]*?\n\s*\}/
+  )?.[0];
+  assert(notificationsBlock, 'Bloco notifications deve existir em firestore.rules');
+  assert.match(notificationsBlock, /isValidNotification\(request\.resource\.data\)/);
+  assert.match(notificationsBlock, /affectedKeys\(\)\.hasOnly\(\['read', 'readAt', 'readByUserIds'\]\)/);
+  assert.match(notificationsBlock, /allow delete:\s*if false;/);
 
   // PENDENTE_DOCUMENTACAO and Base64 rejection helper present in firestore.rules
   assert.match(rulesText, /function isValidIntegrationStatus\(status\)/);

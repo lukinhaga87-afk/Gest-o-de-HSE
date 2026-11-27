@@ -11,6 +11,7 @@ export interface UserProfile {
   role: UserRole;
   empresaId?: string;
   empresaNome?: string;
+  empresaIds?: string[]; // Múltiplas empresas vinculadas ao Solicitante (retrocompatível com empresaId)
   cargo?: string;
   telefone?: string;
   passwordHash?: string;
@@ -82,6 +83,8 @@ export interface Company {
     dataValidade?: string;
   }[];
   solicitacoesAlteracao?: CompanyChangeRequest[];
+  solicitantesAutorizadosIds?: string[]; // IDs dos Solicitantes autorizados a gerenciar esta empresa
+  criadoPorId?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -127,6 +130,7 @@ export interface DocumentVersion {
   versao: number;
   arquivoUrl: string;
   arquivoNome: string;
+  arquivoHashSha256?: string;
   dataEnvio: string;
   responsavelEnvio: string;
   observacoes?: string;
@@ -161,8 +165,25 @@ export interface DocumentSST {
   solicitacaoCodigo?: string;
   versao: number;
   historicoVersoes?: DocumentVersion[];
+  /** Nova versão enviada enquanto a versão atual ainda está aprovada e vigente (não invalida a versão vigente até aprovação do Admin EHS). */
+  versaoPendente?: PendingDocumentVersion | null;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface PendingDocumentVersion {
+  versao: number;
+  arquivoUrl: string;
+  arquivoNome: string;
+  dataEmissao?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  numeroDocumento?: string;
+  conclusao?: ConclusaoAptidao;
+  observacoes?: string;
+  responsavelEnvio: string;
+  dataEnvio: string;
+  situacao: DocumentStatus;
 }
 
 export interface Training {
@@ -186,6 +207,9 @@ export interface Training {
   motivoReprovacao?: string;
   analisadoPor?: string;
   dataAnalise?: string;
+  versao?: number;
+  historicoVersoes?: DocumentVersion[];
+  versaoPendente?: PendingDocumentVersion | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -223,6 +247,9 @@ export interface OccupationalExam {
   motivoReprovacao?: string;
   analisadoPor?: string;
   dataAnalise?: string;
+  versao?: number;
+  historicoVersoes?: DocumentVersion[];
+  versaoPendente?: PendingDocumentVersion | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -427,7 +454,53 @@ export interface AuditLog {
   dataHora: string;
 }
 
-export type NotificationMilestone = '30_dias' | '15_dias' | 'hoje';
+export type NotificationMilestone = '30_dias' | '15_dias' | '7_dias' | 'hoje' | 'vencido';
+
+export type InAppNotificationRecipientRole = 'admin' | 'solicitante' | 'all_solicitantes';
+export type InAppNotificationSeverity = 'info' | 'success' | 'warning' | 'critical';
+export type InAppNotificationType =
+  | 'INTEGRACAO_ENVIADA'
+  | 'INTEGRACAO_REENVIADA'
+  | 'INTEGRACAO_APROVADA'
+  | 'INTEGRACAO_REPROVADA'
+  | 'INTEGRACAO_AGUARDANDO_COMPLEMENTACAO'
+  | 'INTEGRACAO_AGUARDANDO_DECISAO'
+  | 'DOCUMENTO_APROVADO'
+  | 'DOCUMENTO_REJEITADO'
+  | 'DOCUMENTO_CORRIGIDO'
+  | 'NOVA_EXIGENCIA_DOCUMENTAL'
+  | 'DOCUMENTO_PROXIMO_VENCIMENTO'
+  | 'DOCUMENTO_VENCIDO'
+  | 'COLABORADOR_PENDENTE'
+  | 'NOVA_CONTRATADA'
+  | 'COMUNICADO_ADM';
+
+export interface InAppNotification {
+  id: string;
+  recipientRole: InAppNotificationRecipientRole;
+  recipientUserId?: string;
+  empresaId?: string;
+  empresaNome?: string;
+  type: InAppNotificationType;
+  severity: InAppNotificationSeverity;
+  title: string;
+  message: string;
+  actionLabel?: string;
+  actionTab?: string;
+  integrationId?: string;
+  companyId?: string;
+  employeeId?: string;
+  documentId?: string;
+  read: boolean;
+  readAt?: string;
+  readByUserIds?: string[];
+  createdById?: string;
+  createdByNome?: string;
+  createdByRole?: UserRole | 'sistema';
+  idempotencyKey: string;
+  isDemo?: boolean;
+  createdAt: string;
+}
 
 export type NotificationDispatchType = 'teste' | 'automatico' | 'avulso';
 
@@ -893,7 +966,62 @@ export type IntegrationDocumentGroupId =
   | 'pessoais_legais'
   | 'saude_ocupacional'
   | 'seguranca_trabalho'
-  | 'vinculo_empregaticio';
+  | 'vinculo_empregaticio'
+  | 'atividade_simples';
+
+export type SimpleActivityStatus =
+  | 'PENDENTE_ANALISE'
+  | 'APROVADA'
+  | 'RECUSADA'
+  | 'COMPLEMENTACAO_SOLICITADA';
+
+export interface SimpleActivityHistoryEntry {
+  dataHora: string;
+  usuarioId: string;
+  usuarioNome: string;
+  usuarioRole: UserRole;
+  acao:
+    | 'CRIACAO_ATIVIDADE_SIMPLES'
+    | 'ATUALIZACAO_ATIVIDADE_SIMPLES'
+    | 'DOCUMENTO_ADICIONADO'
+    | 'APROVACAO_ATIVIDADE_SIMPLES'
+    | 'RECUSA_ATIVIDADE_SIMPLES'
+    | 'SOLICITACAO_COMPLEMENTACAO';
+  statusAnterior: SimpleActivityStatus | null;
+  statusNovo: SimpleActivityStatus;
+  detalhes: string;
+  justificativa?: string;
+}
+
+export interface SimpleActivityDocumentInput {
+  nomeDocumento: string;
+  documentoCodigoCanonico?: string;
+  escopo?: 'empresa' | 'colaborador';
+  colaboradorId?: string;
+  colaboradorCandidateId?: string;
+  obrigatorio?: boolean;
+  observacoes?: string;
+}
+
+export interface SimpleActivityEntry {
+  id: string;
+  empresaId?: string;
+  integrationId?: string;
+  nome: string;
+  descricaoServico: string;
+  observacoes?: string;
+  status: SimpleActivityStatus;
+  criadoPorId: string;
+  criadoPorNome: string;
+  criadoPorRole: UserRole;
+  criadoEm: string;
+  atualizadoEm: string;
+  analisadoPorId?: string;
+  analisadoPorNome?: string;
+  dataAnalise?: string;
+  justificativaAnalise?: string;
+  historico: SimpleActivityHistoryEntry[];
+}
 
 export type IntegrationFileStorageProvider =
   | 'local_private'
@@ -1016,6 +1144,8 @@ export interface ContractorIntegrationItem {
   requirementId?: string;
   activityId?: string;
   activityNome?: string;
+  simpleActivityId?: string;
+  simpleActivityNome?: string;
   documentoCodigoCanonico: string;
   nomeExibicao: string;
   origemColecao: IntegrationOfficialCollection;
@@ -1050,11 +1180,71 @@ export interface ContractorIntegrationItem {
   motivoReprovacao?: string;
   officialCollection?: IntegrationOfficialCollection;
   officialRecordId?: string;
+  /** True quando o requisito foi automaticamente atendido por um documento oficial aprovado, vigente e disponível no armazenamento. */
+  reaproveitado?: boolean;
+  reaproveitadoDe?: IntegrationDocumentReuseSource;
+  /** Diagnóstico do documento já existente na base centralizada para este requisito. */
+  situacaoDocumentoExistente?: DocumentReuseResolutionState;
+  documentoExistenteAviso?: string;
+  documentoExistenteId?: string;
+  documentoExistenteColecao?: IntegrationOfficialCollection;
   enviadoPorId?: string;
   enviadoPorNome?: string;
   dataEnvio?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export type DocumentReuseResolutionState =
+  | 'REAPROVEITADO_VALIDO'
+  | 'PENDENTE_APROVACAO'
+  | 'RECUSADO'
+  | 'VENCIDO'
+  | 'ARQUIVO_INDISPONIVEL'
+  | 'AUSENTE';
+
+export interface IntegrationDocumentReuseSource {
+  colecao: IntegrationOfficialCollection;
+  registroId: string;
+  versao?: number;
+  aprovadoPor?: string;
+  dataAprovacao?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  storageKey?: string;
+  arquivoNome?: string;
+}
+
+export interface IntegrationReusePreviewItem {
+  categoria: IntegrationItemCategory;
+  colaboradorId?: string;
+  colaboradorNome?: string;
+  documentoCodigoCanonico: string;
+  nomeExibicao: string;
+  origemColecao: IntegrationOfficialCollection;
+  obrigatorio: boolean;
+  situacao: DocumentReuseResolutionState;
+  reaproveitado: boolean;
+  aviso?: string;
+  arquivoNome?: string;
+  dataValidade?: string;
+  semValidade?: boolean;
+  officialRecordId?: string;
+  motivoReprovacao?: string;
+  simpleActivityId?: string;
+  simpleActivityNome?: string;
+}
+
+export interface IntegrationReusePreviewResult {
+  empresaId: string;
+  empresaNome: string;
+  totalRequisitos: number;
+  reaproveitadosAprovados: number;
+  pendentesAprovacao: number;
+  ausentes: number;
+  vencidos: number;
+  recusados: number;
+  itens: IntegrationReusePreviewItem[];
 }
 
 export interface ContractorIntegrationSummaryCounts {
@@ -1104,6 +1294,12 @@ export interface IntegrationSubmissionReadiness {
   obrigatoriosPendentes: number;
   totalOpcionais: number;
   opcionaisEnviados: number;
+  /** Contadores consolidados da Etapa 4 (Resumo Único de Entrega Documental). */
+  reaproveitadosAprovados?: number;
+  novosEnviados?: number;
+  pendentesAprovacaoExistentes?: number;
+  recusados?: number;
+  atualizacaoNecessaria?: number;
   pendenciasObrigatorias: IntegrationPendingDocumentInfo[];
   porColaborador?: IntegrationCollaboratorReadiness[];
   resumoBloqueio?: string;
@@ -1121,6 +1317,7 @@ export interface ContractorIntegration {
   empresaPendenteCadastro?: boolean;
   atividadeIds: string[];
   atividadeNomes: string[];
+  atividadesSimples?: SimpleActivityEntry[];
   colaboradorIds: string[];
   colaboradoresCandidatos: IntegrationEmployeeCandidate[];
   observacoes?: string;
@@ -1142,6 +1339,7 @@ export interface ContractorIntegration {
   resumoItens: ContractorIntegrationSummaryCounts;
   versaoConcorrencia: number;
   historicoWorkflow: IntegrationWorkflowHistoryEntry[];
+  isDemo?: boolean;
   createdAt: string;
   updatedAt: string;
 }

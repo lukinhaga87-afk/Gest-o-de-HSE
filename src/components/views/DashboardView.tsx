@@ -30,6 +30,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const {
     companies,
     employees,
+    documents,
+    trainings,
+    exams,
     contractorIntegrations,
     contractorIntegrationItems,
     listIntegrationsOnServer,
@@ -49,6 +52,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     }
   };
 
+  // Unified Official Base + Integration Queue indicators (strictly counting ONLY approved records as valid/compliant)
   const docStats = useMemo(() => {
     const byStatus: Record<StandardizedDocStatus, number> = {
       NAO_ENVIADO: 0,
@@ -61,17 +65,165 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
       PROXIMO_VENCIMENTO: 0,
     };
 
+    const linkedOfficial = new Set<string>();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const classifyExpiry = (validade?: string, semValidade?: boolean): 'valid' | 'expiring' | 'expired' => {
+      if (semValidade || !validade) return 'valid';
+      const dt = new Date(`${validade.slice(0, 10)}T00:00:00`);
+      if (Number.isNaN(dt.getTime())) return 'valid';
+      const diffDays = Math.ceil((dt.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+      if (diffDays < 0) return 'expired';
+      if (diffDays <= 30) return 'expiring';
+      return 'valid';
+    };
+
+    let trainingsExpiring = 0;
+    let trainingsExpired = 0;
+    let docsExpiring = 0;
+    let docsExpired = 0;
+    let directPendingAnalysis = 0;
+    let directRejected = 0;
+
     for (const item of contractorIntegrationItems) {
+      if (item.officialRecordId) {
+        linkedOfficial.add(`${item.officialCollection || 'documents'}:${item.officialRecordId}`);
+      }
       const st = resolveIntegrationItemStandardizedStatus(item, item.protocoloStatus);
       byStatus[st] += 1;
+      if (item.status === 'APROVADO') {
+        const exp = classifyExpiry(item.dataValidade, item.semValidade);
+        if (item.origemColecao === 'trainings') {
+          if (exp === 'expired') trainingsExpired += 1;
+          else if (exp === 'expiring') trainingsExpiring += 1;
+        } else {
+          if (exp === 'expired') docsExpired += 1;
+          else if (exp === 'expiring') docsExpiring += 1;
+        }
+      }
     }
 
-    const total = contractorIntegrationItems.length;
-    const complianceRate =
-      total > 0 ? Math.round(((byStatus.APROVADO + byStatus.PROXIMO_VENCIMENTO) / total) * 100) : 0;
+    // Complement with official documents/exams/trainings not already represented by integration items
+    for (const doc of documents) {
+      if (linkedOfficial.has(`documents:${doc.id}`)) continue;
+      if (doc.situacao === 'pendente') {
+        byStatus.AGUARDANDO_ANALISE += 1;
+        directPendingAnalysis += 1;
+      } else if (doc.situacao === 'reprovado') {
+        byStatus.REPROVADO += 1;
+        directRejected += 1;
+      } else if (doc.situacao === 'aprovado') {
+        const exp = classifyExpiry(doc.dataValidade, doc.semValidade);
+        if (exp === 'expired') {
+          byStatus.VENCIDO += 1;
+          docsExpired += 1;
+        } else if (exp === 'expiring') {
+          byStatus.PROXIMO_VENCIMENTO += 1;
+          docsExpiring += 1;
+        } else {
+          byStatus.APROVADO += 1;
+        }
+      }
+    }
 
-    return { byStatus, total, complianceRate };
-  }, [contractorIntegrationItems]);
+    for (const ex of exams) {
+      if (linkedOfficial.has(`exams:${ex.id}`)) continue;
+      if (ex.situacao === 'pendente') {
+        byStatus.AGUARDANDO_ANALISE += 1;
+        directPendingAnalysis += 1;
+      } else if (ex.situacao === 'reprovado') {
+        byStatus.REPROVADO += 1;
+        directRejected += 1;
+      } else if (ex.situacao === 'aprovado') {
+        const exp = classifyExpiry(ex.dataValidade, ex.semValidade);
+        if (exp === 'expired') {
+          byStatus.VENCIDO += 1;
+          docsExpired += 1;
+        } else if (exp === 'expiring') {
+          byStatus.PROXIMO_VENCIMENTO += 1;
+          docsExpiring += 1;
+        } else {
+          byStatus.APROVADO += 1;
+        }
+      }
+    }
+
+    for (const tr of trainings) {
+      if (linkedOfficial.has(`trainings:${tr.id}`)) continue;
+      if (tr.situacao === 'pendente') {
+        byStatus.AGUARDANDO_ANALISE += 1;
+        directPendingAnalysis += 1;
+      } else if (tr.situacao === 'reprovado') {
+        byStatus.REPROVADO += 1;
+        directRejected += 1;
+      } else if (tr.situacao === 'aprovado') {
+        const exp = classifyExpiry(tr.dataValidade, tr.semValidade);
+        if (exp === 'expired') {
+          byStatus.VENCIDO += 1;
+          trainingsExpired += 1;
+        } else if (exp === 'expiring') {
+          byStatus.PROXIMO_VENCIMENTO += 1;
+          trainingsExpiring += 1;
+        } else {
+          byStatus.APROVADO += 1;
+        }
+      }
+    }
+
+    const total = Object.values(byStatus).reduce((acc, n) => acc + n, 0);
+    // Official Base Rule: ONLY approved & non-expired records count as compliant
+    const validOfficial = byStatus.APROVADO + byStatus.PROXIMO_VENCIMENTO;
+    const complianceRate = total > 0 ? Math.round((validOfficial / total) * 100) : 0;
+
+    return {
+      byStatus,
+      total,
+      validOfficial,
+      complianceRate,
+      trainingsExpiring,
+      trainingsExpired,
+      docsExpiring,
+      docsExpired,
+      directPendingAnalysis,
+      directRejected,
+    };
+  }, [contractorIntegrationItems, documents, exams, trainings]);
+
+  const integrationMetrics = useMemo(() => {
+    const completed = contractorIntegrations.filter((i) => i.status === 'APROVADA').length;
+    const inProgress = contractorIntegrations.filter((i) =>
+      [
+        'RASCUNHO',
+        'PENDENTE_DOCUMENTACAO',
+        'EM_ENVIO',
+        'ENVIADA',
+        'AGUARDANDO_ANALISE',
+        'EM_ANALISE',
+        'PENDENTE_CORRECAO',
+        'REENVIADA',
+      ].includes(i.status)
+    ).length;
+
+    const integratedEmpIds = new Set<string>();
+    for (const integ of contractorIntegrations) {
+      if (integ.status !== 'APROVADA') continue;
+      (integ.colaboradorIds || []).forEach((id) => integratedEmpIds.add(id));
+      (integ.colaboradoresCandidatos || []).forEach((nc) => {
+        const resolvedId = nc.aprovadoEmployeeId || nc.colaboradorId;
+        if (resolvedId) integratedEmpIds.add(resolvedId);
+      });
+    }
+    for (const emp of employees) {
+      if (emp.dataIntegracao) integratedEmpIds.add(emp.id);
+    }
+
+    return {
+      completed,
+      inProgress,
+      integratedEmployeesCount: integratedEmpIds.size,
+    };
+  }, [contractorIntegrations, employees]);
 
   const companySummaryRows = useMemo(() => {
     return companies.map((comp) => {
@@ -126,6 +278,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const activeCompaniesCount = companies.filter((c) => c.situacao === 'ativa').length;
   const activeEmployeesCount = employees.filter((e) => e.situacaoCadastral === 'ativo').length;
   const awaitingDocsCount = docStats.byStatus.AGUARDANDO_ANALISE + docStats.byStatus.EM_ANALISE;
+  const rejectedDocsCount = docStats.byStatus.REPROVADO;
   const alertsCount = docStats.byStatus.VENCIDO + docStats.byStatus.PROXIMO_VENCIMENTO;
 
   return (
@@ -135,10 +288,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
             <ShieldCheck className="text-blue-400" size={22} />
-            Dashboard — Gestão de Contratadas e Integração EHS
+            Dashboard — Gestão de Terceiros e Integrações EHS
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Indicadores reais consolidados de empresas terceiras, colaboradores, análises documentais e controle de vencimentos.
+            Indicadores consolidados da base oficial aprovada, fila de análise documental, integrações e vencimentos. Documentos pendentes ou recusados nunca contam como conformes.
           </p>
         </div>
 
@@ -163,86 +316,124 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
         </div>
       </div>
 
-      {/* Primary KPI Row */}
+      {/* 4-Color Traffic Light Legend */}
+      <div className="flex flex-wrap items-center gap-3 text-[11px] bg-slate-900/80 border border-slate-800 rounded-xl px-4 py-2.5">
+        <span className="font-semibold text-slate-300 uppercase tracking-wider text-[10px]">
+          Legenda de Conformidade:
+        </span>
+        <span className="inline-flex items-center gap-1.5 text-emerald-300">
+          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+          Verde: Válido e Aprovado
+        </span>
+        <span className="inline-flex items-center gap-1.5 text-amber-300">
+          <span className="h-2 w-2 rounded-full bg-amber-400" />
+          Amarelo: Próximo do Vencimento (≤ 30d)
+        </span>
+        <span className="inline-flex items-center gap-1.5 text-rose-300">
+          <span className="h-2 w-2 rounded-full bg-rose-400" />
+          Vermelho: Vencido / Recusado / Crítico
+        </span>
+        <span className="inline-flex items-center gap-1.5 text-slate-300">
+          <span className="h-2 w-2 rounded-full bg-slate-400" />
+          Cinza: Pendente / Não Informado
+        </span>
+      </div>
+
+      {/* Primary KPI Row (Section 9 Complete Set) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <button
           type="button"
-          onClick={() => onNavigate('empresas')}
-          className="text-left p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-blue-500/40 transition-colors"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              Empresas Contratadas
-            </span>
-            <Building2 size={17} className="text-blue-400" />
-          </div>
-          <p className="text-2xl font-extrabold text-white mt-2">{companies.length}</p>
-          <p className="text-[11px] text-emerald-400 mt-1">{activeCompaniesCount} ativa(s)</p>
-        </button>
-
-        <button
-          type="button"
           onClick={() => onNavigate('colaboradores')}
-          className="text-left p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-blue-500/40 transition-colors"
+          className="text-left p-4 rounded-xl bg-slate-900 border border-emerald-500/30 hover:border-emerald-400/60 transition-colors"
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              Colaboradores
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">
+              Colaboradores Integrados
             </span>
-            <Users size={17} className="text-indigo-400" />
+            <Users size={17} className="text-emerald-400" />
           </div>
-          <p className="text-2xl font-extrabold text-white mt-2">{employees.length}</p>
-          <p className="text-[11px] text-slate-400 mt-1">{activeEmployeesCount} ativo(s)</p>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onNavigate('analise_documental')}
-          className="text-left p-4 rounded-xl bg-slate-900 border border-sky-500/30 hover:border-sky-400/60 transition-colors"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-sky-300">
-              Fila de Análise
-            </span>
-            <Clock size={17} className="text-sky-400" />
-          </div>
-          <p className="text-2xl font-extrabold text-white mt-2">{awaitingDocsCount}</p>
-          <p className="text-[11px] text-slate-400 mt-1">
-            {docStats.byStatus.AGUARDANDO_ANALISE} aguardando · {docStats.byStatus.EM_ANALISE} em análise
+          <p className="text-2xl font-extrabold text-white mt-2">
+            {integrationMetrics.integratedEmployeesCount}
           </p>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onNavigate('controle_vencimentos')}
-          className="text-left p-4 rounded-xl bg-slate-900 border border-orange-500/30 hover:border-orange-400/60 transition-colors"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-orange-300">
-              Alertas de Validade
-            </span>
-            <CalendarClock size={17} className="text-orange-400" />
-          </div>
-          <p className="text-2xl font-extrabold text-white mt-2">{alertsCount}</p>
           <p className="text-[11px] text-slate-400 mt-1">
-            {docStats.byStatus.VENCIDO} vencido(s) · {docStats.byStatus.PROXIMO_VENCIMENTO} próx. venc.
+            de {employees.length} cadastrado(s) ({activeEmployeesCount} ativo(s))
           </p>
         </button>
 
         <button
           type="button"
           onClick={() => onNavigate('gestao_integracoes')}
-          className="text-left p-4 rounded-xl bg-slate-900 border border-emerald-500/30 hover:border-emerald-400/60 transition-colors"
+          className="text-left p-4 rounded-xl bg-slate-900 border border-blue-500/30 hover:border-blue-400/60 transition-colors"
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">
-              Conformidade Real
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-blue-300">
+              Integrações
             </span>
-            <CheckCircle2 size={17} className="text-emerald-400" />
+            <FolderCheck size={17} className="text-blue-400" />
           </div>
-          <p className="text-2xl font-extrabold text-white mt-2">{docStats.complianceRate}%</p>
+          <p className="text-2xl font-extrabold text-white mt-2">
+            {integrationMetrics.completed}{' '}
+            <span className="text-xs font-semibold text-slate-400">concluída(s)</span>
+          </p>
+          <p className="text-[11px] text-amber-300 mt-1">
+            {integrationMetrics.inProgress} em andamento · {activeCompaniesCount}/{companies.length} emp.
+          </p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate('analise_documental')}
+          className="text-left p-4 rounded-xl bg-slate-900 border border-slate-700 hover:border-sky-400/60 transition-colors"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-sky-300">
+              Análise & Recusados
+            </span>
+            <Clock size={17} className="text-sky-400" />
+          </div>
+          <p className="text-2xl font-extrabold text-white mt-2">{awaitingDocsCount}</p>
+          <p className="text-[11px] text-rose-300 mt-1">
+            {rejectedDocsCount} recusado(s) aguardando correção
+          </p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate('controle_vencimentos')}
+          className="text-left p-4 rounded-xl bg-slate-900 border border-amber-500/30 hover:border-amber-400/60 transition-colors"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
+              Treinamentos (Vencimentos)
+            </span>
+            <CalendarClock size={17} className="text-amber-400" />
+          </div>
+          <p className="text-2xl font-extrabold text-white mt-2">
+            {docStats.trainingsExpired + docStats.trainingsExpiring}
+          </p>
           <p className="text-[11px] text-slate-400 mt-1">
-            {docStats.byStatus.APROVADO} aprovado(s) de {docStats.total}
+            <span className="text-rose-400 font-semibold">{docStats.trainingsExpired} vencido(s)</span> ·{' '}
+            <span className="text-amber-300">{docStats.trainingsExpiring} a vencer</span>
+          </p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate('controle_vencimentos')}
+          className="text-left p-4 rounded-xl bg-slate-900 border border-rose-500/30 hover:border-rose-400/60 transition-colors"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-rose-300">
+              Documentos (Vencimentos)
+            </span>
+            <AlertTriangle size={17} className="text-rose-400" />
+          </div>
+          <p className="text-2xl font-extrabold text-white mt-2">
+            {docStats.docsExpired + docStats.docsExpiring}
+          </p>
+          <p className="text-[11px] text-slate-400 mt-1">
+            <span className="text-rose-400 font-semibold">{docStats.docsExpired} vencido(s)</span> ·{' '}
+            <span className="text-amber-300">{docStats.docsExpiring} a vencer</span> · Base Oficial {docStats.complianceRate}% ({alertsCount} alertas)
           </p>
         </button>
       </div>
